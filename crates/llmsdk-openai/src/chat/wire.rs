@@ -87,6 +87,9 @@ pub(crate) struct ChatRequest {
     /// Text-shape configuration (e.g. verbosity).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextOptions>,
+    /// Prompt-cache retention policy (`"in_memory"` / `"24h"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
 }
 
 /// `text` configuration in the request body.

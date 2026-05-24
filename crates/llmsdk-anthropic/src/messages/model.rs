@@ -17,8 +17,9 @@ use crate::config::Inner;
 use crate::error::rewrite_anthropic_error;
 
 use super::convert_prompt::{Converted, convert_prompt};
-use super::options::{ThinkingConfig, parse as parse_provider_options};
+use super::options::{AnthropicChatOptions, ThinkingConfig, parse as parse_provider_options};
 use super::parse_response::parse_response;
+use super::sanitize_json_schema::sanitize_json_schema;
 use super::stream::StreamState;
 use super::stream_event::StreamEvent;
 use super::wire::{
@@ -131,6 +132,10 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single dispatcher mirroring ai-sdk's anthropic-language-model.ts; splitting would obscure the parameter flow"
+)]
 fn build_request(
     model_id: &str,
     options: &CallOptions,
@@ -140,11 +145,13 @@ fn build_request(
     Vec<Warning>,
     std::collections::BTreeSet<String>,
 ) {
+    let provider_opts = parse_provider_options(options.provider_options.as_ref());
+    let send_reasoning = provider_opts.send_reasoning.unwrap_or(true);
     let Converted {
         system,
         messages,
         mut warnings,
-    } = convert_prompt(&options.prompt);
+    } = convert_prompt(&options.prompt, send_reasoning);
 
     if options.frequency_penalty.is_some() {
         warnings.push(Warning::UnsupportedSetting {
@@ -164,22 +171,54 @@ fn build_request(
             details: Some("Anthropic does not support seed".to_owned()),
         });
     }
-    if options.response_format.is_some() {
+    // structuredOutputMode controls whether `response_format` flows into
+    // `output_config.format` (outputFormat) or is dropped (other modes).
+    let structured_output_mode = provider_opts
+        .structured_output_mode
+        .as_deref()
+        .unwrap_or("auto");
+    let output_format = if matches!(structured_output_mode, "outputFormat" | "auto") {
+        match &options.response_format {
+            Some(llmsdk_provider::language_model::ResponseFormat::Json {
+                schema: Some(schema),
+                ..
+            }) => {
+                let raw: serde_json::Value = schema.clone().into();
+                Some(serde_json::json!({
+                    "type": "json_schema",
+                    "schema": sanitize_json_schema(&raw),
+                }))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if options.response_format.is_some() && output_format.is_none() {
         warnings.push(Warning::UnsupportedSetting {
             setting: "responseFormat".to_owned(),
-            details: Some("M7 does not relay responseFormat to Anthropic".to_owned()),
+            details: Some("responseFormat ignored under current structuredOutputMode".to_owned()),
         });
     }
 
     let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let tool_streaming_default = provider_opts.tool_streaming.unwrap_or(true);
     let (tools, tool_choice) = convert_tools(
         options.tools.as_deref(),
         options.tool_choice.as_ref(),
         &mut warnings,
         &mut betas,
+        provider_opts.disable_parallel_tool_use,
+        tool_streaming_default,
     );
 
-    let provider_opts = parse_provider_options(options.provider_options.as_ref());
+    // anthropicBeta extra tokens.
+    if let Some(extra) = &provider_opts.anthropic_beta {
+        for token in extra {
+            betas.insert(token.clone());
+        }
+    }
+
     let (thinking, thinking_budget, thinking_enabled) =
         resolve_thinking(provider_opts.thinking.as_ref());
 
@@ -217,6 +256,54 @@ fn build_request(
         }
     }
 
+    let output_config = build_output_config(&provider_opts, output_format);
+    let metadata = provider_opts
+        .metadata
+        .as_ref()
+        .and_then(|m| m.user_id.as_deref())
+        .map(|user_id| serde_json::json!({ "user_id": user_id }));
+    let mcp_servers = provider_opts.mcp_servers.as_ref().map(|servers| {
+        let arr: Vec<serde_json::Value> = servers
+            .iter()
+            .map(|s| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".to_owned(), serde_json::Value::String(s.kind.clone()));
+                obj.insert("name".to_owned(), serde_json::Value::String(s.name.clone()));
+                obj.insert("url".to_owned(), serde_json::Value::String(s.url.clone()));
+                if let Some(token) = &s.authorization_token {
+                    obj.insert(
+                        "authorization_token".to_owned(),
+                        serde_json::Value::String(token.clone()),
+                    );
+                }
+                if let Some(cfg) = &s.tool_configuration {
+                    let mut tc = serde_json::Map::new();
+                    if let Some(enabled) = cfg.enabled {
+                        tc.insert("enabled".to_owned(), serde_json::Value::Bool(enabled));
+                    }
+                    if let Some(allowed) = &cfg.allowed_tools {
+                        tc.insert(
+                            "allowed_tools".to_owned(),
+                            serde_json::Value::Array(
+                                allowed
+                                    .iter()
+                                    .cloned()
+                                    .map(serde_json::Value::String)
+                                    .collect(),
+                            ),
+                        );
+                    }
+                    obj.insert(
+                        "tool_configuration".to_owned(),
+                        serde_json::Value::Object(tc),
+                    );
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    });
+
     let request = MessagesRequest {
         model: model_id.to_owned(),
         max_tokens,
@@ -232,6 +319,12 @@ fn build_request(
         thinking,
         context_management: provider_opts.context_management.clone(),
         container: provider_opts.container.clone(),
+        output_config,
+        speed: provider_opts.speed.clone(),
+        inference_geo: provider_opts.inference_geo.clone(),
+        cache_control: provider_opts.cache_control.clone(),
+        metadata,
+        mcp_servers,
     };
 
     // Add beta for context_management compaction edits (best-effort guess from
@@ -305,25 +398,172 @@ fn resolve_thinking(config: Option<&ThinkingConfig>) -> (Option<WireThinking>, O
 /// explicit `budgetTokens`. Matches ai-sdk's documented default.
 pub(crate) const DEFAULT_THINKING_BUDGET: u32 = 1024;
 
-/// Map a `Tool::Provider.id` (e.g. `"anthropic.web_search"`) to:
-/// - the on-wire `type` field (e.g. `"web_search_20250305"`)
-/// - the beta-header tokens to enable for this tool
-fn resolve_anthropic_server_tool(id: &str) -> Option<(&'static str, &'static [&'static str])> {
-    match id {
-        "anthropic.web_search" => Some(("web_search_20250305", &["web-search-2025-03-05"])),
-        "anthropic.web_fetch" => Some(("web_fetch_20250910", &["web-fetch-2025-09-10"])),
-        "anthropic.code_execution" => {
-            Some(("code_execution_20250825", &["code-execution-2025-08-25"]))
-        }
-        "anthropic.mcp" => Some(("mcp_20250508", &["mcp-2025-05-08"])),
-        "anthropic.bash" => Some(("bash_20250124", &["code-execution-2025-08-25"])),
-        "anthropic.text_editor" => Some(("text_editor_20250728", &["code-execution-2025-08-25"])),
-        "anthropic.tool_search" => {
-            Some(("tool_search_regex_20251020", &["tool-search-2025-10-20"]))
-        }
-        "anthropic.advisor" => Some(("advisor_20251020", &["advisor-2025-10-20"])),
-        _ => None,
+/// Assemble `output_config` from the provider-option triplet
+/// `(effort, taskBudget, response_format → output_format)`.
+///
+/// Returns `None` when none of them is set, matching ai-sdk's behavior.
+fn build_output_config(
+    provider_opts: &AnthropicChatOptions,
+    output_format: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if provider_opts.effort.is_none()
+        && provider_opts.task_budget.is_none()
+        && output_format.is_none()
+    {
+        return None;
     }
+    let mut obj = serde_json::Map::new();
+    if let Some(effort) = &provider_opts.effort {
+        obj.insert(
+            "effort".to_owned(),
+            serde_json::Value::String(effort.clone()),
+        );
+    }
+    if let Some(budget) = &provider_opts.task_budget {
+        let mut b = serde_json::Map::new();
+        b.insert(
+            "type".to_owned(),
+            serde_json::Value::String(budget.kind.clone()),
+        );
+        b.insert("total".to_owned(), serde_json::json!(budget.total));
+        if let Some(rem) = budget.remaining {
+            b.insert("remaining".to_owned(), serde_json::json!(rem));
+        }
+        obj.insert("task_budget".to_owned(), serde_json::Value::Object(b));
+    }
+    if let Some(fmt) = output_format {
+        obj.insert("format".to_owned(), fmt);
+    }
+    Some(serde_json::Value::Object(obj))
+}
+
+/// Resolved metadata for a versioned Anthropic provider-defined tool.
+struct ServerToolRoute {
+    /// On-wire `type` value.
+    wire_type: &'static str,
+    /// Wire `name` value (overrides the caller-supplied tool name when the
+    /// provider mandates a fixed name — e.g. `text_editor` → `"str_replace_editor"`).
+    /// `None` means "keep caller-supplied name".
+    wire_name: Option<&'static str>,
+    /// Beta-header tokens required to enable this tool.
+    betas: &'static [&'static str],
+}
+
+/// Map a versioned `Tool::Provider.id` (e.g. `"anthropic.web_search_20250305"`)
+/// to its wire metadata.
+///
+/// Mirrors `anthropic-prepare-tools.ts`. The 20 server tools below exhaust
+/// the upstream switch; unknown ids return `None` and the caller emits an
+/// `UnsupportedTool` warning.
+///
+/// Args are flattened from `Tool::Provider.args` directly into the wire
+/// object using **`snake_case`** field names (e.g. `display_width_px`,
+/// not `displayWidthPx`). The upstream ai-sdk `camelCase` → `snake_case`
+/// mapping is not replicated; callers supply the wire names verbatim.
+fn resolve_anthropic_server_tool(id: &str) -> Option<ServerToolRoute> {
+    let r = |wire_type, wire_name, betas: &'static [&'static str]| ServerToolRoute {
+        wire_type,
+        wire_name,
+        betas,
+    };
+    Some(match id {
+        // code_execution family
+        "anthropic.code_execution_20250522" => r(
+            "code_execution_20250522",
+            Some("code_execution"),
+            &["code-execution-2025-05-22"],
+        ),
+        "anthropic.code_execution_20250825" => r(
+            "code_execution_20250825",
+            Some("code_execution"),
+            &["code-execution-2025-08-25"],
+        ),
+        "anthropic.code_execution_20260120" => {
+            r("code_execution_20260120", Some("code_execution"), &[])
+        }
+        // computer family
+        "anthropic.computer_20241022" => r(
+            "computer_20241022",
+            Some("computer"),
+            &["computer-use-2024-10-22"],
+        ),
+        "anthropic.computer_20250124" => r(
+            "computer_20250124",
+            Some("computer"),
+            &["computer-use-2025-01-24"],
+        ),
+        "anthropic.computer_20251124" => r(
+            "computer_20251124",
+            Some("computer"),
+            &["computer-use-2025-11-24"],
+        ),
+        // text_editor family
+        "anthropic.text_editor_20241022" => r(
+            "text_editor_20241022",
+            Some("str_replace_editor"),
+            &["computer-use-2024-10-22"],
+        ),
+        "anthropic.text_editor_20250124" => r(
+            "text_editor_20250124",
+            Some("str_replace_editor"),
+            &["computer-use-2025-01-24"],
+        ),
+        "anthropic.text_editor_20250429" => r(
+            "text_editor_20250429",
+            Some("str_replace_based_edit_tool"),
+            &["computer-use-2025-01-24"],
+        ),
+        "anthropic.text_editor_20250728" => r(
+            "text_editor_20250728",
+            Some("str_replace_based_edit_tool"),
+            &[],
+        ),
+        // bash family
+        "anthropic.bash_20241022" => r("bash_20241022", Some("bash"), &["computer-use-2024-10-22"]),
+        "anthropic.bash_20250124" => r("bash_20250124", Some("bash"), &["computer-use-2025-01-24"]),
+        // memory
+        "anthropic.memory_20250818" => r(
+            "memory_20250818",
+            Some("memory"),
+            &["context-management-2025-06-27"],
+        ),
+        // web_fetch family
+        "anthropic.web_fetch_20250910" => r(
+            "web_fetch_20250910",
+            Some("web_fetch"),
+            &["web-fetch-2025-09-10"],
+        ),
+        "anthropic.web_fetch_20260209" => r(
+            "web_fetch_20260209",
+            Some("web_fetch"),
+            &["code-execution-web-tools-2026-02-09"],
+        ),
+        // web_search family
+        "anthropic.web_search_20250305" => r("web_search_20250305", Some("web_search"), &[]),
+        "anthropic.web_search_20260209" => r(
+            "web_search_20260209",
+            Some("web_search"),
+            &["code-execution-web-tools-2026-02-09"],
+        ),
+        // tool_search family
+        "anthropic.tool_search_regex_20251119" => r(
+            "tool_search_tool_regex_20251119",
+            Some("tool_search_tool_regex"),
+            &[],
+        ),
+        "anthropic.tool_search_bm25_20251119" => r(
+            "tool_search_tool_bm25_20251119",
+            Some("tool_search_tool_bm25"),
+            &[],
+        ),
+        // advisor
+        "anthropic.advisor_20260301" => r(
+            "advisor_20260301",
+            Some("advisor"),
+            &["advisor-tool-2026-03-01"],
+        ),
+        _ => return None,
+    })
 }
 
 /// `Anthropic` requires the first message to be a user message. If we
@@ -350,9 +590,18 @@ fn convert_tools(
     choice: Option<&ToolChoice>,
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    disable_parallel_tool_use: Option<bool>,
+    tool_streaming_default: bool,
 ) -> (Option<Vec<WireTool>>, Option<WireToolChoice>) {
     let Some(tools) = tools else {
-        return (None, None);
+        // No tools but disable_parallel_tool_use was still requested — ai-sdk
+        // emits a tool_choice anyway. We mirror that for parity.
+        return (
+            None,
+            disable_parallel_tool_use.map(|flag| WireToolChoice::Auto {
+                disable_parallel_tool_use: Some(flag),
+            }),
+        );
     };
     let converted: Vec<_> = tools
         .iter()
@@ -361,15 +610,20 @@ fn convert_tools(
                 name: f.name.clone(),
                 description: f.description.clone(),
                 input_schema: f.input_schema.clone().into(),
+                eager_input_streaming: tool_streaming_default.then_some(true),
             })),
             Tool::Provider(p) => {
-                if let Some((wire_type, betas_iter)) = resolve_anthropic_server_tool(&p.id) {
-                    for b in betas_iter {
+                if let Some(route) = resolve_anthropic_server_tool(&p.id) {
+                    for b in route.betas {
                         betas.insert((*b).to_owned());
                     }
+                    let name = route
+                        .wire_name
+                        .map(str::to_owned)
+                        .or_else(|| Some(p.name.clone()));
                     Some(WireTool::Server(super::wire::WireServerTool {
-                        kind: wire_type.to_owned(),
-                        name: Some(p.name.clone()),
+                        kind: route.wire_type.to_owned(),
+                        name,
                         args: p.args.clone().unwrap_or_default(),
                     }))
                 } else {
@@ -388,24 +642,41 @@ fn convert_tools(
     if converted.is_empty() {
         return (None, None);
     }
-    let tool_choice = choice.map(|c| match c {
-        // Anthropic has no explicit "none" — downgrade to "auto" and warn.
-        ToolChoice::Auto | ToolChoice::None => {
-            if matches!(c, ToolChoice::None) {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "toolChoice".to_owned(),
-                    details: Some(
-                        "Anthropic has no `none` tool choice; downgraded to `auto`".to_owned(),
-                    ),
-                });
-            }
-            WireToolChoice::Auto
-        }
-        ToolChoice::Required => WireToolChoice::Any,
-        ToolChoice::Tool { tool_name } => WireToolChoice::Tool {
-            name: tool_name.clone(),
+    let dpu = disable_parallel_tool_use;
+    let tool_choice = choice.map_or_else(
+        // Caller didn't pick a choice — emit only if disable_parallel_tool_use
+        // was set, matching ai-sdk's behavior.
+        || {
+            dpu.map(|flag| WireToolChoice::Auto {
+                disable_parallel_tool_use: Some(flag),
+            })
         },
-    });
+        |c| {
+            Some(match c {
+                ToolChoice::Auto | ToolChoice::None => {
+                    if matches!(c, ToolChoice::None) {
+                        warnings.push(Warning::UnsupportedSetting {
+                            setting: "toolChoice".to_owned(),
+                            details: Some(
+                                "Anthropic has no `none` tool choice; downgraded to `auto`"
+                                    .to_owned(),
+                            ),
+                        });
+                    }
+                    WireToolChoice::Auto {
+                        disable_parallel_tool_use: dpu,
+                    }
+                }
+                ToolChoice::Required => WireToolChoice::Any {
+                    disable_parallel_tool_use: dpu,
+                },
+                ToolChoice::Tool { tool_name } => WireToolChoice::Tool {
+                    name: tool_name.clone(),
+                    disable_parallel_tool_use: dpu,
+                },
+            })
+        },
+    );
     (Some(converted), tool_choice)
 }
 

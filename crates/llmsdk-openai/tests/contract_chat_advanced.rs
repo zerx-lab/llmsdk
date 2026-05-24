@@ -476,3 +476,214 @@ async fn stream_relays_annotations_and_logprobs_metadata() {
     let logprobs = openai.get("logprobs").expect("logprobs entry");
     assert!(logprobs.is_array());
 }
+
+// ---------- new option transport (review fix-pack) --------------------
+
+#[tokio::test]
+async fn prompt_cache_retention_relays() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "gpt-5.1",
+            "prompt_cache_retention": "24h",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-5.1")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"promptCacheRetention": "24h"}));
+    provider(&server)
+        .chat("gpt-5.1")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("relays prompt_cache_retention");
+}
+
+#[tokio::test]
+async fn prompt_cache_retention_invalid_emits_warning() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-4o")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"promptCacheRetention": "bogus"}));
+    let res = provider(&server)
+        .chat("gpt-4o")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    assert!(res.warnings.iter().any(|w| matches!(
+        w,
+        Warning::UnsupportedSetting { setting, .. } if setting == "openai.promptCacheRetention"
+    )));
+}
+
+#[tokio::test]
+async fn system_message_mode_remove_drops_system_with_warning() {
+    let server = MockServer::start().await;
+    // The outgoing body must NOT contain any system or developer role messages.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-4o")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"systemMessageMode": "remove"}));
+    let res = provider(&server)
+        .chat("gpt-4o")
+        .do_generate(CallOptions {
+            prompt: vec![system("be helpful"), user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    assert!(res.warnings.iter().any(|w| matches!(
+        w,
+        Warning::Other { message } if message.contains("system message removed")
+    )));
+}
+
+#[tokio::test]
+async fn system_message_mode_developer_forces_role() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "messages": [
+                {"role": "developer", "content": "be helpful"},
+                {"role": "user", "content": "hi"}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-4o")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"systemMessageMode": "developer"}));
+    provider(&server)
+        .chat("gpt-4o")
+        .do_generate(CallOptions {
+            prompt: vec![system("be helpful"), user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("forces developer role");
+}
+
+#[tokio::test]
+async fn explicit_max_completion_tokens_takes_precedence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "o3",
+            "max_completion_tokens": 999,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("o3")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"maxCompletionTokens": 999}));
+    provider(&server)
+        .chat("o3")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            // Even with max_output_tokens, the provider option wins.
+            max_output_tokens: Some(64),
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+}
+
+#[tokio::test]
+async fn flex_processing_dropped_for_unsupported_model() {
+    let server = MockServer::start().await;
+    // gpt-4o does not support flex processing — `service_tier` must be omitted.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-4o")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"serviceTier": "flex"}));
+    let res = provider(&server)
+        .chat("gpt-4o")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    assert!(res.warnings.iter().any(|w| matches!(
+        w,
+        Warning::UnsupportedSetting { setting, details } if setting == "serviceTier"
+            && details.as_deref().unwrap_or("").contains("flex processing")
+    )));
+}
+
+#[tokio::test]
+async fn priority_processing_rejected_for_gpt5_nano() {
+    let server = MockServer::start().await;
+    // gpt-5-nano is on the priority denylist.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-5-nano")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"serviceTier": "priority"}));
+    let res = provider(&server)
+        .chat("gpt-5-nano")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    assert!(res.warnings.iter().any(|w| matches!(
+        w,
+        Warning::UnsupportedSetting { setting, details } if setting == "serviceTier"
+            && details.as_deref().unwrap_or("").contains("priority")
+    )));
+}
+
+#[tokio::test]
+async fn flex_processing_accepted_for_o3() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({"service_tier": "flex"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(empty_choice_response("o3")))
+        .mount(&server)
+        .await;
+
+    let po = provider_options_with_openai(&json!({"serviceTier": "flex"}));
+    provider(&server)
+        .chat("o3")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(po),
+            ..Default::default()
+        })
+        .await
+        .expect("flex relays for o3");
+}

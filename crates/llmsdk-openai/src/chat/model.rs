@@ -182,6 +182,10 @@ where
 }
 
 /// Build the wire request and collect warnings about dropped settings.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single dispatcher mirroring ai-sdk's openai-chat-language-model.ts; splitting would obscure the parameter flow"
+)]
 fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<Warning>) {
     let provider_opts = parse_provider_options(options.provider_options.as_ref());
     let caps = Capabilities::detect(model_id);
@@ -198,13 +202,31 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         .clone()
         .or_else(|| options.reasoning.and_then(reasoning_effort_wire_value));
 
-    // System-message role: reasoning models accept `developer` instead of `system`.
-    let system_role = if is_reasoning_model {
+    // System-message role: provider option `systemMessageMode` wins; otherwise
+    // reasoning models default to `developer`, all others to `system`.
+    let auto_role = if is_reasoning_model {
         SystemRole::Developer
     } else {
         SystemRole::System
     };
+    let system_role = match provider_opts.system_message_mode.as_deref() {
+        Some("system") => SystemRole::System,
+        Some("developer") => SystemRole::Developer,
+        Some("remove") => SystemRole::Remove,
+        _ => auto_role,
+    };
     let (messages, mut warnings) = convert_prompt(&options.prompt, system_role);
+
+    if let Some(mode) = provider_opts.system_message_mode.as_deref()
+        && !matches!(mode, "system" | "developer" | "remove")
+    {
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "openai.systemMessageMode".to_owned(),
+            details: Some(format!(
+                "unknown systemMessageMode '{mode}' — must be one of system/developer/remove"
+            )),
+        });
+    }
 
     if options.top_k.is_some() {
         warnings.push(Warning::UnsupportedSetting {
@@ -224,18 +246,47 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         &mut warnings,
     );
 
-    // Validate service_tier values (mirrors ai-sdk).
+    // Validate service_tier: format check + per-model capability check (flex/priority).
     let service_tier = provider_opts.service_tier.clone().filter(|tier| {
-        let ok = matches!(tier.as_str(), "auto" | "default" | "flex" | "priority");
-        if !ok {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "openai.serviceTier".to_owned(),
-                details: Some(format!(
-                    "unknown service_tier '{tier}' — must be one of auto/default/flex/priority"
-                )),
-            });
+        match tier.as_str() {
+            "auto" | "default" => true,
+            "flex" => {
+                if caps.supports_flex_processing {
+                    true
+                } else {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "serviceTier".to_owned(),
+                        details: Some(
+                            "flex processing is only available for o3, o4-mini, and gpt-5 models"
+                                .to_owned(),
+                        ),
+                    });
+                    false
+                }
+            }
+            "priority" => {
+                if caps.supports_priority_processing {
+                    true
+                } else {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "serviceTier".to_owned(),
+                        details: Some(
+                            "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_owned(),
+                        ),
+                    });
+                    false
+                }
+            }
+            tier => {
+                warnings.push(Warning::UnsupportedSetting {
+                    setting: "openai.serviceTier".to_owned(),
+                    details: Some(format!(
+                        "unknown service_tier '{tier}' — must be one of auto/default/flex/priority"
+                    )),
+                });
+                false
+            }
         }
-        ok
     });
 
     let text = provider_opts
@@ -251,7 +302,7 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         stream: None,
         stream_options: None,
         max_tokens: options.max_output_tokens,
-        max_completion_tokens: None,
+        max_completion_tokens: provider_opts.max_completion_tokens,
         temperature: options.temperature,
         top_p: options.top_p,
         frequency_penalty: options.frequency_penalty,
@@ -279,6 +330,18 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         logit_bias: provider_opts.logit_bias.clone(),
         user: provider_opts.user.clone(),
         text,
+        prompt_cache_retention: provider_opts.prompt_cache_retention.clone().filter(|v| {
+            let ok = matches!(v.as_str(), "in_memory" | "24h");
+            if !ok {
+                warnings.push(Warning::UnsupportedSetting {
+                    setting: "openai.promptCacheRetention".to_owned(),
+                    details: Some(format!(
+                        "unknown promptCacheRetention '{v}' — must be 'in_memory' or '24h'"
+                    )),
+                });
+            }
+            ok
+        }),
     };
 
     if is_reasoning_model {
@@ -394,11 +457,14 @@ fn reasoning_effort_wire_value(effort: ReasoningEffort) -> Option<String> {
     }
 }
 
-/// Where to send system messages — controlled by reasoning-model detection.
+/// Where to send system messages — controlled by reasoning-model detection
+/// or the `systemMessageMode` provider option.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SystemRole {
     System,
     Developer,
+    /// Drop system messages entirely (matches ai-sdk's `'remove'` mode).
+    Remove,
 }
 
 fn convert_response_format(fmt: &ResponseFormat, strict: bool) -> WireResponseFormat {

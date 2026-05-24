@@ -2,12 +2,19 @@
 
 > 入口文件：跨里程碑追踪所有 deferred / TODO 项目；任何阶段性停顿都先记到这里。
 
-## 当前里程碑：M10 完成 ✓
+## 当前里程碑：M10 + M10.5 review fix-pack 完成 ✓
 
 M10 单一阶段对齐了 ai-sdk v4 的 OpenAI / Anthropic provider 全部推迟特性 + 三个
-模型表面的 middleware + 内置 5 个 ai-sdk 风格 middleware + schemars 切换。191
-个 workspace 测试全绿；`cargo fmt --check`、`cargo clippy -- -D warnings` 通过。
-设计文档 `architecture/0003-m10-design.md`。
+模型表面的 middleware + 内置 5 个 ai-sdk 风格 middleware + schemars 切换。
+
+M10.5 review fix-pack 补齐 ai-sdk Chat API 对齐审核中发现的所有偏差：trait 层 2
+处（StreamPart 加 File/ReasoningFile variant + Tool::Provider wire tag 改为
+"provider"）+ OpenAI Chat 3 个 provider options + capabilities flex/priority 模型
+能力检查 + Anthropic Messages 11 个 provider options + Anthropic 20 个带版本号
+server tool ID 完整对齐（破坏性变更）+ sanitize_json_schema 完整移植。
+
+221 个 workspace 测试全绿（+28 新契约测试）；`cargo fmt --check`、`cargo clippy
+-- -D warnings` 通过。设计文档 `architecture/0003-m10-design.md`。
 
 ## 仍然推迟（M11+）
 

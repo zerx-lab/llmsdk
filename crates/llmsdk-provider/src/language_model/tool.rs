@@ -10,6 +10,8 @@ use crate::json::{JsonObject, JsonSchema};
 use crate::shared::ProviderOptions;
 
 /// Either a client-defined function tool or a provider-defined tool.
+///
+/// Wire `type` matches ai-sdk v4 verbatim (`"function"` / `"provider"`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Tool {
@@ -17,7 +19,7 @@ pub enum Tool {
     #[serde(rename = "function")]
     Function(FunctionTool),
     /// Provider-defined tool, e.g. `OpenAI`'s `web_search_preview`.
-    #[serde(rename = "provider-defined")]
+    #[serde(rename = "provider")]
     Provider(ProviderTool),
 }
 

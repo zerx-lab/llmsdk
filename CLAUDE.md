@@ -12,6 +12,7 @@
 - 验证编译时优先 `cargo check -p <crate> --lib`
 - 跑测试时优先 `cargo nextest run -p <crate> <filter>`，不要 `cargo test --workspace`
 - 使用cargo管理依赖，禁止直接编辑`Cargo.toml`进行版本管理
+- 禁止估算任务工作时间，不能因为时长而去过度分割工作
 - 测试 provider 兼容性时调用 `provider-contract-test` skill
 - **禁止"推迟特性到下一里程碑"作为默认**：从 M10 起，新阶段启动前必须列出本阶段
   要实现的**全部**特性并落地；实施中如发现某特性比预期复杂，必须停下来与用户对齐
@@ -57,8 +58,8 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M10 完成。191 个 workspace 测试全绿；`cargo fmt --check`、
-`cargo clippy --workspace --all-targets -- -D warnings` 通过。
+当前进度：M1–M10 + M10.5 review fix-pack 完成。221 个 workspace 测试全绿；
+`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 ```
 M1 ✓ llmsdk-provider 编译通过；trait + 类型 ready
@@ -143,11 +144,49 @@ M10 ✓ 全量 ai-sdk feature parity（除 Gemini / Responses 端点 / Files 端
        默认 1024
      - workspace 健康：191 测试全绿；fmt + clippy -D warnings 通过
      - 设计文档：`architecture/0003-m10-design.md`
+M10.5 ✓ Chat API review fix-pack：
+     - **trait 改动**（已对齐用户）：
+       * StreamPart 新增 `File(FilePart)` + `ReasoningFile { data, media_type,
+         provider_metadata }` variant — 对齐 ai-sdk LanguageModelV4StreamPart
+       * `Tool::Provider` 序列化 tag 从 `"provider-defined"` 改为 `"provider"`
+         — 对齐 ai-sdk v4 wire 格式（破坏性变更）
+     - **OpenAI Chat 补齐 3 项 provider options**：
+       * `promptCacheRetention`（`in_memory` / `24h`）透传到 wire 顶级
+       * `systemMessageMode`（`system` / `developer` / `remove`）手动覆盖
+         自动模式识别 + Remove 变体丢弃 system 消息
+       * `maxCompletionTokens` 显式透传（优先于 max_output_tokens 自动映射）
+       * capabilities.rs 加 `supports_flex_processing` + `supports_priority_processing`；
+         service_tier flex/priority 按模型能力剥离并 warning（之前仅格式校验）
+     - **Anthropic Messages 补齐 11 项 provider options**：
+       sendReasoning（false 时剥离 reasoning 块）/ structuredOutputMode（outputFormat
+       路径走 output_config.format + sanitize_json_schema）/ disableParallelToolUse
+       （进 tool_choice 三个 variant）/ cacheControl（顶级 wire）/ metadata.userId
+       → metadata.user_id / mcpServers（camelCase→snake_case 字段重命名 + 嵌套
+       toolConfiguration）/ toolStreaming（默认 true → 函数工具 eager_input_streaming）
+       / effort + taskBudget（进 output_config）/ speed / inferenceGeo / anthropicBeta
+       （加 anthropic-beta header tokens）
+     - **Anthropic server tools 完整对齐 ai-sdk 上游 20 个带版本号 tool ID**：
+       移除原 8 个简写（anthropic.web_search 等）（破坏性变更），改用 ai-sdk 原始
+       命名：anthropic.code_execution_{20250522,20250825,20260120} /
+       anthropic.computer_{20241022,20250124,20251124} /
+       anthropic.text_editor_{20241022,20250124,20250429,20250728} /
+       anthropic.bash_{20241022,20250124} / anthropic.memory_20250818 /
+       anthropic.web_fetch_{20250910,20260209} /
+       anthropic.web_search_{20250305,20260209} /
+       anthropic.tool_search_{regex,bm25}_20251119 /
+       anthropic.advisor_20260301（旧 anthropic.advisor → advisor_20251020 升版）
+       每个 ID 带正确的 wire `type` + 强制 `name`（如 text_editor → str_replace_*）
+       + 对应 beta header tokens
+     - **新增 sanitize_json_schema 模块**（llmsdk-anthropic 内部）：
+       完整移植 ai-sdk 上游 sanitize-json-schema.ts，零新依赖
+     - workspace 健康：221 测试全绿（+28 新契约测试）；fmt + clippy 通过
+     - 新增契约测试文件：`crates/llmsdk-anthropic/tests/contract_messages_options.rs`
 ```
 
-**已验证的 trait 抽象**：M1–M10 累计 trait 改动仅 5 处（M8 `ImageResult.warnings`
+**已验证的 trait 抽象**：M1–M10.5 累计 trait 改动仅 8 处（M8 `ImageResult.warnings`
 补漏 + M10 `JsonSchema = schemars::Schema`、`ImageOptions.files/mask`、
-`ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails`）。三个模型表面
+`ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails` + M10.5 `StreamPart::File` /
+`StreamPart::ReasoningFile` 两个 variant + `Tool::Provider` wire tag 变更）。三个模型表面
 （Language/Embedding/Image）+ 三层 middleware + 两个 provider 的所有 ai-sdk v4
 特性都基于这套 trait 消化。
 

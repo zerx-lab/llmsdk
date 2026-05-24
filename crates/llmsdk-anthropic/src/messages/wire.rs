@@ -40,6 +40,26 @@ pub(crate) struct MessagesRequest {
     /// `container` Skills configuration (provider-option pass-through).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<serde_json::Value>,
+    /// `output_config` block carrying `effort` / `task_budget` / `format`
+    /// (structured-output schema). Built up from provider options +
+    /// `response_format`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
+    /// Inference speed (`"fast"` / `"standard"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
+    /// Inference geography (`"us"` / `"global"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_geo: Option<String>,
+    /// Request-level `cache_control` hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<serde_json::Value>,
+    /// Request `metadata` (today only `user_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// `mcp_servers` list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<serde_json::Value>,
 }
 
 /// `thinking` request field.
@@ -176,6 +196,9 @@ pub(crate) struct WireFunctionTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: JsonValue,
+    /// `eager_input_streaming` hint (driven by `toolStreaming` provider option).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eager_input_streaming: Option<bool>,
 }
 
 /// Server-tool wire entry: `{type, name?, ...args}`.
@@ -190,12 +213,25 @@ pub(crate) struct WireServerTool {
 }
 
 /// `tool_choice`.
+///
+/// `disable_parallel_tool_use` is supported on every variant
+/// (Anthropic accepts it on `auto`, `any`, and `tool`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WireToolChoice {
-    Auto,
-    Any,
-    Tool { name: String },
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    Any {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
 }
 
 // ---- response ---------------------------------------------------------

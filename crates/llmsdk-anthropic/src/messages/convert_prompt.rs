@@ -33,7 +33,12 @@ pub(crate) struct Converted {
 }
 
 /// Convert a prompt; collect warnings about dropped parts.
-pub(crate) fn convert_prompt(prompt: &Prompt) -> Converted {
+///
+/// `send_reasoning` controls whether assistant `Reasoning` /
+/// `ReasoningFile` parts are forwarded to the model. When `false`, both
+/// types are silently dropped without warnings (matches ai-sdk semantics
+/// for models that don't accept reasoning input).
+pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted {
     let mut systems: Vec<&str> = Vec::new();
     let mut messages: Vec<WireMessage> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
@@ -46,7 +51,7 @@ pub(crate) fn convert_prompt(prompt: &Prompt) -> Converted {
                 push_user(&mut messages, parts);
             }
             Message::Assistant { content, .. } => {
-                let parts = convert_assistant(content, &mut warnings);
+                let parts = convert_assistant(content, send_reasoning, &mut warnings);
                 messages.push(WireMessage::Assistant { content: parts });
             }
             Message::Tool { content, .. } => {
@@ -233,6 +238,7 @@ fn read_document_meta(
 
 fn convert_assistant(
     parts: &[AssistantPart],
+    send_reasoning: bool,
     warnings: &mut Vec<Warning>,
 ) -> Vec<WireAssistantPart> {
     let mut out = Vec::with_capacity(parts.len());
@@ -246,6 +252,9 @@ fn convert_assistant(
                 text,
                 provider_options,
             } => {
+                if !send_reasoning {
+                    continue;
+                }
                 let (signature, redacted_data) = extract_thinking_meta(provider_options.as_ref());
                 if let Some(data) = redacted_data {
                     out.push(WireAssistantPart::RedactedThinking { data });
@@ -257,6 +266,9 @@ fn convert_assistant(
                 }
             }
             AssistantPart::ReasoningFile { .. } => {
+                if !send_reasoning {
+                    continue;
+                }
                 warnings.push(Warning::UnsupportedSetting {
                     setting: "assistant.reasoning-file".to_owned(),
                     details: Some("Anthropic does not support reasoning files".to_owned()),
@@ -440,7 +452,7 @@ mod tests {
                 provider_options: None,
             },
         ];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         assert_eq!(
             out.system.as_deref(),
             Some("First instruction.\n\nSecond instruction.")
@@ -481,7 +493,7 @@ mod tests {
                 provider_options: None,
             },
         ];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         assert_eq!(out.messages.len(), 3);
         // Last message must be a User with a single tool_result part.
         if let WireMessage::User { content } = &out.messages[2]
@@ -513,7 +525,7 @@ mod tests {
             provider_options: None,
         };
         let prompt = vec![mk_tool("a", "one"), mk_tool("b", "two")];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         assert_eq!(out.messages.len(), 1);
         if let WireMessage::User { content } = &out.messages[0] {
             assert_eq!(content.len(), 2);
@@ -533,7 +545,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         assert!(out.warnings.is_empty(), "PDF is supported, no warning");
         if let WireMessage::User { content } = &out.messages[0] {
             assert!(matches!(content[0], WireUserPart::Document { .. }));
@@ -555,7 +567,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         assert_eq!(out.warnings.len(), 1);
         assert!(out.messages.is_empty());
     }
@@ -578,7 +590,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt);
+        let out = convert_prompt(&prompt, true);
         if let WireMessage::Assistant { content } = &out.messages[0] {
             assert_eq!(content.len(), 2);
             assert!(matches!(content[1], WireAssistantPart::ToolUse { .. }));

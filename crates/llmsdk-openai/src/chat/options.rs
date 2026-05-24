@@ -52,6 +52,15 @@ pub(crate) struct OpenAiChatOptions {
     pub user: Option<String>,
     /// Text-shape configuration; currently only `verbosity` is recognized.
     pub text_verbosity: Option<String>,
+    /// Prompt-cache retention policy: `"in_memory"` (default) or `"24h"`
+    /// (extended caching, GPT-5.1+ only).
+    pub prompt_cache_retention: Option<String>,
+    /// System-message routing override (`"system"` / `"developer"` /
+    /// `"remove"`). Unset → driven by [`super::capabilities::Capabilities`].
+    pub system_message_mode: Option<String>,
+    /// Explicit `max_completion_tokens` for reasoning models. Takes
+    /// precedence over the auto-mapping from [`CallOptions::max_output_tokens`].
+    pub max_completion_tokens: Option<u32>,
 }
 
 /// `logprobs` provider option — a boolean toggle or a numeric `top_logprobs`.

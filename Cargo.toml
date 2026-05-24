@@ -6,7 +6,7 @@ members = ["crates/llmsdk-anthropic","crates/llmsdk-openai","crates/llmsdk-provi
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/zerx-lab/llmsdk"
 
 [workspace.lints.rust]

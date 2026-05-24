@@ -30,17 +30,19 @@ pub(crate) fn convert_prompt(
 
     for message in prompt {
         match message {
-            Message::System { content, .. } => {
-                let msg = match system_role {
-                    SystemRole::System => WireMessage::System {
-                        content: content.clone(),
-                    },
-                    SystemRole::Developer => WireMessage::Developer {
-                        content: content.clone(),
-                    },
-                };
-                messages.push(msg);
-            }
+            Message::System { content, .. } => match system_role {
+                SystemRole::System => messages.push(WireMessage::System {
+                    content: content.clone(),
+                }),
+                SystemRole::Developer => messages.push(WireMessage::Developer {
+                    content: content.clone(),
+                }),
+                SystemRole::Remove => {
+                    warnings.push(Warning::Other {
+                        message: "system message removed (systemMessageMode = 'remove')".to_owned(),
+                    });
+                }
+            },
             Message::User { content, .. } => {
                 messages.push(convert_user(content, &mut warnings));
             }
