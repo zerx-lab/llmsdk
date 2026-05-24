@@ -1,0 +1,20 @@
+[package]
+name = "llmsdk-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider trait abstractions for llmsdk (Rust port of @ai-sdk/provider v4)"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.11.1"
+futures = "0.3.32"
+http = "1.4.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
