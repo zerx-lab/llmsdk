@@ -52,7 +52,7 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M7 完成。126 个 workspace 测试全绿。
+当前进度：M1–M8 完成。146 个 workspace 测试全绿。
 
 ```
 M1 ✓ llmsdk-provider 编译通过；trait + 类型 ready
@@ -72,19 +72,29 @@ M7 ✓ 推迟特性补齐：
        请求 thinking 字段 + 采样参数剥离 + max_tokens 自动加 budget）
      - 不动 provider trait；新增 chat::capabilities / chat::options /
        messages::options 内部模块
+M8 ✓ llmsdk-openai: ImageModel (DALL-E 3 + gpt-image-1*)
+     - POST /v1/images/generations，b64_json 解码 → GeneratedImage
+     - provider_options.openai: quality/style/background/outputFormat/
+       outputCompression/moderation/user 透传
+     - aspectRatio + seed 自动告警（OpenAI Images API 不支持）
+     - 按 model id 自动判断 max_images_per_call + 是否发 response_format
+     - revised_prompt / size / created 等收集到
+       provider_metadata.openai.images[]
+     - trait 改动：ImageResult 加 warnings 字段（与 GenerateResult /
+       EmbedResult 对齐；此前为首个 ImageModel impl 故零下游破坏）
+     - 内嵌 base64 decoder（RFC 4648 §4），不引新依赖
 ```
 
-**已验证的 trait 抽象**：reasoning 块、annotations、logprobs metadata 均无需
-扩展 trait，全部在 provider crate 内部消化；现有 `Content::Reasoning` /
-`Source` / `ProviderMetadata` 形态正好够用。
+**已验证的 trait 抽象**：三个模型表面（Language/Embedding/Image）+ 推迟特性
+全部基于现有 trait 形态消化。M8 唯一 trait 改动是 `ImageResult.warnings` 的
+缺失字段（trait 设计漏洞，非新需求）。
 
 **下一阶段候选**（待规划）：
-- ImageModel 实现（OpenAI DALL-E 3，trait 已就绪）
 - middleware 层（重试 / 日志 / 缓存）
 - 第三个 provider（Gemini）以进一步压力测试
 - 仍未补齐的小特性详见 `todo.md`（OpenAI: prediction / service_tier /
-  parallel_tool_calls / logit_bias 等；Anthropic: 服务器工具 / citations /
-  cache_control / 非图片文件等）
+  parallel_tool_calls / logit_bias / image edit + variation 等；
+  Anthropic: 服务器工具 / citations / cache_control / 非图片文件等）
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐。
 
