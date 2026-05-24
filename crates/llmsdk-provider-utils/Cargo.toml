@@ -1,0 +1,25 @@
+[package]
+name = "llmsdk-provider-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP, SSE and config utilities shared by llmsdk providers (Rust port of @ai-sdk/provider-utils)"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.11.1"
+eventsource-stream = "0.2.3"
+futures = "0.3.32"
+llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+wiremock = "0.6.5"
