@@ -253,6 +253,27 @@ impl ProviderError {
         }
     }
 
+    /// Captured response body when [`Self::is_api_call`].
+    ///
+    /// Returned by HTTP transports that read the full body before raising
+    /// the error; otherwise `None`.
+    #[must_use]
+    pub fn response_body(&self) -> Option<&str> {
+        match &self.inner.kind {
+            ErrorKind::ApiCall(d) => d.response_body.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Request URL when [`Self::is_api_call`].
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        match &self.inner.kind {
+            ErrorKind::ApiCall(d) => Some(&d.url),
+            _ => None,
+        }
+    }
+
     /// Model id when [`Self::is_no_such_model`].
     #[must_use]
     pub fn model_id(&self) -> Option<&str> {

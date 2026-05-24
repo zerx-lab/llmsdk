@@ -23,7 +23,10 @@ pub use prompt::{
     AssistantPart, FilePart, Message, Prompt, TextPart, ToolApprovalResponsePart, ToolCallPart,
     ToolMessagePart, ToolResultPart, UserPart,
 };
-pub use result::{GenerateResult, StreamResult, SupportedUrls, UrlPattern};
+pub use result::{
+    GenerateResponse, GenerateResult, ResponseMetadata, StreamResponse, StreamResult,
+    SupportedUrls, UrlPattern,
+};
 pub use stream_part::StreamPart;
 pub use tool::{FunctionTool, ProviderTool, Tool, ToolChoice};
 pub use usage::{InputTokenUsage, OutputTokenUsage, Usage};
