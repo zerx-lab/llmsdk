@@ -23,13 +23,16 @@
 
 use std::collections::BTreeMap;
 
-use llmsdk_provider::language_model::{FinishReason, FinishReasonKind, StreamPart, ToolCallPart};
-use llmsdk_provider::shared::Warning;
+use llmsdk_provider::language_model::{
+    FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart,
+};
+use llmsdk_provider::shared::{ProviderMetadata, Warning};
+use serde_json::Map;
 
 use super::finish_reason::map as map_finish_reason;
 use super::stream_chunk::{ChatChunk, ChatDeltaChunk, ChunkDelta, ToolCallDelta};
 use super::usage::convert as convert_usage;
-use super::wire::WireUsage;
+use super::wire::{Annotation, WireUsage};
 
 /// Logical id of the single text block this provider streams.
 ///
@@ -59,6 +62,12 @@ pub(crate) struct StreamState {
     metadata_emitted: bool,
     /// Indexed by `OpenAI`'s `tool_calls[].index`.
     tool_calls: BTreeMap<u32, ToolCallAccum>,
+    /// Captured logprobs from the latest chunk that carried any.
+    last_logprobs: Option<serde_json::Value>,
+    /// Stable id seed for citation sources (response id when available).
+    response_id: Option<String>,
+    /// Monotonic citation counter for generating unique ids.
+    citation_counter: usize,
 }
 
 impl StreamState {
@@ -73,6 +82,9 @@ impl StreamState {
             last_usage: None,
             metadata_emitted: false,
             tool_calls: BTreeMap::new(),
+            last_logprobs: None,
+            response_id: None,
+            citation_counter: 0,
         }
     }
 
@@ -132,10 +144,18 @@ impl StreamState {
             }
         }
 
+        let provider_metadata = self.last_logprobs.take().map(|lp| {
+            let mut openai = Map::new();
+            openai.insert("logprobs".to_owned(), lp);
+            let mut pm = ProviderMetadata::new();
+            pm.insert("openai".to_owned(), openai);
+            pm
+        });
+
         out.push(StreamPart::Finish {
             usage: convert_usage(self.last_usage.as_ref()),
             finish_reason: self.finish_reason,
-            provider_metadata: None,
+            provider_metadata,
         });
         out
     }
@@ -148,6 +168,7 @@ impl StreamState {
             && (chunk.id.is_some() || chunk.created.is_some() || chunk.model.is_some())
         {
             self.metadata_emitted = true;
+            self.response_id.clone_from(&chunk.id);
             out.push(StreamPart::ResponseMetadata(
                 llmsdk_provider::language_model::ResponseMetadata {
                     id: chunk.id.clone(),
@@ -156,6 +177,12 @@ impl StreamState {
                     headers: None,
                 },
             ));
+        }
+
+        // Capture the response id eagerly even if we already emitted metadata,
+        // so citation ids can use it.
+        if self.response_id.is_none() && chunk.id.is_some() {
+            self.response_id.clone_from(&chunk.id);
         }
 
         if let Some(usage) = chunk.usage {
@@ -171,6 +198,10 @@ impl StreamState {
             if !matches!(self.finish_reason.unified, FinishReasonKind::Error) {
                 self.finish_reason = map_finish_reason(Some(reason));
             }
+        }
+
+        if let Some(logprobs) = choice.logprobs.and_then(|l| l.content) {
+            self.last_logprobs = Some(logprobs);
         }
 
         if let Some(delta) = choice.delta {
@@ -202,6 +233,33 @@ impl StreamState {
                 self.process_tool_call(call, out);
             }
         }
+
+        if let Some(annotations) = delta.annotations {
+            for ann in annotations {
+                if let Some(source) = self.annotation_to_source(ann) {
+                    out.push(StreamPart::Source(source));
+                }
+            }
+        }
+    }
+
+    /// Convert a streamed annotation into a [`Source::Url`].
+    fn annotation_to_source(&mut self, annotation: Annotation) -> Option<Source> {
+        let Annotation::UrlCitation { url_citation } = annotation else {
+            return None;
+        };
+        let idx = self.citation_counter;
+        self.citation_counter += 1;
+        let id = match &self.response_id {
+            Some(r) => format!("{r}:citation:{idx}"),
+            None => format!("citation:{idx}"),
+        };
+        Some(Source::Url {
+            id,
+            url: url_citation.url,
+            title: url_citation.title,
+            provider_metadata: None,
+        })
     }
 
     fn process_tool_call(&mut self, delta: ToolCallDelta, out: &mut Vec<StreamPart>) {
@@ -280,9 +338,10 @@ mod tests {
             choices: vec![ChatChoiceDelta {
                 delta: Some(ChunkDelta {
                     content: content.map(str::to_owned),
-                    tool_calls: None,
+                    ..Default::default()
                 }),
                 finish_reason: finish.map(str::to_owned),
+                ..Default::default()
             }],
             usage: None,
         })
@@ -349,7 +408,6 @@ mod tests {
             model: None,
             choices: vec![ChatChoiceDelta {
                 delta: Some(ChunkDelta {
-                    content: None,
                     tool_calls: Some(vec![ToolCallDelta {
                         index: 0,
                         id: Some("call_w".into()),
@@ -358,8 +416,9 @@ mod tests {
                             arguments: Some(r#"{"ci"#.into()),
                         }),
                     }]),
+                    ..Default::default()
                 }),
-                finish_reason: None,
+                ..Default::default()
             }],
             usage: None,
         }));
@@ -370,7 +429,6 @@ mod tests {
             model: None,
             choices: vec![ChatChoiceDelta {
                 delta: Some(ChunkDelta {
-                    content: None,
                     tool_calls: Some(vec![ToolCallDelta {
                         index: 0,
                         id: None,
@@ -379,8 +437,10 @@ mod tests {
                             arguments: Some(r#"ty":"NYC"}"#.into()),
                         }),
                     }]),
+                    ..Default::default()
                 }),
                 finish_reason: Some("tool_calls".into()),
+                ..Default::default()
             }],
             usage: None,
         }));

@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 
+use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    Content, GenerateResponse, GenerateResult, ResponseMetadata, ToolCallPart,
+    Content, GenerateResponse, GenerateResult, ResponseMetadata, Source, ToolCallPart,
 };
-use llmsdk_provider::shared::{Headers, Warning};
+use llmsdk_provider::shared::{Headers, ProviderMetadata, Warning};
+use serde_json::Map;
 
-use super::wire::ChatResponse;
+use super::wire::{Annotation, ChatResponse};
 use super::{finish_reason, usage};
 
 /// Parse a successful chat response.
@@ -25,12 +27,12 @@ pub(crate) fn parse_response(
     headers: HashMap<String, String>,
     request_body: Option<serde_json::Value>,
     warnings: Vec<Warning>,
-) -> Result<GenerateResult, llmsdk_provider::ProviderError> {
+) -> Result<GenerateResult, ProviderError> {
     let choice = response
         .choices
         .into_iter()
         .next()
-        .ok_or_else(llmsdk_provider::ProviderError::no_content_generated)?;
+        .ok_or_else(ProviderError::no_content_generated)?;
 
     let mut content = Vec::new();
     if let Some(text) = choice.message.content
@@ -56,8 +58,31 @@ pub(crate) fn parse_response(
         }
     }
 
+    // URL citation annotations become `Source` content parts.
+    if let Some(annotations) = choice.message.annotations {
+        for (idx, ann) in annotations.into_iter().enumerate() {
+            if let Some(source) = annotation_to_source(ann, response.id.as_deref(), idx) {
+                content.push(Content::Source(source));
+            }
+        }
+    }
+
     let usage = usage::convert(response.usage.as_ref());
     let finish = finish_reason::map(choice.finish_reason.as_deref());
+
+    // Collect provider metadata: logprobs (when requested) and prediction
+    // token counts (deferred — see todo.md).
+    let mut openai_meta = Map::new();
+    if let Some(logprobs) = choice.logprobs.and_then(|l| l.content) {
+        openai_meta.insert("logprobs".to_owned(), logprobs);
+    }
+    let provider_metadata: Option<ProviderMetadata> = if openai_meta.is_empty() {
+        None
+    } else {
+        let mut pm = ProviderMetadata::new();
+        pm.insert("openai".to_owned(), openai_meta);
+        Some(pm)
+    };
 
     let response_meta = GenerateResponse {
         metadata: ResponseMetadata {
@@ -73,10 +98,34 @@ pub(crate) fn parse_response(
         content,
         finish_reason: finish,
         usage,
-        provider_metadata: None,
+        provider_metadata,
         request: request_body.map(|body| llmsdk_provider::shared::RequestInfo { body: Some(body) }),
         response: Some(response_meta),
         warnings,
+    })
+}
+
+/// Convert one [`Annotation`] into a [`Source::Url`] citation.
+///
+/// Generates a stable id by combining the response id (when present) and the
+/// annotation's positional index — no extra randomness dependency.
+fn annotation_to_source(
+    annotation: Annotation,
+    response_id: Option<&str>,
+    index: usize,
+) -> Option<Source> {
+    let Annotation::UrlCitation { url_citation } = annotation else {
+        return None;
+    };
+    let id = match response_id {
+        Some(r) => format!("{r}:citation:{index}"),
+        None => format!("citation:{index}"),
+    };
+    Some(Source::Url {
+        id,
+        url: url_citation.url,
+        title: url_citation.title,
+        provider_metadata: None,
     })
 }
 
@@ -105,9 +154,10 @@ mod tests {
             choices: vec![ChatChoice {
                 message: ChatChoiceMessage {
                     content: Some("hello".into()),
-                    tool_calls: None,
+                    ..Default::default()
                 },
                 finish_reason: Some("stop".into()),
+                ..Default::default()
             }],
             usage: Some(WireUsage {
                 prompt_tokens: Some(3),
@@ -132,7 +182,6 @@ mod tests {
             model: None,
             choices: vec![ChatChoice {
                 message: ChatChoiceMessage {
-                    content: None,
                     tool_calls: Some(vec![ResponseToolCall {
                         id: Some("call_x".into()),
                         _kind: Some("function".into()),
@@ -141,8 +190,10 @@ mod tests {
                             arguments: r#"{"city":"NYC"}"#.into(),
                         },
                     }]),
+                    ..Default::default()
                 },
                 finish_reason: Some("tool_calls".into()),
+                ..Default::default()
             }],
             usage: None,
         };

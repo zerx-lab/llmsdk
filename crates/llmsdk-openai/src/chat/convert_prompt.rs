@@ -11,22 +11,35 @@ use llmsdk_provider::language_model::{
 };
 use llmsdk_provider::shared::{FileBytes, FileData, Warning};
 
+use super::model::SystemRole;
 use super::wire::{
     WireFunctionCall, WireImageUrl, WireMessage, WireToolCall, WireToolCallKind, WireUserContent,
     WireUserPart,
 };
 
 /// Convert a prompt and collect warnings about dropped parts.
-pub(crate) fn convert_prompt(prompt: &Prompt) -> (Vec<WireMessage>, Vec<Warning>) {
+///
+/// `system_role` selects between the standard `system` role and the
+/// reasoning-model `developer` role.
+pub(crate) fn convert_prompt(
+    prompt: &Prompt,
+    system_role: SystemRole,
+) -> (Vec<WireMessage>, Vec<Warning>) {
     let mut messages = Vec::with_capacity(prompt.len());
     let mut warnings = Vec::new();
 
     for message in prompt {
         match message {
             Message::System { content, .. } => {
-                messages.push(WireMessage::System {
-                    content: content.clone(),
-                });
+                let msg = match system_role {
+                    SystemRole::System => WireMessage::System {
+                        content: content.clone(),
+                    },
+                    SystemRole::Developer => WireMessage::Developer {
+                        content: content.clone(),
+                    },
+                };
+                messages.push(msg);
             }
             Message::User { content, .. } => {
                 messages.push(convert_user(content, &mut warnings));
@@ -259,9 +272,19 @@ mod tests {
             content: "be brief".into(),
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
         assert!(warnings.is_empty());
         assert!(matches!(out[0], WireMessage::System { ref content } if content == "be brief"));
+    }
+
+    #[test]
+    fn system_message_uses_developer_role_for_reasoning_models() {
+        let prompt = vec![Message::System {
+            content: "be brief".into(),
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&prompt, SystemRole::Developer);
+        assert!(matches!(out[0], WireMessage::Developer { ref content } if content == "be brief"));
     }
 
     #[test]
@@ -273,7 +296,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&prompt);
+        let (out, _) = convert_prompt(&prompt, SystemRole::System);
         assert!(
             matches!(&out[0], WireMessage::User { content: WireUserContent::Text(s) } if s == "hi")
         );
@@ -298,7 +321,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -324,7 +347,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
         assert_eq!(warnings.len(), 1);
         if let WireMessage::User {
             content: WireUserContent::Parts(p),
@@ -352,7 +375,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
         assert!(warnings.is_empty());
         if let WireMessage::Assistant {
             content,

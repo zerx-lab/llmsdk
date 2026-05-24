@@ -25,6 +25,10 @@ pub(crate) struct ChatRequest {
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// `OpenAI` reasoning-model alias for `max_tokens`; set when the model
+    /// is a reasoning model and the caller supplied `max_output_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +47,16 @@ pub(crate) struct ChatRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    /// Effort hint for reasoning models (`minimal` / `low` / `medium` /
+    /// `high` / `xhigh` / `none`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Request token-level log probabilities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<bool>,
+    /// Number of top-N alternates per token (1-20). Requires `logprobs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_logprobs: Option<u32>,
 }
 
 /// One outgoing message.
@@ -50,6 +64,10 @@ pub(crate) struct ChatRequest {
 #[serde(tag = "role", rename_all = "lowercase")]
 pub(crate) enum WireMessage {
     System {
+        content: String,
+    },
+    /// `developer` role used by reasoning models in place of `system`.
+    Developer {
         content: String,
     },
     User {
@@ -186,19 +204,54 @@ pub(crate) struct ChatResponse {
     pub usage: Option<WireUsage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct ChatChoice {
     pub message: ChatChoiceMessage,
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// Per-choice token-level log probabilities (when requested).
+    #[serde(default)]
+    pub logprobs: Option<ChoiceLogprobs>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub(crate) struct ChatChoiceMessage {
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ResponseToolCall>>,
+    /// URL citations attached to the assistant message (web-search models).
+    #[serde(default)]
+    pub annotations: Option<Vec<Annotation>>,
+}
+
+/// One annotation on an assistant message.
+///
+/// Today only `url_citation` is surfaced; unknown variants deserialize to
+/// [`Self::Other`] and are dropped.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Annotation {
+    UrlCitation {
+        url_citation: UrlCitation,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct UrlCitation {
+    pub url: String,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Per-choice logprobs payload.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ChoiceLogprobs {
+    /// Logprobs for the streamed content tokens.
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -137,10 +137,24 @@ fn convert_assistant(
                 text: t.text.clone(),
             }),
             AssistantPart::ToolCall(tc) => out.push(convert_tool_call(tc)),
-            AssistantPart::Reasoning { .. } | AssistantPart::ReasoningFile { .. } => {
+            AssistantPart::Reasoning {
+                text,
+                provider_options,
+            } => {
+                let (signature, redacted_data) = extract_thinking_meta(provider_options.as_ref());
+                if let Some(data) = redacted_data {
+                    out.push(WireAssistantPart::RedactedThinking { data });
+                } else {
+                    out.push(WireAssistantPart::Thinking {
+                        thinking: text.clone(),
+                        signature,
+                    });
+                }
+            }
+            AssistantPart::ReasoningFile { .. } => {
                 warnings.push(Warning::UnsupportedSetting {
-                    setting: "assistant.reasoning".to_owned(),
-                    details: Some("M6 drops reasoning content".to_owned()),
+                    setting: "assistant.reasoning-file".to_owned(),
+                    details: Some("Anthropic does not support reasoning files".to_owned()),
                 });
             }
             AssistantPart::File(_) => warnings.push(Warning::UnsupportedSetting {
@@ -161,6 +175,30 @@ fn convert_assistant(
         }
     }
     out
+}
+
+/// Pull `signature` / `redactedData` from `provider_options["anthropic"]`.
+///
+/// Returns `(signature, redacted_data)`; both are `None` when the slot is
+/// absent or empty.
+fn extract_thinking_meta(
+    options: Option<&llmsdk_provider::shared::ProviderOptions>,
+) -> (Option<String>, Option<String>) {
+    let Some(map) = options else {
+        return (None, None);
+    };
+    let Some(anthropic) = map.get("anthropic") else {
+        return (None, None);
+    };
+    let signature = anthropic
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let redacted_data = anthropic
+        .get("redactedData")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    (signature, redacted_data)
 }
 
 fn convert_tool_call(tc: &ToolCallPart) -> WireAssistantPart {

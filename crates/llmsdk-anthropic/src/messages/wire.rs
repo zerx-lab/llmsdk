@@ -31,6 +31,20 @@ pub(crate) struct MessagesRequest {
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
+    /// Extended-thinking config (omitted when not requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<WireThinking>,
+}
+
+/// `thinking` request field.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireThinking {
+    Enabled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        budget_tokens: Option<u32>,
+    },
+    Disabled,
 }
 
 /// One message in `messages[]`.
@@ -78,6 +92,18 @@ pub(crate) enum WireAssistantPart {
         id: String,
         name: String,
         input: JsonValue,
+    },
+    /// Visible thinking block (signature required for cache replay).
+    Thinking {
+        thinking: String,
+        /// Opaque signature returned by the server; required when replaying
+        /// thinking blocks back to `Anthropic`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Redacted thinking block — opaque to clients.
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -128,6 +154,16 @@ pub(crate) enum ResponseContent {
         id: String,
         name: String,
         input: JsonValue,
+    },
+    /// Visible reasoning trace from extended thinking.
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    /// Server-redacted thinking block — only the opaque payload survives.
+    RedactedThinking {
+        data: String,
     },
     #[serde(other)]
     Other,

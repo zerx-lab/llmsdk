@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use super::wire::WireUsage;
+use super::wire::{Annotation, ChoiceLogprobs, WireUsage};
 
 /// One SSE-decoded chunk.
 ///
@@ -37,20 +37,26 @@ pub(crate) struct ChatDeltaChunk {
     pub usage: Option<WireUsage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ChatChoiceDelta {
     #[serde(default)]
     pub delta: Option<ChunkDelta>,
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// Per-choice logprobs payload (when requested).
+    #[serde(default)]
+    pub logprobs: Option<ChoiceLogprobs>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct ChunkDelta {
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// URL citations streamed by web-search models.
+    #[serde(default)]
+    pub annotations: Option<Vec<Annotation>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

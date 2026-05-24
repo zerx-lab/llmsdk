@@ -31,6 +31,7 @@
 mod convert_prompt;
 mod finish_reason;
 mod model;
+mod options;
 mod parse_response;
 mod stream;
 mod stream_event;

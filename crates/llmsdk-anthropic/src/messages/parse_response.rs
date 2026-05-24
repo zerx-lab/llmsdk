@@ -10,9 +10,11 @@ use std::collections::HashMap;
 
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    Content, GenerateResponse, GenerateResult, ResponseMetadata, TextPart, ToolCallPart,
+    Content, GenerateResponse, GenerateResult, ReasoningPart, ResponseMetadata, TextPart,
+    ToolCallPart,
 };
-use llmsdk_provider::shared::{Headers, Warning};
+use llmsdk_provider::shared::{Headers, ProviderOptions, Warning};
+use serde_json::{Map, Value as JsonValue};
 
 use super::wire::{MessagesResponse, ResponseContent};
 use super::{finish_reason, usage};
@@ -40,6 +42,22 @@ pub(crate) fn parse_response(
                     input,
                     provider_executed: None,
                     provider_options: None,
+                }));
+            }
+            ResponseContent::Thinking {
+                thinking,
+                signature,
+            } => {
+                content.push(Content::Reasoning(ReasoningPart {
+                    text: thinking,
+                    provider_options: thinking_provider_options(signature.as_deref(), None),
+                }));
+            }
+            ResponseContent::RedactedThinking { data } => {
+                // Redacted: empty text, opaque `redactedData` on metadata.
+                content.push(Content::Reasoning(ReasoningPart {
+                    text: String::new(),
+                    provider_options: thinking_provider_options(None, Some(&data)),
                 }));
             }
             // Drop: empty text, server-tool variants, anything we don't surface.
@@ -77,6 +95,30 @@ pub(crate) fn parse_response(
 
 fn headers_to_provider(raw: HashMap<String, String>) -> Headers {
     raw.into_iter().map(|(k, v)| (k, Some(v))).collect()
+}
+
+/// Build a `provider_options` map for a [`ReasoningPart`] that carries the
+/// `signature` (visible thinking) and/or `redactedData` (server-redacted).
+fn thinking_provider_options(
+    signature: Option<&str>,
+    redacted_data: Option<&str>,
+) -> Option<ProviderOptions> {
+    if signature.is_none() && redacted_data.is_none() {
+        return None;
+    }
+    let mut anthropic = Map::new();
+    if let Some(sig) = signature {
+        anthropic.insert("signature".to_owned(), JsonValue::String(sig.to_owned()));
+    }
+    if let Some(data) = redacted_data {
+        anthropic.insert(
+            "redactedData".to_owned(),
+            JsonValue::String(data.to_owned()),
+        );
+    }
+    let mut po = ProviderOptions::new();
+    po.insert("anthropic".to_owned(), anthropic);
+    Some(po)
 }
 
 #[cfg(test)]

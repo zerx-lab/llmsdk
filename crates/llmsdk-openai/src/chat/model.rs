@@ -8,7 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    CallOptions, GenerateResult, LanguageModel, ResponseFormat, StreamResult, Tool, ToolChoice,
+    CallOptions, GenerateResult, LanguageModel, ReasoningEffort, ResponseFormat, StreamResult,
+    Tool, ToolChoice,
 };
 use llmsdk_provider::shared::Warning;
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
@@ -17,6 +18,8 @@ use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
 use crate::PROVIDER_ID;
 use crate::config::Inner;
 
+use super::capabilities::Capabilities;
+use super::options::{LogprobsOption, parse as parse_provider_options};
 use super::stream::StreamState;
 use super::stream_chunk::ChatChunk;
 use super::wire::{
@@ -180,19 +183,33 @@ where
 
 /// Build the wire request and collect warnings about dropped settings.
 fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<Warning>) {
-    let (messages, mut warnings) = convert_prompt(&options.prompt);
+    let provider_opts = parse_provider_options(options.provider_options.as_ref());
+    let caps = Capabilities::detect(model_id);
+
+    // forceReasoning overrides id-based detection.
+    let is_reasoning_model = provider_opts
+        .force_reasoning
+        .unwrap_or(caps.is_reasoning_model);
+
+    // Resolve reasoning effort: provider-option override wins; otherwise
+    // fall back to the top-level `reasoning` field.
+    let resolved_reasoning_effort = provider_opts
+        .reasoning_effort
+        .clone()
+        .or_else(|| options.reasoning.and_then(reasoning_effort_wire_value));
+
+    // System-message role: reasoning models accept `developer` instead of `system`.
+    let system_role = if is_reasoning_model {
+        SystemRole::Developer
+    } else {
+        SystemRole::System
+    };
+    let (messages, mut warnings) = convert_prompt(&options.prompt, system_role);
 
     if options.top_k.is_some() {
         warnings.push(Warning::UnsupportedSetting {
             setting: "topK".to_owned(),
             details: Some("OpenAI Chat Completions does not accept topK".to_owned()),
-        });
-    }
-
-    if options.include_raw_chunks.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "includeRawChunks".to_owned(),
-            details: Some("only meaningful for do_stream (M4)".to_owned()),
         });
     }
 
@@ -206,12 +223,13 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         &mut warnings,
     );
 
-    let request = ChatRequest {
+    let mut request = ChatRequest {
         model: model_id.to_owned(),
         messages,
         stream: None,
         stream_options: None,
         max_tokens: options.max_output_tokens,
+        max_completion_tokens: None,
         temperature: options.temperature,
         top_p: options.top_p,
         frequency_penalty: options.frequency_penalty,
@@ -221,9 +239,126 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         response_format,
         tools,
         tool_choice,
+        reasoning_effort: resolved_reasoning_effort.clone(),
+        logprobs: provider_opts.logprobs.as_ref().map(LogprobsOption::enabled),
+        top_logprobs: provider_opts
+            .logprobs
+            .as_ref()
+            .and_then(LogprobsOption::top_logprobs),
     };
 
+    if is_reasoning_model {
+        apply_reasoning_model_strip(
+            &mut request,
+            &mut warnings,
+            resolved_reasoning_effort.as_deref(),
+            caps.supports_non_reasoning_parameters,
+        );
+    } else if caps.is_search_preview_model {
+        apply_search_preview_strip(&mut request, &mut warnings);
+    }
+
     (request, warnings)
+}
+
+/// Drop unsupported settings for reasoning models, with a warning per drop.
+///
+/// Mirrors the `if (isReasoningModel)` block in
+/// `openai-chat-language-model.ts`. The order of warnings matches ai-sdk for
+/// easier diffing of fixtures.
+fn apply_reasoning_model_strip(
+    request: &mut ChatRequest,
+    warnings: &mut Vec<Warning>,
+    resolved_reasoning_effort: Option<&str>,
+    supports_non_reasoning_parameters: bool,
+) {
+    // Reasoning effort `none` on gpt-5.1+ keeps temperature / top_p / logprobs.
+    let strip_sampling =
+        resolved_reasoning_effort != Some("none") || !supports_non_reasoning_parameters;
+
+    if strip_sampling {
+        if request.temperature.is_some() {
+            request.temperature = None;
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "temperature".to_owned(),
+                details: Some("temperature is not supported for reasoning models".to_owned()),
+            });
+        }
+        if request.top_p.is_some() {
+            request.top_p = None;
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "topP".to_owned(),
+                details: Some("topP is not supported for reasoning models".to_owned()),
+            });
+        }
+        if request.logprobs.is_some() {
+            request.logprobs = None;
+            warnings.push(Warning::Other {
+                message: "logprobs is not supported for reasoning models".to_owned(),
+            });
+        }
+    }
+
+    if request.frequency_penalty.is_some() {
+        request.frequency_penalty = None;
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "frequencyPenalty".to_owned(),
+            details: Some("frequencyPenalty is not supported for reasoning models".to_owned()),
+        });
+    }
+    if request.presence_penalty.is_some() {
+        request.presence_penalty = None;
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "presencePenalty".to_owned(),
+            details: Some("presencePenalty is not supported for reasoning models".to_owned()),
+        });
+    }
+    if request.top_logprobs.is_some() {
+        request.top_logprobs = None;
+        warnings.push(Warning::Other {
+            message: "topLogprobs is not supported for reasoning models".to_owned(),
+        });
+    }
+
+    // Reasoning models use `max_completion_tokens` instead of `max_tokens`.
+    if let Some(max) = request.max_tokens.take() {
+        request.max_completion_tokens.get_or_insert(max);
+    }
+}
+
+/// Drop `temperature` for search-preview models.
+fn apply_search_preview_strip(request: &mut ChatRequest, warnings: &mut Vec<Warning>) {
+    if request.temperature.is_some() {
+        request.temperature = None;
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "temperature".to_owned(),
+            details: Some(
+                "temperature is not supported for the search preview models and has been removed."
+                    .to_owned(),
+            ),
+        });
+    }
+}
+
+/// Translate [`ReasoningEffort`] to its on-wire string, returning `None`
+/// for [`ReasoningEffort::ProviderDefault`] (let `OpenAI` pick).
+fn reasoning_effort_wire_value(effort: ReasoningEffort) -> Option<String> {
+    match effort {
+        ReasoningEffort::ProviderDefault => None,
+        ReasoningEffort::None => Some("none".to_owned()),
+        ReasoningEffort::Minimal => Some("minimal".to_owned()),
+        ReasoningEffort::Low => Some("low".to_owned()),
+        ReasoningEffort::Medium => Some("medium".to_owned()),
+        ReasoningEffort::High => Some("high".to_owned()),
+        ReasoningEffort::Xhigh => Some("xhigh".to_owned()),
+    }
+}
+
+/// Where to send system messages — controlled by reasoning-model detection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SystemRole {
+    System,
+    Developer,
 }
 
 fn convert_response_format(fmt: &ResponseFormat) -> WireResponseFormat {

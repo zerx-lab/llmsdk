@@ -78,6 +78,18 @@ pub(crate) enum BlockStart {
         #[serde(default)]
         input: Option<JsonValue>,
     },
+    /// Extended-thinking block opened by the server.
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    /// Server-redacted thinking block.
+    RedactedThinking {
+        #[serde(default)]
+        data: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -90,6 +102,14 @@ pub(crate) enum BlockDelta {
     },
     InputJsonDelta {
         partial_json: String,
+    },
+    /// Streamed visible-thinking fragment.
+    ThinkingDelta {
+        thinking: String,
+    },
+    /// Streamed signature attached to a thinking block.
+    SignatureDelta {
+        signature: String,
     },
     #[serde(other)]
     Other,

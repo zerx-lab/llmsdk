@@ -25,7 +25,8 @@
 use std::collections::BTreeMap;
 
 use llmsdk_provider::language_model::{FinishReason, FinishReasonKind, StreamPart, ToolCallPart};
-use llmsdk_provider::shared::Warning;
+use llmsdk_provider::shared::{ProviderMetadata, Warning};
+use serde_json::Map;
 
 use super::finish_reason::map as map_finish_reason;
 use super::stream_event::{BlockDelta, BlockStart, StreamEvent};
@@ -44,6 +45,9 @@ enum BlockKind {
         name: String,
         arguments: String,
     },
+    /// Extended-thinking block; tracks the latest signature observed via
+    /// `signature_delta`.
+    Reasoning { id: String },
 }
 
 #[derive(Debug)]
@@ -152,6 +156,10 @@ impl StreamState {
                     });
                     out.push(StreamPart::ToolCall(build_tool_call(id, name, arguments)));
                 }
+                BlockKind::Reasoning { id } => out.push(StreamPart::ReasoningEnd {
+                    id,
+                    provider_metadata: None,
+                }),
             }
         }
         out.push(StreamPart::Finish {
@@ -222,6 +230,42 @@ impl StreamState {
                 }
                 out
             }
+            BlockStart::Thinking {
+                thinking,
+                signature,
+            } => {
+                let id = index.to_string();
+                self.blocks
+                    .insert(index, BlockKind::Reasoning { id: id.clone() });
+                let mut out = vec![StreamPart::ReasoningStart {
+                    id: id.clone(),
+                    provider_metadata: None,
+                }];
+                if !thinking.is_empty() {
+                    out.push(StreamPart::ReasoningDelta {
+                        id: id.clone(),
+                        delta: thinking,
+                        provider_metadata: None,
+                    });
+                }
+                if let Some(sig) = signature {
+                    out.push(StreamPart::ReasoningDelta {
+                        id,
+                        delta: String::new(),
+                        provider_metadata: Some(signature_metadata(&sig)),
+                    });
+                }
+                out
+            }
+            BlockStart::RedactedThinking { data } => {
+                let id = index.to_string();
+                self.blocks
+                    .insert(index, BlockKind::Reasoning { id: id.clone() });
+                vec![StreamPart::ReasoningStart {
+                    id,
+                    provider_metadata: Some(redacted_metadata(&data)),
+                }]
+            }
             BlockStart::Other => Vec::new(),
         }
     }
@@ -255,6 +299,23 @@ impl StreamState {
                     provider_metadata: None,
                 }]
             }
+            (BlockKind::Reasoning { id }, BlockDelta::ThinkingDelta { thinking }) => {
+                if thinking.is_empty() {
+                    return Vec::new();
+                }
+                vec![StreamPart::ReasoningDelta {
+                    id: id.clone(),
+                    delta: thinking,
+                    provider_metadata: None,
+                }]
+            }
+            (BlockKind::Reasoning { id }, BlockDelta::SignatureDelta { signature }) => {
+                vec![StreamPart::ReasoningDelta {
+                    id: id.clone(),
+                    delta: String::new(),
+                    provider_metadata: Some(signature_metadata(&signature)),
+                }]
+            }
             _ => Vec::new(),
         }
     }
@@ -279,8 +340,34 @@ impl StreamState {
                 },
                 StreamPart::ToolCall(build_tool_call(id, name, arguments)),
             ],
+            BlockKind::Reasoning { id } => vec![StreamPart::ReasoningEnd {
+                id,
+                provider_metadata: None,
+            }],
         }
     }
+}
+
+fn signature_metadata(signature: &str) -> ProviderMetadata {
+    let mut anthropic = Map::new();
+    anthropic.insert(
+        "signature".to_owned(),
+        serde_json::Value::String(signature.to_owned()),
+    );
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".to_owned(), anthropic);
+    pm
+}
+
+fn redacted_metadata(data: &str) -> ProviderMetadata {
+    let mut anthropic = Map::new();
+    anthropic.insert(
+        "redactedData".to_owned(),
+        serde_json::Value::String(data.to_owned()),
+    );
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".to_owned(), anthropic);
+    pm
 }
 
 fn build_tool_call(id: String, name: String, arguments: String) -> ToolCallPart {
