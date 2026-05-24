@@ -52,17 +52,24 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1 完成（`llmsdk-provider` 骨架 + trait + 类型）
+当前进度：M1–M5 全部完成。OpenAI provider 已具备 chat (text + stream) +
+embedding 能力，64 个 workspace 测试全绿。
 
 ```
 M1 ✓ llmsdk-provider 编译通过；trait + 类型 ready
-M2   llmsdk-provider-utils: HTTP/SSE/load_api_key
-M3   llmsdk-openai: do_generate + contract::chat_basic 通过
-M4   llmsdk-openai: do_stream + contract::chat_stream 通过
-M5   llmsdk-openai: EmbeddingModel + contract::embed_basic 通过
+M2 ✓ llmsdk-provider-utils: HTTP/SSE/load_api_key
+M3 ✓ llmsdk-openai: do_generate + contract::chat_basic 通过
+M4 ✓ llmsdk-openai: do_stream + contract::chat_stream 通过
+M5 ✓ llmsdk-openai: EmbeddingModel + contract::embed_basic 通过
 ```
 
-**跨越里程碑禁止**。每个 M 完成后必须停下来汇报，等用户确认再开下一个 M。
+**下一阶段候选**（待规划）：
+- 第二个 reference provider（Anthropic / Gemini）
+- ImageModel 实现
+- Reasoning / search-preview / annotations 等 M3–M5 期间被推迟的特性
+- middleware 层
+
+**跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐。
 
 ## Checkpoint 规则
 
