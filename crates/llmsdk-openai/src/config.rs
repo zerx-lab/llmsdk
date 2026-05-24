@@ -11,6 +11,7 @@ use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::http::HttpClient;
 
 use crate::chat::OpenAiChatModel;
+use crate::embedding::OpenAiEmbeddingModel;
 use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL};
 
 /// `OpenAI` provider handle — entry point for model construction.
@@ -51,6 +52,15 @@ impl OpenAi {
     #[must_use]
     pub fn chat(&self, model_id: impl Into<String>) -> OpenAiChatModel {
         OpenAiChatModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct a text Embeddings model handle.
+    ///
+    /// `model_id` is the `OpenAI` embedding model name, e.g.
+    /// `"text-embedding-3-small"`.
+    #[must_use]
+    pub fn embedding(&self, model_id: impl Into<String>) -> OpenAiEmbeddingModel {
+        OpenAiEmbeddingModel::new(Arc::clone(&self.inner), model_id.into())
     }
 }
 

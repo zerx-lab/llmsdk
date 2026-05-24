@@ -35,10 +35,12 @@
 
 mod chat;
 mod config;
+mod embedding;
 mod error;
 
 pub use chat::OpenAiChatModel;
 pub use config::{OpenAi, OpenAiBuilder};
+pub use embedding::OpenAiEmbeddingModel;
 
 /// Default base URL for the `OpenAI` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";

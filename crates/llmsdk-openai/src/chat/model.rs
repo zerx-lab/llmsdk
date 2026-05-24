@@ -25,7 +25,7 @@ use super::wire::{
     WireToolChoiceFunction, WireToolChoiceSimple,
 };
 use super::{convert_prompt, parse_response};
-use crate::error::extract_error_message;
+use crate::error::rewrite_openai_error;
 
 /// `OpenAI` Chat Completions model handle.
 ///
@@ -224,41 +224,6 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
     };
 
     (request, warnings)
-}
-
-/// Rewrite the [`ProviderError`] message to include the `OpenAI`-reported
-/// error text, when present.
-///
-/// The transport layer in `provider-utils` produces messages like
-/// `"HTTP 429 Too Many Requests"`. For `OpenAI` we want
-/// `"OpenAI API error: rate limited (HTTP 429)"`. Non-`ApiCall` errors and
-/// errors without a parseable body pass through unchanged.
-fn rewrite_openai_error(err: ProviderError) -> ProviderError {
-    if !err.is_api_call() {
-        return err;
-    }
-    let Some(body) = err.response_body() else {
-        return err;
-    };
-    let detail = extract_error_message(body);
-    if detail.is_empty() {
-        return err;
-    }
-    let status = err.status_code();
-    let url = err.url().unwrap_or("").to_owned();
-    let mut builder = ProviderError::api_call_builder(
-        url,
-        match status {
-            Some(s) => format!("OpenAI API error: {detail} (HTTP {s})"),
-            None => format!("OpenAI API error: {detail}"),
-        },
-    )
-    .response_body(body.to_owned())
-    .retryable(err.is_retryable());
-    if let Some(s) = status {
-        builder = builder.status_code(s);
-    }
-    builder.build()
 }
 
 fn convert_response_format(fmt: &ResponseFormat) -> WireResponseFormat {

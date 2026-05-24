@@ -3,10 +3,11 @@
 //! Mirrors `@ai-sdk/openai/src/openai-error.ts`. The `OpenAI` error envelope
 //! is `{ "error": { "message": "...", "type": "...", "code": "..." } }`.
 //! We extract `message` to use as the human-readable summary; `type` /
-//! `code` are surfaced via [`ProviderError::status_code`] and the response
-//! body.
+//! `code` are surfaced via [`llmsdk_provider::ProviderError::status_code`]
+//! and the response body.
 // Rust guideline compliant 2026-02-21
 
+use llmsdk_provider::ProviderError;
 use serde::Deserialize;
 
 /// Best-effort `OpenAI` error body.
@@ -37,6 +38,41 @@ pub(crate) fn extract_error_message(body: &str) -> String {
         Ok(parsed) => parsed.error.message,
         Err(_) => body.trim().to_owned(),
     }
+}
+
+/// Rewrite the [`ProviderError`] message to include the `OpenAI`-reported
+/// error text, when present.
+///
+/// The transport layer in `provider-utils` produces messages like
+/// `"HTTP 429 Too Many Requests"`. For `OpenAI` we want
+/// `"OpenAI API error: rate limited (HTTP 429)"`. Non-`ApiCall` errors and
+/// errors without a parseable body pass through unchanged.
+pub(crate) fn rewrite_openai_error(err: ProviderError) -> ProviderError {
+    if !err.is_api_call() {
+        return err;
+    }
+    let Some(body) = err.response_body() else {
+        return err;
+    };
+    let detail = extract_error_message(body);
+    if detail.is_empty() {
+        return err;
+    }
+    let status = err.status_code();
+    let url = err.url().unwrap_or("").to_owned();
+    let mut builder = ProviderError::api_call_builder(
+        url,
+        match status {
+            Some(s) => format!("OpenAI API error: {detail} (HTTP {s})"),
+            None => format!("OpenAI API error: {detail}"),
+        },
+    )
+    .response_body(body.to_owned())
+    .retryable(err.is_retryable());
+    if let Some(s) = status {
+        builder = builder.status_code(s);
+    }
+    builder.build()
 }
 
 #[cfg(test)]
