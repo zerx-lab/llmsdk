@@ -7,11 +7,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// `stream_options` envelope.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StreamOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_usage: Option<bool>,
+}
+
 /// `POST /chat/completions` request body.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ChatRequest {
     pub model: String,
     pub messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -11,7 +11,9 @@ description = "OpenAI provider for llmsdk (Rust port of @ai-sdk/openai)"
 workspace = true
 
 [dependencies]
+async-stream = "0.3.6"
 async-trait = "0.1.89"
+futures = "0.3.32"
 llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
 llmsdk-provider-utils = { version = "0.1.0", path = "../llmsdk-provider-utils" }
 serde = { version = "1.0.228", features = ["derive"] }

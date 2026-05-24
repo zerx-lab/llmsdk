@@ -282,20 +282,3 @@ async fn sends_per_call_header_override() {
         .await
         .expect("ok");
 }
-
-#[tokio::test]
-async fn do_stream_returns_unsupported() {
-    let server = MockServer::start().await;
-    let provider = provider(&server);
-    let model = provider.chat("gpt-4o-mini");
-    match model
-        .do_stream(CallOptions {
-            prompt: vec![user_text("hi")],
-            ..Default::default()
-        })
-        .await
-    {
-        Err(e) => assert!(e.is_unsupported()),
-        Ok(_) => panic!("M3 must not stream"),
-    }
-}

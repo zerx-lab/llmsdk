@@ -11,15 +11,18 @@ use llmsdk_provider::language_model::{
     CallOptions, GenerateResult, LanguageModel, ResponseFormat, StreamResult, Tool, ToolChoice,
 };
 use llmsdk_provider::shared::Warning;
-use llmsdk_provider_utils::http::{JsonRequest, post_json};
+use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
+use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
 
 use crate::PROVIDER_ID;
 use crate::config::Inner;
 
+use super::stream::StreamState;
+use super::stream_chunk::ChatChunk;
 use super::wire::{
-    ChatRequest, ChatResponse, ResponseFormat as WireResponseFormat, WireFunctionDef,
-    WireJsonSchema, WireTool, WireToolCallKind, WireToolChoice, WireToolChoiceFunction,
-    WireToolChoiceSimple,
+    ChatRequest, ChatResponse, ResponseFormat as WireResponseFormat, StreamOptions,
+    WireFunctionDef, WireJsonSchema, WireTool, WireToolCallKind, WireToolChoice,
+    WireToolChoiceFunction, WireToolChoiceSimple,
 };
 use super::{convert_prompt, parse_response};
 use crate::error::extract_error_message;
@@ -83,10 +86,95 @@ impl LanguageModel for OpenAiChatModel {
         )
     }
 
-    async fn do_stream(&self, _options: CallOptions) -> Result<StreamResult, ProviderError> {
-        Err(ProviderError::unsupported(
-            "OpenAiChatModel::do_stream (arriving in M4)",
-        ))
+    async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
+        let (mut request, warnings) = build_request(&self.model_id, &options);
+        request.stream = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+        });
+
+        let request_body_value = serde_json::to_value(&request).ok();
+
+        let mut request_headers = self.inner.headers.clone();
+        if let Some(headers) = &options.headers {
+            for (name, value) in headers {
+                request_headers.insert(name.clone(), value.clone());
+            }
+        }
+
+        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        http_request.headers = request_headers;
+
+        let stream_response = match post_for_stream(&self.inner.http, http_request).await {
+            Ok(r) => r,
+            Err(err) => return Err(rewrite_openai_error(err)),
+        };
+
+        let stream_headers = stream_response.headers.clone();
+        let byte_stream = response_byte_stream(stream_response.response);
+        let event_stream = sse_json_stream::<ChatChunk>(byte_stream);
+
+        let state = StreamState::new(warnings);
+        let parts = build_part_stream(state, event_stream);
+
+        Ok(StreamResult {
+            stream: Box::pin(parts),
+            request: Some(llmsdk_provider::shared::RequestInfo {
+                body: request_body_value,
+            }),
+            response: Some(llmsdk_provider::language_model::StreamResponse {
+                headers: Some(headers_to_provider(stream_headers)),
+            }),
+        })
+    }
+}
+
+fn headers_to_provider(
+    raw: std::collections::HashMap<String, String>,
+) -> llmsdk_provider::shared::Headers {
+    raw.into_iter().map(|(k, v)| (k, Some(v))).collect()
+}
+
+/// Drive the SSE event stream through [`StreamState`], emitting one
+/// [`StreamPart`] at a time and flushing the trailing `Finish` frame.
+fn build_part_stream<S>(
+    mut state: StreamState,
+    events: S,
+) -> impl futures::Stream<Item = Result<llmsdk_provider::language_model::StreamPart, ProviderError>> + Send
+where
+    S: futures::Stream<Item = Result<SseEvent<ChatChunk>, ProviderError>> + Send + 'static,
+{
+    async_stream::stream! {
+        // 1. Initial frames (StreamStart).
+        for part in state.start_frames() {
+            yield Ok(part);
+        }
+
+        // 2. Drain SSE events.
+        let mut events = Box::pin(events);
+        while let Some(event) = futures::StreamExt::next(&mut events).await {
+            match event {
+                Ok(SseEvent::Data(chunk)) => {
+                    for part in state.on_chunk(chunk) {
+                        yield Ok(part);
+                    }
+                }
+                Ok(SseEvent::ParseError { raw, message }) => {
+                    for part in state.on_parse_error(&raw, &message) {
+                        yield Ok(part);
+                    }
+                }
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            }
+        }
+
+        // 3. Flush trailing frames.
+        for part in state.flush() {
+            yield Ok(part);
+        }
     }
 }
 
@@ -121,6 +209,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
     let request = ChatRequest {
         model: model_id.to_owned(),
         messages,
+        stream: None,
+        stream_options: None,
         max_tokens: options.max_output_tokens,
         temperature: options.temperature,
         top_p: options.top_p,
