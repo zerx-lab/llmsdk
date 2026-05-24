@@ -52,8 +52,8 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M5 全部完成。OpenAI provider 已具备 chat (text + stream) +
-embedding 能力，64 个 workspace 测试全绿。
+当前进度：M1–M6 完成。两个 reference provider（OpenAI 完整 + Anthropic
+chat），92 个 workspace 测试全绿。
 
 ```
 M1 ✓ llmsdk-provider 编译通过；trait + 类型 ready
@@ -61,13 +61,18 @@ M2 ✓ llmsdk-provider-utils: HTTP/SSE/load_api_key
 M3 ✓ llmsdk-openai: do_generate + contract::chat_basic 通过
 M4 ✓ llmsdk-openai: do_stream + contract::chat_stream 通过
 M5 ✓ llmsdk-openai: EmbeddingModel + contract::embed_basic 通过
+M6 ✓ llmsdk-anthropic: Messages API (do_generate + do_stream)
 ```
 
+**已验证的 trait 抽象**：第二个 provider（结构形态完全不同 — system 顶层化、
+tool_result 折叠、典型 SSE 事件类型化）能用同一组 trait + provider-utils
+接入；OpenAI 行得通的设计也适用于 Anthropic。
+
 **下一阶段候选**（待规划）：
-- 第二个 reference provider（Anthropic / Gemini）
-- ImageModel 实现
-- Reasoning / search-preview / annotations 等 M3–M5 期间被推迟的特性
-- middleware 层
+- ImageModel 实现（OpenAI DALL-E 3，trait 已就绪）
+- 推迟特性补齐：reasoning / search-preview / annotations / logprobs
+- middleware 层（重试 / 日志 / 缓存）
+- 第三个 provider（Gemini）以进一步压力测试
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐。
 
