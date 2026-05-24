@@ -129,7 +129,10 @@ async fn tool_call_response() {
             tools: Some(vec![Tool::Function(FunctionTool {
                 name: "get_weather".into(),
                 description: Some("Get weather".into()),
-                input_schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+                input_schema: serde_json::from_value(
+                    json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+                )
+                .unwrap(),
                 input_examples: None,
                 strict: Some(true),
                 provider_options: None,

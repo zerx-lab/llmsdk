@@ -28,7 +28,7 @@ pub use result::{
     SupportedUrls, UrlPattern,
 };
 pub use stream_part::StreamPart;
-pub use tool::{FunctionTool, ProviderTool, Tool, ToolChoice};
+pub use tool::{FunctionTool, ProviderTool, Tool, ToolChoice, ToolInputExample};
 pub use usage::{InputTokenUsage, OutputTokenUsage, Usage};
 
 use std::pin::Pin;

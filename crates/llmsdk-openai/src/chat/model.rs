@@ -23,8 +23,8 @@ use super::options::{LogprobsOption, parse as parse_provider_options};
 use super::stream::StreamState;
 use super::stream_chunk::ChatChunk;
 use super::wire::{
-    ChatRequest, ChatResponse, ResponseFormat as WireResponseFormat, StreamOptions,
-    WireFunctionDef, WireJsonSchema, WireTool, WireToolCallKind, WireToolChoice,
+    ChatRequest, ChatResponse, ResponseFormat as WireResponseFormat, StreamOptions, TextOptions,
+    WireFunctionDef, WireFunctionKind, WireJsonSchema, WireTool, WireToolCallKind, WireToolChoice,
     WireToolChoiceFunction, WireToolChoiceSimple,
 };
 use super::{convert_prompt, parse_response};
@@ -213,15 +213,37 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         });
     }
 
+    let strict_json_schema = provider_opts.strict_json_schema.unwrap_or(true);
     let response_format = options
         .response_format
         .as_ref()
-        .map(convert_response_format);
+        .map(|fmt| convert_response_format(fmt, strict_json_schema));
     let (tools, tool_choice) = convert_tools(
         options.tools.as_deref(),
         options.tool_choice.as_ref(),
         &mut warnings,
     );
+
+    // Validate service_tier values (mirrors ai-sdk).
+    let service_tier = provider_opts.service_tier.clone().filter(|tier| {
+        let ok = matches!(tier.as_str(), "auto" | "default" | "flex" | "priority");
+        if !ok {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "openai.serviceTier".to_owned(),
+                details: Some(format!(
+                    "unknown service_tier '{tier}' — must be one of auto/default/flex/priority"
+                )),
+            });
+        }
+        ok
+    });
+
+    let text = provider_opts
+        .text_verbosity
+        .clone()
+        .map(|verbosity| TextOptions {
+            verbosity: Some(verbosity),
+        });
 
     let mut request = ChatRequest {
         model: model_id.to_owned(),
@@ -241,10 +263,22 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         tool_choice,
         reasoning_effort: resolved_reasoning_effort.clone(),
         logprobs: provider_opts.logprobs.as_ref().map(LogprobsOption::enabled),
-        top_logprobs: provider_opts
-            .logprobs
-            .as_ref()
-            .and_then(LogprobsOption::top_logprobs),
+        top_logprobs: provider_opts.top_logprobs.or_else(|| {
+            provider_opts
+                .logprobs
+                .as_ref()
+                .and_then(LogprobsOption::top_logprobs)
+        }),
+        prediction: provider_opts.prediction.clone(),
+        store: provider_opts.store,
+        metadata: provider_opts.metadata.clone(),
+        service_tier,
+        safety_identifier: provider_opts.safety_identifier.clone(),
+        prompt_cache_key: provider_opts.prompt_cache_key.clone(),
+        parallel_tool_calls: provider_opts.parallel_tool_calls,
+        logit_bias: provider_opts.logit_bias.clone(),
+        user: provider_opts.user.clone(),
+        text,
     };
 
     if is_reasoning_model {
@@ -319,6 +353,12 @@ fn apply_reasoning_model_strip(
             message: "topLogprobs is not supported for reasoning models".to_owned(),
         });
     }
+    if request.logit_bias.is_some() {
+        request.logit_bias = None;
+        warnings.push(Warning::Other {
+            message: "logit_bias is not supported for reasoning models".to_owned(),
+        });
+    }
 
     // Reasoning models use `max_completion_tokens` instead of `max_tokens`.
     if let Some(max) = request.max_tokens.take() {
@@ -361,7 +401,7 @@ pub(crate) enum SystemRole {
     Developer,
 }
 
-fn convert_response_format(fmt: &ResponseFormat) -> WireResponseFormat {
+fn convert_response_format(fmt: &ResponseFormat, strict: bool) -> WireResponseFormat {
     match fmt {
         ResponseFormat::Text => WireResponseFormat::JsonObject, // unreachable in practice; only set when caller asks for JSON
         ResponseFormat::Json {
@@ -373,8 +413,8 @@ fn convert_response_format(fmt: &ResponseFormat) -> WireResponseFormat {
                 json_schema: WireJsonSchema {
                     name: name.clone().unwrap_or_else(|| "response".to_owned()),
                     description: description.clone(),
-                    schema: schema.clone(),
-                    strict: true,
+                    schema: schema.clone().into(),
+                    strict,
                 },
             },
             None => WireResponseFormat::JsonObject,
@@ -392,20 +432,29 @@ fn convert_tools(
     };
     let tools = tools.iter().filter_map(|t| match t {
         Tool::Function(f) => Some(WireTool::Function {
+            kind: WireFunctionKind::Function,
             function: WireFunctionDef {
                 name: f.name.clone(),
                 description: f.description.clone(),
-                parameters: f.input_schema.clone(),
+                parameters: f.input_schema.clone().into(),
                 strict: f.strict,
             },
         }),
-        Tool::Provider(p) => {
-            warnings.push(Warning::UnsupportedTool {
-                tool: p.name.clone(),
-                details: Some("M3 does not relay provider-defined tools".to_owned()),
-            });
-            None
-        }
+        Tool::Provider(p) => match p.id.as_str() {
+            "openai.web_search_preview" => Some(WireTool::Provider {
+                kind: "web_search_preview".to_owned(),
+                args: p.args.clone().unwrap_or_default(),
+            }),
+            other => {
+                warnings.push(Warning::UnsupportedTool {
+                    tool: p.name.clone(),
+                    details: Some(format!(
+                        "provider-defined tool '{other}' requires the OpenAI Responses API endpoint (not yet supported by llmsdk-openai)"
+                    )),
+                });
+                None
+            }
+        },
     });
     let tools: Vec<_> = tools.collect();
     if tools.is_empty() {

@@ -21,7 +21,8 @@
 
 不在第一阶段：
 
-- middleware (`*-middleware/`)
+- ~~middleware (`*-middleware/`)~~ — `LanguageModel` middleware 已在 M9 落地，
+  设计见 `0002-middleware-design.md`；Embedding / Image middleware 推迟
 - reranking / transcription / speech / video
 - files / skills 接口
 - `tool-approval-*` 流程（暂保留类型，但不强制）
@@ -36,7 +37,7 @@
 | `ReadableStream<T>` | `Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>` | 标准 futures stream |
 | `AbortSignal` | `tokio_util::sync::CancellationToken`（在 utils 提供）；trait 层不直接出现 | 抽象层用 dropping future 即可取消 |
 | `JSONValue` | `serde_json::Value` | 一一对应 |
-| `JSONSchema7` | `serde_json::Value`（M1）；后期可换 `schemars::Schema` | 减少初始依赖 |
+| `JSONSchema7` | `schemars::Schema` (M10+；之前为 `serde_json::Value`) | 类型化 + 支持 `derive(JsonSchema)` 自动生成；wire 透明 |
 | `Uint8Array` | `bytes::Bytes` | 零拷贝 |
 | Tagged union (`type` 字段) | `enum` + `#[serde(tag = "type", rename_all = "kebab-case")]` | 与 ai-sdk JSON 兼容 |
 | `& { providerOptions?: ... }` 交叉类型 | 每个 variant 平铺字段 | 不用 wrapper struct |
@@ -115,6 +116,23 @@ ProviderError                       // 公开 struct
 - **M5**: `llmsdk-openai` `EmbeddingModel` + 契约测试 `embed_basic`
 
 跨里程碑禁止。
+
+## M10 增量 trait 改动（记录）
+
+`ImageModel`：
+- `ImageOptions` 新增 `files: Option<Vec<FilePart>>` + `mask: Option<FilePart>`（edits / variations 端点用，普通 `do_generate` 忽略）
+- `ImageResult` 新增 `usage: Option<ImageUsage>`（gpt-image-1 系列报；其它返回 `None`）
+- 新增 `ImageUsage { input_tokens, output_tokens, input_tokens_details }` + `ImageUsageInputDetails { text_tokens, image_tokens }`
+
+`JsonSchema` 类型别名：
+- 之前：`pub type JsonSchema = serde_json::Value;`
+- 现在：`pub type JsonSchema = schemars::Schema;`
+- 行为变化：wire 不变；构造方式新增 `schemars::json_schema!` 宏 / `schema_for!` derive；从 raw JSON 构造需要 `serde_json::from_value::<JsonSchema>(v)?`（Schema 在 deserialize 时会验证）
+
+下游影响：
+- `llmsdk-openai`：3 处 `.clone()` → `.clone().into()`（wire 仍接 `Value`）；`image.rs` `ImageResult` 加 `usage: None`
+- `llmsdk-anthropic`：1 处 `.clone()` → `.clone().into()`
+- 测试：2 处 `input_schema: json!(...)` → `input_schema: serde_json::from_value(json!(...)).unwrap()`
 
 ## 改动本文档需走的流程
 

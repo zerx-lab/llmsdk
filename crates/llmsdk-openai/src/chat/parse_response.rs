@@ -71,10 +71,27 @@ pub(crate) fn parse_response(
     let finish = finish_reason::map(choice.finish_reason.as_deref());
 
     // Collect provider metadata: logprobs (when requested) and prediction
-    // token counts (deferred — see todo.md).
+    // token counts (`accepted_prediction_tokens` / `rejected_prediction_tokens`,
+    // populated for calls that supplied `prediction`).
     let mut openai_meta = Map::new();
     if let Some(logprobs) = choice.logprobs.and_then(|l| l.content) {
         openai_meta.insert("logprobs".to_owned(), logprobs);
+    }
+    if let Some(details) = response
+        .usage
+        .as_ref()
+        .and_then(|u| u.completion_tokens_details.as_ref())
+    {
+        let mut prediction = Map::new();
+        if let Some(accepted) = details.accepted_prediction_tokens {
+            prediction.insert("accepted_tokens".into(), accepted.into());
+        }
+        if let Some(rejected) = details.rejected_prediction_tokens {
+            prediction.insert("rejected_tokens".into(), rejected.into());
+        }
+        if !prediction.is_empty() {
+            openai_meta.insert("prediction".into(), serde_json::Value::Object(prediction));
+        }
     }
     let provider_metadata: Option<ProviderMetadata> = if openai_meta.is_empty() {
         None

@@ -13,6 +13,8 @@
 //! - [`language_model`]: chat / completion models with streaming.
 //! - [`embedding_model`]: vector embedding models.
 //! - [`image_model`]: image generation models.
+//! - [`middleware`]: decorators for stacking cross-cutting concerns
+//!   (retry / logging / caching) on top of any [`LanguageModel`].
 //! - [`provider`]: top-level factory returning model instances by id.
 //! - [`error`]: unified [`ProviderError`].
 //! - [`shared`]: provider options / metadata / warnings reused across models.
@@ -38,6 +40,7 @@ pub mod error;
 pub mod image_model;
 pub mod json;
 pub mod language_model;
+pub mod middleware;
 pub mod provider;
 pub mod shared;
 
@@ -46,9 +49,17 @@ pub use embedding_model::EmbeddingModel;
 #[doc(inline)]
 pub use error::{ProviderError, Result};
 #[doc(inline)]
-pub use image_model::ImageModel;
+pub use image_model::{ImageModel, ImageOptions, ImageResult, ImageUsage, ImageUsageInputDetails};
 #[doc(inline)]
 pub use language_model::LanguageModel;
+#[doc(inline)]
+pub use middleware::{
+    CacheMiddleware, CacheStore, CachedEntry, CallKind, EmbeddingModelMiddleware,
+    ImageModelMiddleware, LanguageModelMiddleware, Logger, LoggingMiddleware, MemoryCacheStore,
+    MemoryCacheStoreBuilder, MiddlewareContext, ProviderMiddlewareSet, RetryMiddleware,
+    RetryMiddlewareBuilder, StderrLogger, wrap_embedding_model, wrap_image_model,
+    wrap_language_model, wrap_provider,
+};
 #[doc(inline)]
 pub use provider::Provider;
 

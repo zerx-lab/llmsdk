@@ -87,8 +87,10 @@ pub(crate) struct ChatErrorChunk {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ChatErrorChunkInner {
     pub message: String,
+    /// Error type (`"server_error"` / `"invalid_request_error"` / ...).
     #[serde(default, rename = "type")]
-    pub _kind: Option<String>,
+    pub kind: Option<String>,
+    /// Provider-specific error code (string or object depending on endpoint).
     #[serde(default)]
-    pub _code: Option<serde_json::Value>,
+    pub code: Option<serde_json::Value>,
 }

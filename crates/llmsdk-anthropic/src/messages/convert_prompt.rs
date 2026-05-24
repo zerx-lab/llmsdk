@@ -20,7 +20,10 @@ use llmsdk_provider::language_model::{
 };
 use llmsdk_provider::shared::{FileBytes, FileData, Warning};
 
-use super::wire::{WireAssistantPart, WireImageSource, WireMessage, WireUserPart};
+use super::wire::{
+    CacheControl, CitationsConfig, WireAssistantPart, WireDocumentSource, WireImageSource,
+    WireMessage, WireUserPart,
+};
 
 /// Result of [`convert_prompt`].
 pub(crate) struct Converted {
@@ -85,45 +88,147 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> Vec<WireUser
         match part {
             UserPart::Text(t) => out.push(WireUserPart::Text {
                 text: t.text.clone(),
+                cache_control: read_cache_control(t.provider_options.as_ref()),
             }),
             UserPart::File(f) => {
+                let cache_control = read_cache_control(f.provider_options.as_ref());
+                let citations = read_citations_config(f.provider_options.as_ref());
+                let (title, context) = read_document_meta(f.provider_options.as_ref());
                 let top = f
                     .media_type
                     .split('/')
                     .next()
                     .unwrap_or(f.media_type.as_str());
-                if top != "image" {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file".to_owned(),
-                        details: Some(format!(
-                            "M6 Anthropic provider only supports image/* user files (got {})",
-                            f.media_type
-                        )),
+                if top == "image" {
+                    let source = match &f.data {
+                        FileData::Url { url } => WireImageSource::Url { url: url.clone() },
+                        FileData::Data { data } => WireImageSource::Base64 {
+                            media_type: f.media_type.clone(),
+                            data: file_bytes_to_base64(data),
+                        },
+                        FileData::Reference { .. } | FileData::Text { .. } => {
+                            warnings.push(Warning::UnsupportedSetting {
+                                setting: "user.file.data".to_owned(),
+                                details: Some(
+                                    "image files only accept Url or inline bytes".to_owned(),
+                                ),
+                            });
+                            continue;
+                        }
+                    };
+                    out.push(WireUserPart::Image {
+                        source,
+                        cache_control,
                     });
                     continue;
                 }
-                let source = match &f.data {
-                    FileData::Url { url } => WireImageSource::Url { url: url.clone() },
-                    FileData::Data { data } => WireImageSource::Base64 {
-                        media_type: f.media_type.clone(),
+                // Non-image: try document.
+                let source = match (f.media_type.as_str(), &f.data) {
+                    ("application/pdf", FileData::Url { url }) => WireDocumentSource::Url {
+                        url: url.clone(),
+                        media_type: "application/pdf".to_owned(),
+                    },
+                    ("application/pdf", FileData::Data { data }) => WireDocumentSource::Base64 {
+                        media_type: "application/pdf".to_owned(),
                         data: file_bytes_to_base64(data),
                     },
-                    FileData::Reference { .. } | FileData::Text { .. } => {
+                    ("text/plain", FileData::Url { url }) => WireDocumentSource::Url {
+                        url: url.clone(),
+                        media_type: "text/plain".to_owned(),
+                    },
+                    ("text/plain", FileData::Text { text }) => WireDocumentSource::Text {
+                        media_type: "text/plain".to_owned(),
+                        data: text.clone(),
+                    },
+                    ("text/plain", FileData::Data { data }) => WireDocumentSource::Base64 {
+                        media_type: "text/plain".to_owned(),
+                        data: file_bytes_to_base64(data),
+                    },
+                    (mt, _) if mt.starts_with("audio/") => {
                         warnings.push(Warning::UnsupportedSetting {
-                            setting: "user.file.data".to_owned(),
-                            details: Some(
-                                "M6 does not support provider-reference or inline-text file data"
-                                    .to_owned(),
-                            ),
+                            setting: "user.file".to_owned(),
+                            details: Some(format!(
+                                "Anthropic Messages API does not accept audio files ({mt})"
+                            )),
+                        });
+                        continue;
+                    }
+                    (mt, _) => {
+                        warnings.push(Warning::UnsupportedSetting {
+                            setting: "user.file".to_owned(),
+                            details: Some(format!(
+                                "media_type '{mt}' is not supported by llmsdk-anthropic"
+                            )),
                         });
                         continue;
                     }
                 };
-                out.push(WireUserPart::Image { source });
+                out.push(WireUserPart::Document {
+                    source,
+                    title,
+                    context,
+                    citations,
+                    cache_control,
+                });
             }
         }
     }
     out
+}
+
+/// Pluck a `cache_control` block from `provider_options["anthropic"]`.
+fn read_cache_control(
+    options: Option<&llmsdk_provider::shared::ProviderOptions>,
+) -> Option<CacheControl> {
+    let map = options?;
+    let bucket = map.get("anthropic")?;
+    let cc = bucket
+        .get("cacheControl")
+        .or_else(|| bucket.get("cache_control"))?;
+    let kind = cc
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ephemeral");
+    let ttl = cc.get("ttl").and_then(|v| v.as_str()).map(str::to_owned);
+    Some(CacheControl {
+        kind: kind.to_owned(),
+        ttl,
+    })
+}
+
+/// Pluck a `citations` config from `provider_options["anthropic"]`.
+fn read_citations_config(
+    options: Option<&llmsdk_provider::shared::ProviderOptions>,
+) -> Option<CitationsConfig> {
+    let map = options?;
+    let bucket = map.get("anthropic")?;
+    let c = bucket.get("citations")?;
+    let enabled = c
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Some(CitationsConfig { enabled })
+}
+
+/// Pluck `title` / `context` for document blocks.
+fn read_document_meta(
+    options: Option<&llmsdk_provider::shared::ProviderOptions>,
+) -> (Option<String>, Option<String>) {
+    let Some(map) = options else {
+        return (None, None);
+    };
+    let Some(bucket) = map.get("anthropic") else {
+        return (None, None);
+    };
+    let title = bucket
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let context = bucket
+        .get("context")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    (title, context)
 }
 
 fn convert_assistant(
@@ -225,6 +330,7 @@ fn convert_tool(parts: &[ToolMessagePart], warnings: &mut Vec<Warning>) -> Vec<W
                     tool_use_id: r.tool_call_id.clone(),
                     content,
                     is_error,
+                    cache_control: read_cache_control(r.provider_options.as_ref()),
                 });
             }
             ToolMessagePart::ToolApprovalResponse(_) => {
@@ -415,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn non_image_file_emits_warning_and_drops_part() {
+    fn pdf_file_becomes_document_block() {
         let prompt = vec![Message::User {
             content: vec![UserPart::File(llmsdk_provider::language_model::FilePart {
                 filename: None,
@@ -428,8 +534,29 @@ mod tests {
             provider_options: None,
         }];
         let out = convert_prompt(&prompt);
+        assert!(out.warnings.is_empty(), "PDF is supported, no warning");
+        if let WireMessage::User { content } = &out.messages[0] {
+            assert!(matches!(content[0], WireUserPart::Document { .. }));
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn unsupported_audio_file_warns_and_drops() {
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(llmsdk_provider::language_model::FilePart {
+                filename: None,
+                data: FileData::Url {
+                    url: "https://example.com/a.mp3".into(),
+                },
+                media_type: "audio/mpeg".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let out = convert_prompt(&prompt);
         assert_eq!(out.warnings.len(), 1);
-        // No usable parts -> push_user drops the message entirely.
         assert!(out.messages.is_empty());
     }
 

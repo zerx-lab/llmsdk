@@ -72,11 +72,12 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        let (request, warnings) = build_request(&self.model_id, &options, false);
+        let (request, warnings, betas) = build_request(&self.model_id, &options, false);
 
         let request_body_value = serde_json::to_value(&request).ok();
         let mut http_request = JsonRequest::new(self.endpoint(), request);
         http_request.headers = self.merged_headers(options.headers.as_ref());
+        apply_beta_header(&mut http_request.headers, betas);
 
         let response = match post_json::<_, MessagesResponse>(&self.inner.http, http_request).await
         {
@@ -93,11 +94,12 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        let (request, warnings) = build_request(&self.model_id, &options, true);
+        let (request, warnings, betas) = build_request(&self.model_id, &options, true);
 
         let request_body_value = serde_json::to_value(&request).ok();
         let mut http_request = JsonRequest::new(self.endpoint(), request);
         http_request.headers = self.merged_headers(options.headers.as_ref());
+        apply_beta_header(&mut http_request.headers, betas);
 
         let stream_response = match post_for_stream(&self.inner.http, http_request).await {
             Ok(r) => r,
@@ -109,7 +111,8 @@ impl LanguageModel for AnthropicMessagesModel {
         let event_stream = sse_json_stream::<StreamEvent>(byte_stream);
 
         let state = StreamState::new(warnings);
-        let parts = build_part_stream(state, event_stream);
+        let include_raw = options.include_raw_chunks.unwrap_or(false);
+        let parts = build_part_stream(state, event_stream, include_raw);
 
         Ok(StreamResult {
             stream: Box::pin(parts),
@@ -132,7 +135,11 @@ fn build_request(
     model_id: &str,
     options: &CallOptions,
     stream: bool,
-) -> (MessagesRequest, Vec<Warning>) {
+) -> (
+    MessagesRequest,
+    Vec<Warning>,
+    std::collections::BTreeSet<String>,
+) {
     let Converted {
         system,
         messages,
@@ -164,10 +171,12 @@ fn build_request(
         });
     }
 
+    let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let (tools, tool_choice) = convert_tools(
         options.tools.as_deref(),
         options.tool_choice.as_ref(),
         &mut warnings,
+        &mut betas,
     );
 
     let provider_opts = parse_provider_options(options.provider_options.as_ref());
@@ -221,9 +230,50 @@ fn build_request(
         tools,
         tool_choice,
         thinking,
+        context_management: provider_opts.context_management.clone(),
+        container: provider_opts.container.clone(),
     };
 
-    (request, warnings)
+    // Add beta for context_management compaction edits (best-effort guess from
+    // wire payload — surfaced as `compact_20260112` in the docs).
+    if let Some(cm) = &provider_opts.context_management {
+        if cm.to_string().contains("compact_20260112") {
+            betas.insert("context-management-2026-01-12".to_owned());
+        }
+        if cm.to_string().contains("clear_thinking_20251015") {
+            betas.insert("clear-thinking-2025-10-15".to_owned());
+        }
+    }
+
+    (request, warnings, betas)
+}
+
+/// Merge collected beta tokens into the `anthropic-beta` header.
+///
+/// Tokens supplied by the caller (per-call or provider-level headers) are
+/// preserved; ours are appended (deduplicated) to the comma-separated list.
+fn apply_beta_header(
+    headers: &mut std::collections::HashMap<String, Option<String>>,
+    betas: std::collections::BTreeSet<String>,
+) {
+    if betas.is_empty() {
+        return;
+    }
+    let key = "anthropic-beta".to_owned();
+    let existing = headers.get(&key).cloned().unwrap_or(None);
+    let mut tokens: std::collections::BTreeSet<String> = existing
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for b in betas {
+        tokens.insert(b);
+    }
+    headers.insert(key, Some(tokens.into_iter().collect::<Vec<_>>().join(",")));
 }
 
 /// Resolve thinking config into the wire payload plus derived flags.
@@ -236,13 +286,43 @@ fn resolve_thinking(config: Option<&ThinkingConfig>) -> (Option<WireThinking>, O
     match config {
         None => (None, None, false),
         Some(ThinkingConfig::Disabled) => (Some(WireThinking::Disabled), None, false),
-        Some(ThinkingConfig::Enabled { budget_tokens }) => (
-            Some(WireThinking::Enabled {
-                budget_tokens: *budget_tokens,
-            }),
-            *budget_tokens,
-            true,
-        ),
+        Some(ThinkingConfig::Adaptive) => (Some(WireThinking::Adaptive), None, true),
+        Some(ThinkingConfig::Enabled { budget_tokens }) => {
+            // Default budget when caller did not specify (matches ai-sdk).
+            let resolved = budget_tokens.or(Some(DEFAULT_THINKING_BUDGET));
+            (
+                Some(WireThinking::Enabled {
+                    budget_tokens: resolved,
+                }),
+                resolved,
+                true,
+            )
+        }
+    }
+}
+
+/// Fallback thinking budget when the caller enabled thinking without an
+/// explicit `budgetTokens`. Matches ai-sdk's documented default.
+pub(crate) const DEFAULT_THINKING_BUDGET: u32 = 1024;
+
+/// Map a `Tool::Provider.id` (e.g. `"anthropic.web_search"`) to:
+/// - the on-wire `type` field (e.g. `"web_search_20250305"`)
+/// - the beta-header tokens to enable for this tool
+fn resolve_anthropic_server_tool(id: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match id {
+        "anthropic.web_search" => Some(("web_search_20250305", &["web-search-2025-03-05"])),
+        "anthropic.web_fetch" => Some(("web_fetch_20250910", &["web-fetch-2025-09-10"])),
+        "anthropic.code_execution" => {
+            Some(("code_execution_20250825", &["code-execution-2025-08-25"]))
+        }
+        "anthropic.mcp" => Some(("mcp_20250508", &["mcp-2025-05-08"])),
+        "anthropic.bash" => Some(("bash_20250124", &["code-execution-2025-08-25"])),
+        "anthropic.text_editor" => Some(("text_editor_20250728", &["code-execution-2025-08-25"])),
+        "anthropic.tool_search" => {
+            Some(("tool_search_regex_20251020", &["tool-search-2025-10-20"]))
+        }
+        "anthropic.advisor" => Some(("advisor_20251020", &["advisor-2025-10-20"])),
+        _ => None,
     }
 }
 
@@ -257,6 +337,7 @@ fn ensure_user_first(messages: Vec<WireMessage>, warnings: &mut Vec<Warning>) ->
         vec![WireMessage::User {
             content: vec![super::wire::WireUserPart::Text {
                 text: String::new(),
+                cache_control: None,
             }],
         }]
     } else {
@@ -268,6 +349,7 @@ fn convert_tools(
     tools: Option<&[Tool]>,
     choice: Option<&ToolChoice>,
     warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
 ) -> (Option<Vec<WireTool>>, Option<WireToolChoice>) {
     let Some(tools) = tools else {
         return (None, None);
@@ -275,17 +357,31 @@ fn convert_tools(
     let converted: Vec<_> = tools
         .iter()
         .filter_map(|t| match t {
-            Tool::Function(f) => Some(WireTool {
+            Tool::Function(f) => Some(WireTool::Function(super::wire::WireFunctionTool {
                 name: f.name.clone(),
                 description: f.description.clone(),
-                input_schema: f.input_schema.clone(),
-            }),
+                input_schema: f.input_schema.clone().into(),
+            })),
             Tool::Provider(p) => {
-                warnings.push(Warning::UnsupportedTool {
-                    tool: p.name.clone(),
-                    details: Some("M6 Anthropic does not relay provider-defined tools".to_owned()),
-                });
-                None
+                if let Some((wire_type, betas_iter)) = resolve_anthropic_server_tool(&p.id) {
+                    for b in betas_iter {
+                        betas.insert((*b).to_owned());
+                    }
+                    Some(WireTool::Server(super::wire::WireServerTool {
+                        kind: wire_type.to_owned(),
+                        name: Some(p.name.clone()),
+                        args: p.args.clone().unwrap_or_default(),
+                    }))
+                } else {
+                    warnings.push(Warning::UnsupportedTool {
+                        tool: p.name.clone(),
+                        details: Some(format!(
+                            "provider-defined tool '{}' not recognized by llmsdk-anthropic",
+                            p.id
+                        )),
+                    });
+                    None
+                }
             }
         })
         .collect();
@@ -317,6 +413,7 @@ fn convert_tools(
 fn build_part_stream<S>(
     mut state: StreamState,
     events: S,
+    include_raw: bool,
 ) -> impl futures::Stream<Item = Result<llmsdk_provider::language_model::StreamPart, ProviderError>> + Send
 where
     S: futures::Stream<Item = Result<SseEvent<StreamEvent>, ProviderError>> + Send + 'static,
@@ -329,6 +426,12 @@ where
         while let Some(event) = futures::StreamExt::next(&mut events).await {
             match event {
                 Ok(SseEvent::Data(ev)) => {
+                    if include_raw
+                        && let Ok(raw_value) = serde_json::to_value(&ev) {
+                            yield Ok(llmsdk_provider::language_model::StreamPart::Raw {
+                                raw_value,
+                            });
+                        }
                     for part in state.on_event(ev) {
                         yield Ok(part);
                     }

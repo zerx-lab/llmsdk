@@ -15,6 +15,7 @@
 pub mod api_key;
 pub mod headers;
 pub mod http;
+pub mod multipart;
 pub mod sse;
 
 #[doc(inline)]

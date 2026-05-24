@@ -82,6 +82,8 @@ mod tests {
             }),
             completion_tokens_details: Some(WireCompletionTokensDetails {
                 reasoning_tokens: Some(10),
+                accepted_prediction_tokens: None,
+                rejected_prediction_tokens: None,
             }),
         };
         let u = convert(Some(&wire));

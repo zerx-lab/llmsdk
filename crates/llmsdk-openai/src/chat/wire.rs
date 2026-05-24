@@ -57,6 +57,44 @@ pub(crate) struct ChatRequest {
     /// Number of top-N alternates per token (1-20). Requires `logprobs`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u32>,
+    /// Predicted output content (faster responses for known prefixes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prediction: Option<serde_json::Value>,
+    /// Persist the call on `OpenAI` side (`true` for replay / fine-tune).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// Free-form key/value metadata stored alongside the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Service tier: `auto` / `default` / `flex` / `priority`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Caller-supplied identifier used in abuse / safety reporting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_identifier: Option<String>,
+    /// Prefix used to share the prompt cache with related calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Allow / forbid parallel tool calls (gpt-4o family).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    /// Per-token bias applied during sampling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Caller-supplied user identifier (legacy field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Text-shape configuration (e.g. verbosity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextOptions>,
+}
+
+/// `text` configuration in the request body.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TextOptions {
+    /// Output verbosity: `"low"` / `"medium"` / `"high"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
 }
 
 /// One outgoing message.
@@ -147,10 +185,33 @@ pub(crate) struct WireJsonSchema {
 }
 
 /// `tools` entry.
+///
+/// Function tools follow the standard nested `{type:"function", function:{...}}`
+/// envelope; provider-defined tools (currently only `web_search_preview` on
+/// Chat Completions) are flat `{type: "<id>", ...args}` objects.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(untagged)]
 pub(crate) enum WireTool {
-    Function { function: WireFunctionDef },
+    Function {
+        #[serde(rename = "type")]
+        kind: WireFunctionKind,
+        function: WireFunctionDef,
+    },
+    /// `web_search_preview` (and future Chat-API provider-defined tools).
+    /// Serialized as `{type: "<name>", ...args}` — args are flattened so
+    /// callers control the exact wire shape via `Tool::Provider::args`.
+    Provider {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(flatten)]
+        args: serde_json::Map<String, serde_json::Value>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum WireFunctionKind {
+    Function,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,7 +351,17 @@ pub(crate) struct WirePromptTokensDetails {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names mirror OpenAI's wire schema verbatim"
+)]
 pub(crate) struct WireCompletionTokensDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// Accepted prediction tokens (when `prediction` was provided).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_prediction_tokens: Option<u64>,
+    /// Rejected prediction tokens (when `prediction` was provided).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_prediction_tokens: Option<u64>,
 }

@@ -140,7 +140,7 @@ async fn tool_use_response() {
             tools: Some(vec![Tool::Function(FunctionTool {
                 name: "get_weather".into(),
                 description: Some("Get weather".into()),
-                input_schema: json!({"type": "object"}),
+                input_schema: serde_json::from_value(json!({"type": "object"})).unwrap(),
                 input_examples: None,
                 strict: None,
                 provider_options: None,

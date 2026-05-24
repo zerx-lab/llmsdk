@@ -34,6 +34,12 @@ pub(crate) struct MessagesRequest {
     /// Extended-thinking config (omitted when not requested).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<WireThinking>,
+    /// `context_management` edit strategies (provider-option pass-through).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_management: Option<serde_json::Value>,
+    /// `container` Skills configuration (provider-option pass-through).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<serde_json::Value>,
 }
 
 /// `thinking` request field.
@@ -44,6 +50,7 @@ pub(crate) enum WireThinking {
         #[serde(skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u32>,
     },
+    Adaptive,
     Disabled,
 }
 
@@ -61,15 +68,32 @@ pub(crate) enum WireMessage {
 pub(crate) enum WireUserPart {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     Image {
         source: WireImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    Document {
+        source: WireDocumentSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citations: Option<CitationsConfig>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
 }
 
@@ -79,6 +103,32 @@ pub(crate) enum WireUserPart {
 pub(crate) enum WireImageSource {
     Url { url: String },
     Base64 { media_type: String, data: String },
+}
+
+/// Document source: URL, base64, or inline text.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireDocumentSource {
+    Url { url: String, media_type: String },
+    Base64 { media_type: String, data: String },
+    Text { media_type: String, data: String },
+}
+
+/// `cache_control` standard block.
+///
+/// Anthropic supports `{"type": "ephemeral", "ttl"?: "5m" | "1h"}`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+}
+
+/// `citations` config block.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CitationsConfig {
+    pub enabled: bool,
 }
 
 /// Assistant-message content part.
@@ -107,13 +157,36 @@ pub(crate) enum WireAssistantPart {
     },
 }
 
-/// `tools[]` entry — function tool only in M6.
+/// `tools[]` entry.
+///
+/// Anthropic accepts two top-level shapes:
+///
+/// - Function tools: `{name, description?, input_schema}`
+/// - Server tools: `{type: "<tool_type_with_version>", name?, ...args}`
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct WireTool {
+#[serde(untagged)]
+pub(crate) enum WireTool {
+    Function(WireFunctionTool),
+    Server(WireServerTool),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WireFunctionTool {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: JsonValue,
+}
+
+/// Server-tool wire entry: `{type, name?, ...args}`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WireServerTool {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(flatten)]
+    pub args: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `tool_choice`.
@@ -149,12 +222,23 @@ pub(crate) struct MessagesResponse {
 pub(crate) enum ResponseContent {
     Text {
         text: String,
+        /// Optional `citations[]` attached to the text block by server-side
+        /// tools (`web_search` / `web_fetch`). Captured as-is.
+        #[serde(default)]
+        citations: Option<JsonValue>,
     },
     ToolUse {
         id: String,
         name: String,
         input: JsonValue,
+        /// Tool-call metadata (`caller`, `dynamic`, `programmatic-tool-call`).
+        #[serde(default)]
+        caller: Option<JsonValue>,
+        #[serde(default)]
+        dynamic: Option<bool>,
     },
+    /// Server-emitted compaction block (response trimming notice).
+    Compaction(JsonValue),
     /// Visible reasoning trace from extended thinking.
     Thinking {
         thinking: String,
@@ -162,9 +246,33 @@ pub(crate) enum ResponseContent {
         signature: Option<String>,
     },
     /// Server-redacted thinking block — only the opaque payload survives.
-    RedactedThinking {
-        data: String,
+    RedactedThinking { data: String },
+    /// Server-side tool invocation reflected back to the client.
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: JsonValue,
     },
+    /// Server-side tool result block. Wire `type` ends in `_tool_result`;
+    /// the inner shape varies per tool, so we capture the whole object.
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult(JsonValue),
+    #[serde(rename = "web_fetch_tool_result")]
+    WebFetchToolResult(JsonValue),
+    #[serde(rename = "code_execution_tool_result")]
+    CodeExecutionToolResult(JsonValue),
+    #[serde(rename = "bash_code_execution_tool_result")]
+    BashCodeExecutionToolResult(JsonValue),
+    #[serde(rename = "text_editor_code_execution_tool_result")]
+    TextEditorCodeExecutionToolResult(JsonValue),
+    #[serde(rename = "mcp_tool_use")]
+    McpToolUse(JsonValue),
+    #[serde(rename = "mcp_tool_result")]
+    McpToolResult(JsonValue),
+    #[serde(rename = "tool_search_tool_result")]
+    ToolSearchToolResult(JsonValue),
+    #[serde(rename = "advisor_tool_result")]
+    AdvisorToolResult(JsonValue),
     #[serde(other)]
     Other,
 }

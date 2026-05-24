@@ -25,9 +25,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
-use llmsdk_provider::image_model::{GeneratedImage, ImageModel, ImageOptions, ImageResult};
-use llmsdk_provider::shared::{Headers, ProviderMetadata, RequestInfo, ResponseInfo, Warning};
-use llmsdk_provider_utils::http::{JsonRequest, post_json};
+use llmsdk_provider::image_model::{
+    GeneratedImage, ImageModel, ImageOptions, ImageResult, ImageUsage as ProviderImageUsage,
+    ImageUsageInputDetails,
+};
+use llmsdk_provider::language_model::FilePart;
+use llmsdk_provider::shared::{
+    FileBytes, FileData, Headers, ProviderMetadata, RequestInfo, ResponseInfo, Warning,
+};
+use llmsdk_provider_utils::http::{JsonRequest, RawRequest, post_json, post_raw};
+use llmsdk_provider_utils::multipart::Multipart;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 
@@ -52,6 +59,14 @@ impl OpenAiImageModel {
     fn endpoint(&self) -> String {
         format!("{}/images/generations", self.inner.base_url)
     }
+
+    fn edits_endpoint(&self) -> String {
+        format!("{}/images/edits", self.inner.base_url)
+    }
+
+    fn variations_endpoint(&self) -> String {
+        format!("{}/images/variations", self.inner.base_url)
+    }
 }
 
 #[async_trait]
@@ -69,6 +84,44 @@ impl ImageModel for OpenAiImageModel {
     }
 
     async fn do_generate(&self, options: ImageOptions) -> Result<ImageResult, ProviderError> {
+        let mode = route_endpoint(&options);
+
+        match mode {
+            EndpointMode::Generate => self.do_generate_text2image(options).await,
+            EndpointMode::Edit => self.do_edit(options).await,
+            EndpointMode::Variation => self.do_variation(options).await,
+        }
+    }
+}
+
+/// Pick the correct endpoint based on which fields `options` has populated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointMode {
+    /// Text → image (`POST /v1/images/generations`).
+    Generate,
+    /// Image + prompt → image (`POST /v1/images/edits`).
+    Edit,
+    /// Image → image (`POST /v1/images/variations`).
+    Variation,
+}
+
+fn route_endpoint(options: &ImageOptions) -> EndpointMode {
+    let has_files = options.files.as_ref().is_some_and(|f| !f.is_empty());
+    if !has_files {
+        return EndpointMode::Generate;
+    }
+    if options.prompt.trim().is_empty() {
+        EndpointMode::Variation
+    } else {
+        EndpointMode::Edit
+    }
+}
+
+impl OpenAiImageModel {
+    async fn do_generate_text2image(
+        &self,
+        options: ImageOptions,
+    ) -> Result<ImageResult, ProviderError> {
         let (request, warnings) = build_request(&self.model_id, &options);
 
         let request_body_value = serde_json::to_value(&request).ok();
@@ -117,17 +170,224 @@ impl ImageModel for OpenAiImageModel {
         Ok(ImageResult {
             images,
             warnings,
+            usage: resp.usage.as_ref().map(into_provider_usage),
             provider_metadata: Some(provider_metadata),
             request: Some(RequestInfo {
                 body: request_body_value,
             }),
             response: Some(ResponseInfo {
+                id: resp.created.map(|c| format!("openai-img-{c}")),
                 timestamp: resp.created.map(|c| c.to_string()),
                 model_id: Some(self.model_id.clone()),
                 headers: Some(headers_to_provider(response_headers)),
                 ..ResponseInfo::default()
             }),
         })
+    }
+
+    async fn do_edit(&self, options: ImageOptions) -> Result<ImageResult, ProviderError> {
+        let openai = parse_provider_options(options.provider_options.as_ref());
+        let mut warnings = Vec::new();
+        collect_unsupported_warnings(&options, &mut warnings);
+
+        let files = options.files.unwrap_or_default();
+        if files.is_empty() {
+            return Err(ProviderError::invalid_argument(
+                "files",
+                "image edit endpoint requires at least one source file",
+            ));
+        }
+        let mut mp = Multipart::new();
+        mp.text("model", &self.model_id);
+        mp.text("prompt", &options.prompt);
+        if let Some(n) = options.n {
+            mp.text("n", &n.to_string());
+        }
+        if let Some(size) = &options.size {
+            mp.text("size", size);
+        }
+        if let Some(q) = &openai.quality {
+            mp.text("quality", q);
+        }
+        if let Some(fi) = &openai.input_fidelity {
+            mp.text("input_fidelity", fi);
+        }
+        if let Some(u) = &openai.user {
+            mp.text("user", u);
+        }
+        // `image` (file) — repeated when multiple sources are sent.
+        for (idx, fp) in files.iter().enumerate() {
+            let bytes = file_part_bytes(fp)?;
+            let filename = fp
+                .filename
+                .clone()
+                .unwrap_or_else(|| format!("image-{idx}.png"));
+            mp.file("image[]", &filename, Some(fp.media_type.as_str()), &bytes);
+        }
+        if let Some(mask) = &options.mask {
+            let bytes = file_part_bytes(mask)?;
+            mp.file(
+                "mask",
+                mask.filename.as_deref().unwrap_or("mask.png"),
+                Some(mask.media_type.as_str()),
+                &bytes,
+            );
+        }
+        self.send_multipart(self.edits_endpoint(), mp, options.headers, warnings)
+            .await
+    }
+
+    async fn do_variation(&self, options: ImageOptions) -> Result<ImageResult, ProviderError> {
+        let openai = parse_provider_options(options.provider_options.as_ref());
+        let mut warnings = Vec::new();
+        collect_unsupported_warnings(&options, &mut warnings);
+        if !options.prompt.trim().is_empty() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "prompt".to_owned(),
+                details: Some("OpenAI image variations endpoint ignores prompt".to_owned()),
+            });
+        }
+
+        let files = options.files.unwrap_or_default();
+        let first = files.into_iter().next().ok_or_else(|| {
+            ProviderError::invalid_argument(
+                "files",
+                "image variation endpoint requires exactly one source file",
+            )
+        })?;
+        let mut mp = Multipart::new();
+        mp.text("model", &self.model_id);
+        if let Some(n) = options.n {
+            mp.text("n", &n.to_string());
+        }
+        if let Some(size) = &options.size {
+            mp.text("size", size);
+        }
+        if let Some(u) = &openai.user {
+            mp.text("user", u);
+        }
+        let bytes = file_part_bytes(&first)?;
+        mp.file(
+            "image",
+            first.filename.as_deref().unwrap_or("image.png"),
+            Some(first.media_type.as_str()),
+            &bytes,
+        );
+        self.send_multipart(self.variations_endpoint(), mp, options.headers, warnings)
+            .await
+    }
+
+    async fn send_multipart(
+        &self,
+        url: String,
+        mp: Multipart,
+        per_call_headers: Option<llmsdk_provider::shared::Headers>,
+        warnings: Vec<Warning>,
+    ) -> Result<ImageResult, ProviderError> {
+        let (boundary, body) = mp.finish();
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+
+        let mut request_headers = self.inner.headers.clone();
+        if let Some(headers) = per_call_headers {
+            for (name, value) in headers {
+                request_headers.insert(name, value);
+            }
+        }
+
+        let mut req = RawRequest::new(url, body, content_type);
+        req.headers = request_headers;
+
+        let resp_outcome = post_raw::<ImageResponse>(&self.inner.http, req).await;
+        let resp_envelope = match resp_outcome {
+            Ok(r) => r,
+            Err(err) => return Err(rewrite_openai_error(err)),
+        };
+
+        let resp = resp_envelope.value;
+        let response_headers = resp_envelope.headers;
+        let output_format_response = resp.output_format.clone();
+
+        let mut images = Vec::with_capacity(resp.data.len());
+        for (idx, item) in resp.data.iter().enumerate() {
+            let bytes = base64_decode(&item.b64_json).map_err(|err| {
+                ProviderError::type_validation(
+                    format!("data[{idx}].b64_json"),
+                    serde_json::Value::String(item.b64_json.clone()),
+                    format!("OpenAI returned invalid base64 in image data: {err}"),
+                )
+            })?;
+            let media_type = guess_media_type(output_format_response.as_deref(), &bytes);
+            images.push(GeneratedImage {
+                bytes: bytes.into(),
+                media_type,
+            });
+        }
+
+        let provider_metadata = build_provider_metadata(&resp);
+
+        Ok(ImageResult {
+            images,
+            warnings,
+            usage: resp.usage.as_ref().map(into_provider_usage),
+            provider_metadata: Some(provider_metadata),
+            request: None,
+            response: Some(ResponseInfo {
+                id: resp.created.map(|c| format!("openai-img-{c}")),
+                timestamp: resp.created.map(|c| c.to_string()),
+                model_id: Some(self.model_id.clone()),
+                headers: Some(headers_to_provider(response_headers)),
+                ..ResponseInfo::default()
+            }),
+        })
+    }
+}
+
+/// Surface `aspectRatio` / `seed` warnings for `do_edit` / `do_variation` too.
+fn collect_unsupported_warnings(options: &ImageOptions, warnings: &mut Vec<Warning>) {
+    if options.aspect_ratio.is_some() {
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "aspectRatio".to_owned(),
+            details: Some("OpenAI image endpoints do not support aspect ratio.".to_owned()),
+        });
+    }
+    if options.seed.is_some() {
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "seed".to_owned(),
+            details: Some("OpenAI image endpoints do not support seed.".to_owned()),
+        });
+    }
+}
+
+fn file_part_bytes(fp: &FilePart) -> Result<Vec<u8>, ProviderError> {
+    match &fp.data {
+        FileData::Data { data: bytes } => match bytes {
+            FileBytes::Bytes(b) => Ok(b.clone()),
+            FileBytes::Base64(s) => base64_decode(s).map_err(|err| {
+                ProviderError::type_validation(
+                    "file.data",
+                    serde_json::Value::String(s.clone()),
+                    format!("invalid base64: {err}"),
+                )
+            }),
+        },
+        FileData::Text { text } => Ok(text.clone().into_bytes()),
+        FileData::Url { .. } | FileData::Reference { .. } => Err(ProviderError::unsupported(
+            "OpenAI image endpoints require inline file bytes; URL / Reference variants are not yet downloaded",
+        )),
+    }
+}
+
+fn into_provider_usage(u: &ImageUsage) -> ProviderImageUsage {
+    ProviderImageUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        input_tokens_details: u
+            .input_tokens_details
+            .as_ref()
+            .map(|d| ImageUsageInputDetails {
+                text_tokens: d.text_tokens,
+                image_tokens: d.image_tokens,
+            }),
     }
 }
 
@@ -218,6 +478,9 @@ struct OpenAiImageOptions {
     output_compression: Option<u32>,
     /// End-user identifier.
     user: Option<String>,
+    /// Edits-endpoint only: how closely to follow the input image
+    /// (`"low"` / `"medium"` / `"high"`).
+    input_fidelity: Option<String>,
 }
 
 /// Parse the `openai` slot of `provider_options`, returning defaults on
@@ -595,5 +858,54 @@ mod tests {
     #[test]
     fn guess_media_type_defaults_when_unknown() {
         assert_eq!(guess_media_type(None, b"unknown"), "image/png");
+    }
+
+    #[test]
+    fn route_endpoint_picks_correct_mode() {
+        // text → generate
+        assert_eq!(
+            route_endpoint(&ImageOptions {
+                prompt: "cat".into(),
+                ..Default::default()
+            }),
+            EndpointMode::Generate
+        );
+        // image + prompt → edit
+        let mut with_files = ImageOptions {
+            prompt: "make it red".into(),
+            ..Default::default()
+        };
+        with_files.files = Some(vec![FilePart {
+            filename: Some("in.png".into()),
+            data: FileData::Data {
+                data: FileBytes::Bytes(vec![1, 2, 3]),
+            },
+            media_type: "image/png".into(),
+            provider_options: None,
+        }]);
+        assert_eq!(route_endpoint(&with_files), EndpointMode::Edit);
+        // image without prompt → variation
+        let mut no_prompt = with_files.clone();
+        no_prompt.prompt = String::new();
+        assert_eq!(route_endpoint(&no_prompt), EndpointMode::Variation);
+    }
+
+    #[test]
+    fn into_provider_usage_maps_all_fields() {
+        let wire = ImageUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            total_tokens: Some(30),
+            input_tokens_details: Some(InputTokensDetails {
+                image_tokens: Some(5),
+                text_tokens: Some(5),
+            }),
+        };
+        let mapped = into_provider_usage(&wire);
+        assert_eq!(mapped.input_tokens, Some(10));
+        assert_eq!(mapped.output_tokens, Some(20));
+        let det = mapped.input_tokens_details.unwrap();
+        assert_eq!(det.image_tokens, Some(5));
+        assert_eq!(det.text_tokens, Some(5));
     }
 }

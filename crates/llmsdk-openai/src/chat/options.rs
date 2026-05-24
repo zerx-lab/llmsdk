@@ -24,6 +24,34 @@ pub(crate) struct OpenAiChatOptions {
     /// Enable / configure logprobs. `true` returns flat logprobs; an integer
     /// returns the top-N alternates per token.
     pub logprobs: Option<LogprobsOption>,
+    /// `top_logprobs` field independent of [`Self::logprobs`].
+    ///
+    /// When set, sent as-is on the wire; otherwise the value is derived from
+    /// `logprobs` (see [`LogprobsOption::top_logprobs`]).
+    pub top_logprobs: Option<u32>,
+    /// Strict JSON schema enforcement for the `response_format` field.
+    /// Defaults to `true`.
+    pub strict_json_schema: Option<bool>,
+    /// Predicted output content payload (forwarded verbatim).
+    pub prediction: Option<serde_json::Value>,
+    /// Persist the call on `OpenAI` side.
+    pub store: Option<bool>,
+    /// Free-form key/value metadata.
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Service tier: `auto` / `default` / `flex` / `priority`.
+    pub service_tier: Option<String>,
+    /// Safety identifier (caller-side opaque id).
+    pub safety_identifier: Option<String>,
+    /// Prompt cache key (shared cache prefix).
+    pub prompt_cache_key: Option<String>,
+    /// Allow / forbid parallel tool calls.
+    pub parallel_tool_calls: Option<bool>,
+    /// Per-token bias map.
+    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Caller-supplied user id (legacy).
+    pub user: Option<String>,
+    /// Text-shape configuration; currently only `verbosity` is recognized.
+    pub text_verbosity: Option<String>,
 }
 
 /// `logprobs` provider option — a boolean toggle or a numeric `top_logprobs`.

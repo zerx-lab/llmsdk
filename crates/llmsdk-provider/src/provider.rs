@@ -65,6 +65,12 @@ impl DynLanguageModel {
     pub fn from_arc(model: Arc<dyn LanguageModel>) -> Self {
         Self(model)
     }
+
+    /// Consume the wrapper and return the underlying `Arc`.
+    #[must_use]
+    pub fn into_inner(self) -> Arc<dyn LanguageModel> {
+        self.0
+    }
 }
 
 impl std::ops::Deref for DynLanguageModel {
@@ -89,6 +95,12 @@ impl DynEmbeddingModel {
     pub fn from_arc(model: Arc<dyn EmbeddingModel>) -> Self {
         Self(model)
     }
+
+    /// Consume the wrapper and return the underlying `Arc`.
+    #[must_use]
+    pub fn into_inner(self) -> Arc<dyn EmbeddingModel> {
+        self.0
+    }
 }
 
 impl std::ops::Deref for DynEmbeddingModel {
@@ -112,6 +124,12 @@ impl DynImageModel {
     #[must_use]
     pub fn from_arc(model: Arc<dyn ImageModel>) -> Self {
         Self(model)
+    }
+
+    /// Consume the wrapper and return the underlying `Arc`.
+    #[must_use]
+    pub fn into_inner(self) -> Arc<dyn ImageModel> {
+        self.0
     }
 }
 

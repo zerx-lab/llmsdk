@@ -7,10 +7,10 @@
 //! and are dropped.
 // Rust guideline compliant 2026-02-21
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StreamEvent {
     MessageStart {
@@ -43,7 +43,7 @@ pub(crate) enum StreamEvent {
     Other,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct StreamMessageMeta {
     #[serde(default)]
     pub id: Option<String>,
@@ -52,7 +52,7 @@ pub(crate) struct StreamMessageMeta {
     pub usage: MessageStartUsage,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[expect(
     clippy::struct_field_names,
     reason = "field names match Anthropic JSON wire format and must not be renamed"
@@ -65,7 +65,7 @@ pub(crate) struct MessageStartUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BlockStart {
     Text {
@@ -94,7 +94,7 @@ pub(crate) enum BlockStart {
     Other,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BlockDelta {
     TextDelta {
@@ -115,19 +115,19 @@ pub(crate) enum BlockDelta {
     Other,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct MessageDeltaInner {
     #[serde(default)]
     pub stop_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct MessageDeltaUsage {
     #[serde(default)]
     pub output_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct StreamError {
     #[serde(default, rename = "type")]
     pub _kind: Option<String>,

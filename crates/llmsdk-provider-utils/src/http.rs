@@ -143,6 +143,74 @@ where
     handle_response::<T>(response, &request.url, body_value).await
 }
 
+/// Description of an outgoing request with a raw body and a caller-chosen
+/// `Content-Type`.
+///
+/// Use this for non-JSON payloads (`multipart/form-data`, `application/x-www-form-urlencoded`,
+/// pre-serialized bytes, ...). For JSON requests prefer [`JsonRequest`] —
+/// it serializes the body for you and sets `Content-Type` automatically.
+#[derive(Debug, Clone)]
+pub struct RawRequest {
+    /// Absolute URL.
+    pub url: String,
+    /// Raw request body bytes.
+    pub body: Vec<u8>,
+    /// MIME type for the body. Sent as `Content-Type` unless `headers`
+    /// overrides it.
+    pub content_type: String,
+    /// Extra headers (`None` removes).
+    pub headers: HashMap<String, Option<String>>,
+}
+
+impl RawRequest {
+    /// Build with the given URL, body, and content type.
+    pub fn new(url: impl Into<String>, body: Vec<u8>, content_type: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            body,
+            content_type: content_type.into(),
+            headers: HashMap::new(),
+        }
+    }
+}
+
+/// POST a raw body and decode a JSON response into `T`.
+///
+/// Same error mapping as [`post_json`]; the caller decides the wire body.
+///
+/// # Errors
+///
+/// See [`post_json`].
+pub async fn post_raw<T>(
+    client: &HttpClient,
+    request: RawRequest,
+) -> Result<JsonResponse<T>, ProviderError>
+where
+    T: DeserializeOwned,
+{
+    // Echo back the request body as a JSON best-effort: for binary multipart
+    // we surface a minimal placeholder so error envelopes still carry context.
+    let body_value = serde_json::Value::String(format!(
+        "<raw {} bytes; content-type={}>",
+        request.body.len(),
+        request.content_type
+    ));
+
+    let mut builder = client
+        .inner
+        .request(Method::POST, &request.url)
+        .header("content-type", request.content_type.clone())
+        .body(request.body);
+    builder = apply_headers(builder, &request.headers);
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| map_transport_error(&e, &request.url, body_value.clone()))?;
+
+    handle_response::<T>(response, &request.url, body_value).await
+}
+
 /// GET a JSON response into `T`.
 ///
 /// # Errors

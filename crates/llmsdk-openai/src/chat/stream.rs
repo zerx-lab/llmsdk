@@ -99,8 +99,19 @@ impl StreamState {
         match chunk {
             ChatChunk::Error(err) => {
                 self.finish_reason = FinishReason::new(FinishReasonKind::Error);
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    "message".into(),
+                    serde_json::Value::String(err.error.message),
+                );
+                if let Some(kind) = err.error.kind {
+                    payload.insert("type".into(), serde_json::Value::String(kind));
+                }
+                if let Some(code) = err.error.code {
+                    payload.insert("code".into(), code);
+                }
                 vec![StreamPart::Error {
-                    error: serde_json::json!({ "message": err.error.message }),
+                    error: serde_json::Value::Object(payload),
                 }]
             }
             ChatChunk::Delta(d) => self.on_delta(d),
@@ -469,11 +480,19 @@ mod tests {
         let err = state.on_chunk(ChatChunk::Error(ChatErrorChunk {
             error: ChatErrorChunkInner {
                 message: "boom".into(),
-                _kind: None,
-                _code: None,
+                kind: Some("server_error".into()),
+                code: Some(serde_json::Value::String("E_FOO".into())),
             },
         }));
-        assert!(matches!(err[0], StreamPart::Error { .. }));
+        if let StreamPart::Error { error } = &err[0] {
+            assert_eq!(
+                error.get("type").and_then(|v| v.as_str()),
+                Some("server_error")
+            );
+            assert_eq!(error.get("code").and_then(|v| v.as_str()), Some("E_FOO"));
+        } else {
+            panic!("expected error part");
+        }
 
         let tail = state.flush();
         // text-end + finish

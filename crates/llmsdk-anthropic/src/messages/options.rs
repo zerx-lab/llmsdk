@@ -16,6 +16,12 @@ use serde::Deserialize;
 pub(crate) struct AnthropicChatOptions {
     /// Extended-thinking config.
     pub thinking: Option<ThinkingConfig>,
+    /// Edit strategies that trim context as the conversation grows.
+    ///
+    /// Forwarded verbatim to the wire `context_management` field.
+    pub context_management: Option<serde_json::Value>,
+    /// Container (Skills framework) configuration.
+    pub container: Option<serde_json::Value>,
 }
 
 /// Extended-thinking configuration mirroring Anthropic's `thinking` field.
@@ -28,6 +34,8 @@ pub(crate) enum ThinkingConfig {
         #[serde(default, rename = "budgetTokens")]
         budget_tokens: Option<u32>,
     },
+    /// Adaptive thinking: server decides whether to run thinking blocks.
+    Adaptive,
     /// Extended thinking is disabled.
     Disabled,
 }

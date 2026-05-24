@@ -8,6 +8,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::language_model::FilePart;
 use crate::shared::{
     Headers, ProviderMetadata, ProviderOptions, RequestInfo, ResponseInfo, Warning,
 };
@@ -56,6 +57,16 @@ pub struct ImageOptions {
     /// Random seed for deterministic generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    /// Source images for editing / variation endpoints.
+    ///
+    /// Plain `do_generate` (text → image) ignores this field. Edit / variation
+    /// endpoints take the first entry as the source; `OpenAI`'s edit endpoint
+    /// accepts multiple files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<FilePart>>,
+    /// Optional mask for image edits (transparent regions = areas to edit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<FilePart>,
     /// Extra HTTP headers (HTTP providers only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<Headers>,
@@ -75,12 +86,42 @@ pub struct ImageResult {
     pub images: Vec<GeneratedImage>,
     /// Warnings for the call, e.g. unsupported settings coerced away.
     pub warnings: Vec<Warning>,
+    /// Token usage if reported by the provider (e.g. `OpenAI` `gpt-image-1`).
+    pub usage: Option<ImageUsage>,
     /// Provider-specific metadata.
     pub provider_metadata: Option<ProviderMetadata>,
     /// Request info (telemetry).
     pub request: Option<RequestInfo>,
     /// Response info (telemetry).
     pub response: Option<ResponseInfo>,
+}
+
+/// Token usage reported by an image-generation model.
+///
+/// Mirrors `OpenAI`'s `gpt-image-1` response shape; other providers populate the
+/// fields they support and leave the rest `None`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageUsage {
+    /// Total input tokens consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Total output tokens emitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Breakdown of input tokens by modality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<ImageUsageInputDetails>,
+}
+
+/// Input-token breakdown by modality.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageUsageInputDetails {
+    /// Text tokens in the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_tokens: Option<u64>,
+    /// Image tokens (edits / variations source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<u64>,
 }
 
 /// One image returned by the provider.
