@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/llmsdk-openai","crates/llmsdk-provider", "crates/llmsdk-provider-utils"]
+members = ["crates/llmsdk-anthropic","crates/llmsdk-openai","crates/llmsdk-provider", "crates/llmsdk-provider-utils"]
 
 [workspace.package]
 version = "0.1.0"
