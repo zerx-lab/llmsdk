@@ -1,8 +1,9 @@
 //! `OpenAI` provider for llmsdk.
 //!
 //! Rust port of [`@ai-sdk/openai`](https://github.com/vercel/ai/tree/main/packages/openai).
-//! M3 ships the Chat Completions API only (`do_generate`). Streaming arrives
-//! in M4, embeddings in M5.
+//! Implements three model surfaces: Chat Completions
+//! ([`OpenAiChatModel`]), Embeddings ([`OpenAiEmbeddingModel`]), and
+//! Image Generation ([`OpenAiImageModel`]).
 //!
 //! # Quick start
 //!
@@ -37,10 +38,12 @@ mod chat;
 mod config;
 mod embedding;
 mod error;
+mod image;
 
 pub use chat::OpenAiChatModel;
 pub use config::{OpenAi, OpenAiBuilder};
 pub use embedding::OpenAiEmbeddingModel;
+pub use image::OpenAiImageModel;
 
 /// Default base URL for the `OpenAI` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";

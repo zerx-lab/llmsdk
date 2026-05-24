@@ -8,7 +8,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::shared::{Headers, ProviderMetadata, ProviderOptions, RequestInfo, ResponseInfo};
+use crate::shared::{
+    Headers, ProviderMetadata, ProviderOptions, RequestInfo, ResponseInfo, Warning,
+};
 
 /// Contract every image-generation model implements.
 #[async_trait]
@@ -71,6 +73,8 @@ pub struct ImageOptions {
 pub struct ImageResult {
     /// Generated images.
     pub images: Vec<GeneratedImage>,
+    /// Warnings for the call, e.g. unsupported settings coerced away.
+    pub warnings: Vec<Warning>,
     /// Provider-specific metadata.
     pub provider_metadata: Option<ProviderMetadata>,
     /// Request info (telemetry).

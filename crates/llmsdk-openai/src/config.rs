@@ -12,6 +12,7 @@ use llmsdk_provider_utils::http::HttpClient;
 
 use crate::chat::OpenAiChatModel;
 use crate::embedding::OpenAiEmbeddingModel;
+use crate::image::OpenAiImageModel;
 use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL};
 
 /// `OpenAI` provider handle — entry point for model construction.
@@ -61,6 +62,15 @@ impl OpenAi {
     #[must_use]
     pub fn embedding(&self, model_id: impl Into<String>) -> OpenAiEmbeddingModel {
         OpenAiEmbeddingModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct an Image Generation model handle.
+    ///
+    /// `model_id` is the `OpenAI` image model name, e.g. `"dall-e-3"`,
+    /// `"gpt-image-1"`, or `"chatgpt-image-latest"`.
+    #[must_use]
+    pub fn image(&self, model_id: impl Into<String>) -> OpenAiImageModel {
+        OpenAiImageModel::new(Arc::clone(&self.inner), model_id.into())
     }
 }
 
