@@ -52,8 +52,7 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M6 完成。两个 reference provider（OpenAI 完整 + Anthropic
-chat），92 个 workspace 测试全绿。
+当前进度：M1–M7 完成。126 个 workspace 测试全绿。
 
 ```
 M1 ✓ llmsdk-provider 编译通过；trait + 类型 ready
@@ -62,17 +61,30 @@ M3 ✓ llmsdk-openai: do_generate + contract::chat_basic 通过
 M4 ✓ llmsdk-openai: do_stream + contract::chat_stream 通过
 M5 ✓ llmsdk-openai: EmbeddingModel + contract::embed_basic 通过
 M6 ✓ llmsdk-anthropic: Messages API (do_generate + do_stream)
+M7 ✓ 推迟特性补齐：
+     - OpenAI reasoning models（o1/o3/o4-mini/gpt-5*；reasoning_effort 透传、
+       不支持参数剥离、max_completion_tokens 映射、system→developer 角色）
+     - OpenAI logprobs（provider_options.openai.logprobs 透传 + provider_metadata 收集）
+     - OpenAI url_citation annotations → Content::Source / StreamPart::Source
+     - OpenAI search-preview 模型 temperature 剥离
+     - Anthropic thinking blocks（visible + redacted；
+       Content::Reasoning 出入；SSE thinking_delta / signature_delta；
+       请求 thinking 字段 + 采样参数剥离 + max_tokens 自动加 budget）
+     - 不动 provider trait；新增 chat::capabilities / chat::options /
+       messages::options 内部模块
 ```
 
-**已验证的 trait 抽象**：第二个 provider（结构形态完全不同 — system 顶层化、
-tool_result 折叠、典型 SSE 事件类型化）能用同一组 trait + provider-utils
-接入；OpenAI 行得通的设计也适用于 Anthropic。
+**已验证的 trait 抽象**：reasoning 块、annotations、logprobs metadata 均无需
+扩展 trait，全部在 provider crate 内部消化；现有 `Content::Reasoning` /
+`Source` / `ProviderMetadata` 形态正好够用。
 
 **下一阶段候选**（待规划）：
 - ImageModel 实现（OpenAI DALL-E 3，trait 已就绪）
-- 推迟特性补齐：reasoning / search-preview / annotations / logprobs
 - middleware 层（重试 / 日志 / 缓存）
 - 第三个 provider（Gemini）以进一步压力测试
+- 仍未补齐的小特性详见 `todo.md`（OpenAI: prediction / service_tier /
+  parallel_tool_calls / logit_bias 等；Anthropic: 服务器工具 / citations /
+  cache_control / 非图片文件等）
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐。
 
