@@ -2,33 +2,48 @@
 
 > 入口文件：跨里程碑追踪所有 deferred / TODO 项目；任何阶段性停顿都先记到这里。
 
-## 当前里程碑：M10 + M10.5 review fix-pack 完成 ✓
+## 当前里程碑：M11 OpenAI Responses API 完成 ✓
+
+M11 完整接入 OpenAI 第二条 LanguageModel 端点 `POST /v1/responses`，与现有 Chat
+端点并存：
+- 22 项 `provider_options.openai.*` 全量透传 + 模型能力校验（reasoning effort /
+  serviceTier flex/priority / conversation+previousResponseId 互斥）
+- 11 个 provider-defined tools 完整 args / output / tool_choice 路由：
+  web_search / web_search_preview / file_search / code_interpreter /
+  image_generation / local_shell / shell / apply_patch / mcp / custom /
+  tool_search
+- 18 种 output item type 非流式解析 + 4 种 annotation → Content::Source
+- 20+ SSE event type 流式状态机（含 reasoning summary 三态机 active/can-conclude/
+  concluded + apply_patch hasDiff/endEmitted 状态 + image_generation
+  partial_image preliminary 标记）
+- Prompt → input items 转换（systemMessageMode 3 态 + reasoning 模型自动 developer
+  + 11 种 assistant tool-call 路由 + MCP approval_response 透传 + file_id 引用）
+- 1 处 trait 改动：`ToolCallPart` 加 `dynamic: Option<bool>`（对齐
+  `StreamPart::ToolCall.dynamic`，向后兼容）
+- 设计文档：`architecture/0004-m11-responses-design.md`
+- 5 套契约测试（23 个 wiremock 用例）+ 64 个 responses 单元测试
+- workspace 健康：321 测试全绿（M10.5 → M11 +100）；
+  `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过
+- subagent 审核 PASS（与 ai-sdk 上游 100% 特性对齐）
+
+### M10 / M10.5（历史）
 
 M10 单一阶段对齐了 ai-sdk v4 的 OpenAI / Anthropic provider 全部推迟特性 + 三个
 模型表面的 middleware + 内置 5 个 ai-sdk 风格 middleware + schemars 切换。
 
-M10.5 review fix-pack 补齐 ai-sdk Chat API 对齐审核中发现的所有偏差：trait 层 2
-处（StreamPart 加 File/ReasoningFile variant + Tool::Provider wire tag 改为
-"provider"）+ OpenAI Chat 3 个 provider options + capabilities flex/priority 模型
-能力检查 + Anthropic Messages 11 个 provider options + Anthropic 20 个带版本号
-server tool ID 完整对齐（破坏性变更）+ sanitize_json_schema 完整移植。
+M10.5 review fix-pack 补齐 ai-sdk Chat API 对齐审核中发现的所有偏差。设计文档
+`architecture/0003-m10-design.md`。
 
-221 个 workspace 测试全绿（+28 新契约测试）；`cargo fmt --check`、`cargo clippy
--- -D warnings` 通过。设计文档 `architecture/0003-m10-design.md`。
-
-## 仍然推迟（M11+）
+## 仍然推迟（M12+）
 
 ### Provider 扩展
 
-- **Gemini provider**（M11 候选）：用户明确推迟一轮，先把现有两家对齐。验证 trait
+- **Gemini provider**（M12 候选）：用户已推迟两轮，先把现有两家对齐。验证 trait
   抽象的第三个 provider。
-- **OpenAI Responses API endpoint**：M10 仅实现 Chat API 支持的
-  `web_search_preview` provider-defined tool；其它 9 个工具（`web_search` /
-  `file_search` / `code_interpreter` / `image_generation` / `shell` /
-  `apply_patch` / `custom` / `mcp` / `tool_search`）需要 `POST /v1/responses`
-  端点，本轮未接入。
 - **Anthropic Files API endpoint**：当前所有文件类内容用 base64 inline 或 URL；
   上传 + 引用 file id 的端点未实现。
+- **fileIdPrefixes 用户可配置化**：M11 暂硬编码常量；M12+ 改为
+  `OpenAi::builder().file_id_prefixes(...)` 公开 API。
 
 ### Middleware
 

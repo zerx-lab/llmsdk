@@ -58,7 +58,7 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M10 + M10.5 review fix-pack 完成。221 个 workspace 测试全绿；
+当前进度：M1–M11 完成。321 个 workspace 测试全绿；
 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 ```
@@ -181,20 +181,61 @@ M10.5 ✓ Chat API review fix-pack：
        完整移植 ai-sdk 上游 sanitize-json-schema.ts，零新依赖
      - workspace 健康：221 测试全绿（+28 新契约测试）；fmt + clippy 通过
      - 新增契约测试文件：`crates/llmsdk-anthropic/tests/contract_messages_options.rs`
+M11 ✓ OpenAI Responses API 全量接入（POST /v1/responses）：
+     - 新 `OpenAiResponsesLanguageModel` 与 `OpenAiChatModel` 并存；
+       `OpenAi::responses(model_id)` 工厂入口
+     - 22 项 `provider_options.openai.*` 全量透传 + 模型能力校验：
+       conversation/previousResponseId（互斥）/include/instructions/logprobs（bool|≤20）/
+       maxToolCalls/metadata/parallelToolCalls/promptCacheKey/promptCacheRetention/
+       reasoningEffort（none/xhigh 校验）/reasoningSummary/safetyIdentifier/
+       serviceTier（flex/priority 模型能力校验剥离）/store/passThroughUnsupportedFiles/
+       strictJsonSchema/textVerbosity/truncation/user/systemMessageMode/forceReasoning/
+       contextManagement/allowedTools（覆盖 toolChoice）
+     - 11 个 provider-defined tools 完整 args/output/tool_choice 路由：
+       web_search / web_search_preview / file_search / code_interpreter /
+       image_generation / local_shell / shell（containerAuto/containerReference 标
+       provider_executed）/ apply_patch / mcp（serverUrl 或 connectorId 强制校验）/
+       custom（含 grammar/text format）/ tool_search（server/client 双路径）
+     - 18 种 output item type 非流式解析（reasoning/message/function_call/
+       custom_tool_call/web_search_call/file_search_call/code_interpreter_call/
+       image_generation_call/local_shell_call/shell_call/shell_call_output/
+       mcp_call/mcp_list_tools/mcp_approval_request/computer_call/apply_patch_call/
+       compaction/tool_search_call/tool_search_output）+ 4 种 annotation
+       → Content::Source（url_citation/file_citation/container_file_citation/file_path）
+     - 20+ SSE event type 流式状态机：reasoning summary 三态机
+       （active/can-conclude/concluded，store=true 即时 conclude vs store=false
+       延迟到 output_item.done 一次性 conclude）+ apply_patch hasDiff/endEmitted +
+       image_generation partial_image preliminary metadata 标记
+     - Prompt → input items 转换：systemMessageMode 3 态（system/developer/remove）
+       + reasoning 模型自动 developer + 11 种 assistant tool-call 路由
+       （function/custom + apply_patch + local_shell + provider-executed →
+       item_reference 回填）+ user 内容 5 种（text/image url/image data/image
+       file_id ref/pdf/passThrough file）+ MCP approval_response
+     - **trait 改动 1 处**：`ToolCallPart` 加 `dynamic: Option<bool>` 字段，与
+       `StreamPart::ToolCall.dynamic` 对齐（MCP 工具非流式表达 runtime tool name）；
+       Option + serde skip_if 向后兼容
+     - 模块结构：`crates/llmsdk-openai/src/responses/`：mod / model / options /
+       finish_reason / usage / convert_prompt / parse_response / stream /
+       prepare_tools / tools/{11 个 tool}.rs / wire/{request,response,chunk}.rs
+     - 设计文档：`architecture/0004-m11-responses-design.md`
+     - 5 套契约测试：contract_responses_{basic,stream,tools,options,advanced}.rs
+       （23 个 wiremock 用例）+ 64 个 responses 单元测试
+     - workspace 健康：321 测试全绿（M10.5 → M11 +100）；fmt + clippy 通过
+     - subagent 审核 PASS（与 ai-sdk 上游 100% 特性对齐）
 ```
 
-**已验证的 trait 抽象**：M1–M10.5 累计 trait 改动仅 8 处（M8 `ImageResult.warnings`
+**已验证的 trait 抽象**：M1–M11 累计 trait 改动仅 9 处（M8 `ImageResult.warnings`
 补漏 + M10 `JsonSchema = schemars::Schema`、`ImageOptions.files/mask`、
 `ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails` + M10.5 `StreamPart::File` /
-`StreamPart::ReasoningFile` 两个 variant + `Tool::Provider` wire tag 变更）。三个模型表面
-（Language/Embedding/Image）+ 三层 middleware + 两个 provider 的所有 ai-sdk v4
+`StreamPart::ReasoningFile` 两个 variant + `Tool::Provider` wire tag 变更 + M11
+`ToolCallPart.dynamic`）。三个模型表面（Language/Embedding/Image）+ 三层 middleware
++ 两个 provider 三个端点（Chat + Responses + Anthropic Messages）的所有 ai-sdk v4
 特性都基于这套 trait 消化。
 
 **下一阶段候选**（待规划）：
 - 第三个 provider（Gemini）以验证 trait 抽象在第三家上的稳定性
-- OpenAI Responses API 端点（解锁剩余 9 个 OpenAI provider-defined tools）
 - Anthropic Files API 端点
-- 详见 `todo.md` 中"M11+ 推迟"段
+- 详见 `todo.md` 中"M12+ 推迟"段
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐，并按"强制规则"末条
 列出本阶段**全部**特性（不允许中途推迟，详见强制规则段）。

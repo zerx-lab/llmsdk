@@ -194,6 +194,11 @@ pub struct ToolCallPart {
         skip_serializing_if = "Option::is_none"
     )]
     pub provider_executed: Option<bool>,
+    /// `true` when the tool name is only known at runtime (e.g. MCP tools
+    /// proxied through a `provider` tool). Mirrors the `dynamic` field on
+    /// [`super::stream_part::StreamPart::ToolCall`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
     /// Provider-specific options.
     #[serde(
         default,

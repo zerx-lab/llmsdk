@@ -330,6 +330,7 @@ fn accum_to_tool_call(accum: ToolCallAccum) -> Option<ToolCallPart> {
         tool_name: name,
         input,
         provider_executed: None,
+        dynamic: None,
         provider_options: None,
     })
 }

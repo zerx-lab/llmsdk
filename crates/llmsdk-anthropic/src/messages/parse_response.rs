@@ -72,6 +72,7 @@ pub(crate) fn parse_response(
                     tool_name: name,
                     input,
                     provider_executed: None,
+                    dynamic: None,
                     provider_options,
                 }));
             }
@@ -110,6 +111,7 @@ pub(crate) fn parse_response(
                     tool_name: name,
                     input,
                     provider_executed: Some(true),
+                    dynamic: None,
                     provider_options: None,
                 }));
             }

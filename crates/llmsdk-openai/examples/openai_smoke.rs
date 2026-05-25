@@ -1,0 +1,790 @@
+//! `OpenAI` provider 全功能可用性 smoke 测试。
+//!
+//! 覆盖 `llmsdk-openai` 当前实现的所有公开能力：
+//! - Chat Completions：基础生成、流式、多轮 function tool use、JSON
+//!   response format、多模态 vision (image URL)、reasoning effort
+//! - Embeddings：批量嵌入 + 余弦相似度
+//! - Image generation：`DALL-E 3` / `gpt-image-1`
+//! - Responses API：基础生成 + provider-defined `web_search` 工具
+//!
+//! # Run
+//!
+//! ```bash
+//! # 推荐：复制并填写 .env（git 已忽略），无需手动 export
+//! cp .env.example .env
+//! cargo run -p llmsdk-openai --example openai_smoke
+//!
+//! # 或者直接 inline
+//! OPENAI_API_KEY=sk-... cargo run -p llmsdk-openai --example openai_smoke
+//!
+//! # 只跑一个 demo
+//! cargo run -p llmsdk-openai --example openai_smoke -- chat
+//! ```
+//!
+//! `.env` 加载顺序（先到先得，实环境变量永远优先）：
+//! 1. `$CWD/.env`                              — 仓库根
+//! 2. `crates/llmsdk-openai/.env`              — crate 内覆盖
+//! 3. workspace 根（通过 `CARGO_MANIFEST_DIR/../..` 编译期解析）
+//! 4. `crates/llmsdk-openai/examples/.env`
+//!
+//! # 可选环境变量
+//!
+//! | 变量                       | 默认                          | 说明                          |
+//! |----------------------------|-------------------------------|-------------------------------|
+//! | `OPENAI_API_KEY`           | (必填)                        | `OpenAI` API key              |
+//! | `OPENAI_BASE_URL`          | `https://api.openai.com/v1`   | 代理 / Azure                  |
+//! | `OPENAI_ORG`               | -                             | `OpenAI-Organization`         |
+//! | `OPENAI_PROJECT`           | -                             | `OpenAI-Project`              |
+//! | `OPENAI_CHAT_MODEL`        | `gpt-4o-mini`                 | 默认聊天模型                  |
+//! | `OPENAI_REASONING_MODEL`   | `o3-mini`                     | reasoning demo 用             |
+//! | `OPENAI_VISION_MODEL`      | `gpt-4o-mini`                 | vision demo 用                |
+//! | `OPENAI_EMBEDDING_MODEL`   | `text-embedding-3-small`      | embedding demo 用             |
+//! | `OPENAI_IMAGE_MODEL`       | `dall-e-3`                    | image demo 用                 |
+//! | `OPENAI_RESPONSES_MODEL`   | `gpt-4o-mini`                 | responses demo 用             |
+//! | `OPENAI_VISION_IMAGE_URL`  | wikipedia 一张 64×64 SVG png  | vision demo 输入图片          |
+//! | `OPENAI_IMAGE_OUTPUT_PATH` | `/tmp/llmsdk_openai_demo.png` | image demo 保存路径           |
+//!
+//! # CLI 参数（位置 1）
+//!
+//! `all` (默认) | `chat` | `stream` | `tools` | `json` | `vision` |
+//! `reasoning` | `embedding` | `image` | `responses` | `responses-web`
+//!
+//! 未识别的名字会被忽略并报错；任何单个 demo 失败不会终止其它 demo。
+
+use std::collections::HashMap;
+use std::env;
+use std::error::Error;
+use std::fs;
+use std::path::Path;
+use std::process::ExitCode;
+use std::sync::OnceLock;
+
+use futures::StreamExt;
+use llmsdk_openai::OpenAi;
+use llmsdk_provider::embedding_model::EmbedOptions;
+use llmsdk_provider::image_model::ImageOptions;
+use llmsdk_provider::language_model::{
+    CallOptions, Content, FunctionTool, Message, ProviderTool, ReasoningEffort, ResponseFormat,
+    StreamPart, TextPart, Tool, ToolChoice, ToolMessagePart, ToolResultOutput, UserPart,
+};
+use llmsdk_provider::shared::FileData;
+use llmsdk_provider::{EmbeddingModel, ImageModel, LanguageModel};
+use serde_json::json;
+
+type DynErr = Box<dyn Error + Send + Sync + 'static>;
+
+const DEFAULT_VISION_URL: &str =
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Tomato_je.jpg/320px-Tomato_je.jpg";
+const DEFAULT_IMAGE_OUTPUT: &str = "/tmp/llmsdk_openai_demo.png";
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    report_dotenv_sources();
+    let demo = env::args().nth(1).unwrap_or_else(|| "all".to_owned());
+    match run(&demo).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("\n✗ smoke aborted: {err}");
+            let mut src = err.source();
+            while let Some(s) = src {
+                eprintln!("  caused by: {s}");
+                src = s.source();
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(demo: &str) -> Result<(), DynErr> {
+    let provider = build_provider()?;
+
+    let demos: Vec<&str> = if demo == "all" {
+        vec![
+            "chat",
+            "stream",
+            "tools",
+            "json",
+            "vision",
+            "reasoning",
+            "embedding",
+            "image",
+            "responses",
+            "responses-web",
+        ]
+    } else {
+        vec![demo]
+    };
+
+    let mut fail = 0u32;
+    for name in &demos {
+        let result = match *name {
+            "chat" => demo_chat(&provider).await,
+            "stream" => demo_stream(&provider).await,
+            "tools" => demo_tools(&provider).await,
+            "json" => demo_json(&provider).await,
+            "vision" => demo_vision(&provider).await,
+            "reasoning" => demo_reasoning(&provider).await,
+            "embedding" => demo_embedding(&provider).await,
+            "image" => demo_image(&provider).await,
+            "responses" => demo_responses(&provider).await,
+            "responses-web" => demo_responses_web(&provider).await,
+            other => Err::<(), DynErr>(format!("unknown demo: {other}").into()),
+        };
+        if let Err(e) = result {
+            fail += 1;
+            eprintln!("✗ [{name}] failed: {e}");
+            let mut src = e.source();
+            while let Some(s) = src {
+                eprintln!("    caused by: {s}");
+                src = s.source();
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "═════ smoke 结束：{} 通过 / {} 失败 ═════",
+        demos.len() - fail as usize,
+        fail
+    );
+    if fail > 0 {
+        return Err(format!("{fail} demo(s) failed").into());
+    }
+    Ok(())
+}
+
+// ─── .env 加载（零依赖、零 unsafe） ──────────────────────────────
+//
+// Rust 2024 edition 把 `std::env::set_var` 标记为 unsafe（项目禁止
+// unsafe），所以这里不去修改进程 env，而是把 .env 解析到一个静态
+// `HashMap`，所有 env 读取统一走 [`opt_env`] / [`env_or`]：先看真实
+// 环境变量，再 fallback 到 .env。
+//
+// 加载顺序（按出现顺序合并，先到先得）：
+// 1. `$CWD/.env`                              — 用户在 workspace 根运行
+// 2. `$CARGO_MANIFEST_DIR/.env`               — crate-local 覆盖
+// 3. `$CARGO_MANIFEST_DIR/../../.env`         — workspace 根（编译期路径）
+// 4. `$CARGO_MANIFEST_DIR/examples/.env`      — example 同目录
+
+static DOTENV: OnceLock<DotenvBundle> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct DotenvBundle {
+    values: HashMap<String, String>,
+    loaded: Vec<String>,
+}
+
+fn dotenv_bundle() -> &'static DotenvBundle {
+    DOTENV.get_or_init(load_dotenv)
+}
+
+fn load_dotenv() -> DotenvBundle {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let candidates = [
+        ".env".to_owned(),
+        format!("{manifest}/.env"),
+        format!("{manifest}/../../.env"),
+        format!("{manifest}/examples/.env"),
+    ];
+
+    let mut values: HashMap<String, String> = HashMap::new();
+    let mut loaded: Vec<String> = Vec::new();
+    let mut seen_canonical: Vec<std::path::PathBuf> = Vec::new();
+
+    for path in &candidates {
+        let p = Path::new(path);
+        let Ok(canon) = p.canonicalize() else {
+            continue;
+        };
+        if seen_canonical.contains(&canon) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&canon) else {
+            continue;
+        };
+        seen_canonical.push(canon.clone());
+        loaded.push(canon.display().to_string());
+        parse_dotenv_into(&text, &mut values);
+    }
+
+    DotenvBundle { values, loaded }
+}
+
+fn parse_dotenv_into(text: &str, into: &mut HashMap<String, String>) {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = v.trim();
+        // 去掉行内注释（仅当未被引号包裹时；简单版只剥首尾引号即可）
+        if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            value = &value[1..value.len() - 1];
+        }
+        // 先到先得 → 多个文件冲突时，按 [`load_dotenv`] 中的顺序保留更靠前的值
+        into.entry(key.to_owned())
+            .or_insert_with(|| value.to_owned());
+    }
+}
+
+fn report_dotenv_sources() {
+    let bundle = dotenv_bundle();
+    if bundle.loaded.is_empty() {
+        eprintln!("(没有找到 .env 文件，仅使用进程环境变量)");
+    } else {
+        eprintln!("加载到 {} 个 .env 文件:", bundle.loaded.len());
+        for p in &bundle.loaded {
+            eprintln!("  • {p}");
+        }
+    }
+}
+
+fn opt_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .or_else(|| dotenv_bundle().values.get(name).cloned())
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    opt_env(name).unwrap_or_else(|| default.to_owned())
+}
+
+// ─── provider 构建 ───────────────────────────────────────────────
+
+fn build_provider() -> Result<OpenAi, DynErr> {
+    let mut builder = OpenAi::builder();
+    if let Some(key) = opt_env("OPENAI_API_KEY") {
+        builder = builder.api_key(key);
+    }
+    if let Some(base) = opt_env("OPENAI_BASE_URL") {
+        builder = builder.base_url(base);
+    }
+    if let Some(org) = opt_env("OPENAI_ORG") {
+        builder = builder.organization(org);
+    }
+    if let Some(proj) = opt_env("OPENAI_PROJECT") {
+        builder = builder.project(proj);
+    }
+    Ok(builder.build()?)
+}
+
+fn header(title: &str) {
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("▶ {title}");
+    println!("──────────────────────────────────────────────");
+}
+
+fn system(text: &str) -> Message {
+    Message::System {
+        content: text.to_owned(),
+        provider_options: None,
+    }
+}
+
+fn user_text(text: &str) -> Message {
+    Message::User {
+        content: vec![UserPart::Text(TextPart {
+            text: text.to_owned(),
+            provider_options: None,
+        })],
+        provider_options: None,
+    }
+}
+
+fn print_text_content(content: &[Content]) {
+    for part in content {
+        if let Content::Text(t) = part {
+            println!("{}", t.text);
+        }
+    }
+}
+
+// ─── 1. Chat 基础生成 ────────────────────────────────────────────
+
+async fn demo_chat(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_CHAT_MODEL", "gpt-4o-mini");
+    header(&format!("chat · do_generate · {model_id}"));
+
+    let model = provider.chat(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![
+                system("你是一个简洁的助手，回答控制在两句话以内。"),
+                user_text("用一句话告诉我什么是 Rust 的所有权（ownership）。"),
+            ],
+            max_output_tokens: Some(200),
+            temperature: Some(0.2),
+            ..Default::default()
+        })
+        .await?;
+
+    print_text_content(&result.content);
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    for w in &result.warnings {
+        println!("[warning] {w:?}");
+    }
+    Ok(())
+}
+
+// ─── 2. Chat 流式 ────────────────────────────────────────────────
+
+async fn demo_stream(provider: &OpenAi) -> Result<(), DynErr> {
+    use std::io::Write;
+
+    let model_id = env_or("OPENAI_CHAT_MODEL", "gpt-4o-mini");
+    header(&format!("chat · do_stream · {model_id}"));
+
+    let model = provider.chat(model_id);
+    let mut stream = model
+        .do_stream(CallOptions {
+            prompt: vec![user_text("用 3 个要点说明 actor 模型。简短。")],
+            max_output_tokens: Some(300),
+            ..Default::default()
+        })
+        .await?
+        .stream;
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let mut final_usage = None;
+    let mut final_reason = None;
+    while let Some(item) = stream.next().await {
+        match item? {
+            StreamPart::TextDelta { delta, .. } => {
+                handle.write_all(delta.as_bytes())?;
+                handle.flush()?;
+            }
+            StreamPart::Finish {
+                usage,
+                finish_reason,
+                ..
+            } => {
+                final_usage = Some(usage);
+                final_reason = Some(finish_reason);
+            }
+            StreamPart::Error { error } => {
+                eprintln!("\n[stream error] {error}");
+            }
+            _ => {}
+        }
+    }
+    println!();
+    println!("[finish={final_reason:?} usage={final_usage:?}]");
+    Ok(())
+}
+
+// ─── 3. 多轮 function tool use ───────────────────────────────────
+
+async fn demo_tools(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_CHAT_MODEL", "gpt-4o-mini");
+    header(&format!(
+        "chat · function tool use (multi-turn) · {model_id}"
+    ));
+
+    let weather_schema = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "city":    { "type": "string", "description": "city name" },
+            "unit":    { "type": "string", "enum": ["celsius", "fahrenheit"] }
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }))?;
+
+    let tool = Tool::Function(FunctionTool {
+        name: "get_weather".to_owned(),
+        description: Some("Look up the current weather for a city.".to_owned()),
+        input_schema: weather_schema,
+        input_examples: None,
+        strict: Some(true),
+        provider_options: None,
+    });
+
+    let model = provider.chat(model_id);
+
+    // ── round 1：让模型决定调用工具
+    let round1 = model
+        .do_generate(CallOptions {
+            prompt: vec![
+                system("当用户问天气时请调用 get_weather 工具。"),
+                user_text("北京现在多少度？用摄氏度回答。"),
+            ],
+            tools: Some(vec![tool.clone()]),
+            tool_choice: Some(ToolChoice::Auto),
+            ..Default::default()
+        })
+        .await?;
+
+    let tool_call = round1.content.iter().find_map(|c| match c {
+        Content::ToolCall(tc) => Some(tc.clone()),
+        _ => None,
+    });
+
+    let Some(call) = tool_call else {
+        println!("(模型没有调用工具，原始输出如下)");
+        print_text_content(&round1.content);
+        return Ok(());
+    };
+
+    println!(
+        "→ 模型请求 tool {} (id={}) input={}",
+        call.tool_name, call.tool_call_id, call.input
+    );
+
+    // ── 本地"执行"工具：返回固定 JSON
+    let fake_result = json!({
+        "city": call.input.get("city").cloned().unwrap_or(json!("北京")),
+        "tempC": 7,
+        "condition": "晴",
+        "humidity": 0.32
+    });
+
+    // ── round 2：把 tool_result 喂回模型
+    let round2 = model
+        .do_generate(CallOptions {
+            prompt: vec![
+                system("根据 get_weather 的结果用中文回答用户。"),
+                user_text("北京现在多少度？用摄氏度回答。"),
+                Message::Assistant {
+                    content: vec![llmsdk_provider::language_model::AssistantPart::ToolCall(
+                        call.clone(),
+                    )],
+                    provider_options: None,
+                },
+                Message::Tool {
+                    content: vec![ToolMessagePart::ToolResult(
+                        llmsdk_provider::language_model::ToolResultPart {
+                            tool_call_id: call.tool_call_id.clone(),
+                            tool_name: call.tool_name.clone(),
+                            output: ToolResultOutput::Json {
+                                value: fake_result,
+                                provider_options: None,
+                            },
+                            provider_options: None,
+                        },
+                    )],
+                    provider_options: None,
+                },
+            ],
+            tools: Some(vec![tool]),
+            tool_choice: Some(ToolChoice::Auto),
+            ..Default::default()
+        })
+        .await?;
+
+    println!("→ 最终回复:");
+    print_text_content(&round2.content);
+    println!(
+        "[finish={:?} usage={:?}]",
+        round2.finish_reason.unified, round2.usage
+    );
+    Ok(())
+}
+
+// ─── 4. JSON response_format ─────────────────────────────────────
+
+async fn demo_json(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_CHAT_MODEL", "gpt-4o-mini");
+    header(&format!("chat · response_format=json · {model_id}"));
+
+    let schema = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "language": { "type": "string" },
+            "year":     { "type": "integer" },
+            "creator":  { "type": "string" },
+            "paradigms":{ "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["language", "year", "creator", "paradigms"],
+        "additionalProperties": false
+    }))?;
+
+    let model = provider.chat(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![user_text("用 JSON 描述 Rust 编程语言的基本信息。")],
+            response_format: Some(ResponseFormat::Json {
+                schema: Some(schema),
+                name: Some("LanguageInfo".to_owned()),
+                description: Some("基本元信息".to_owned()),
+            }),
+            ..Default::default()
+        })
+        .await?;
+
+    print_text_content(&result.content);
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    Ok(())
+}
+
+// ─── 5. Vision：图片 URL 输入 ────────────────────────────────────
+
+async fn demo_vision(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_VISION_MODEL", "gpt-4o-mini");
+    let image_url = env_or("OPENAI_VISION_IMAGE_URL", DEFAULT_VISION_URL);
+    header(&format!("chat · vision (image URL) · {model_id}"));
+    println!("image: {image_url}");
+
+    let model = provider.chat(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![Message::User {
+                content: vec![
+                    UserPart::Text(TextPart {
+                        text: "这是什么？用一句话描述。".to_owned(),
+                        provider_options: None,
+                    }),
+                    UserPart::File(llmsdk_provider::language_model::FilePart {
+                        filename: None,
+                        data: FileData::Url { url: image_url },
+                        media_type: "image/jpeg".to_owned(),
+                        provider_options: None,
+                    }),
+                ],
+                provider_options: None,
+            }],
+            max_output_tokens: Some(200),
+            ..Default::default()
+        })
+        .await?;
+
+    print_text_content(&result.content);
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    Ok(())
+}
+
+// ─── 6. Reasoning model ──────────────────────────────────────────
+
+async fn demo_reasoning(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_REASONING_MODEL", "o3-mini");
+    header(&format!("chat · reasoning · {model_id}"));
+
+    // 两种触发方式：
+    //   (a) CallOptions.reasoning（跨 provider 抽象，可移植）
+    //   (b) provider_options.openai.reasoningEffort（OpenAI 特化透传）
+    // 这里走 (a)。
+    let model = provider.chat(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![user_text(
+                "如果一辆车 2 小时跑 130 公里，平均时速是多少？只给最终答案。",
+            )],
+            reasoning: Some(ReasoningEffort::Low),
+            ..Default::default()
+        })
+        .await?;
+
+    let mut had_reasoning = false;
+    for part in &result.content {
+        match part {
+            Content::Reasoning(r) => {
+                had_reasoning = true;
+                let snippet: String = r.text.chars().take(120).collect();
+                println!("(reasoning, 截断 120 字) {snippet}…");
+            }
+            Content::Text(t) => println!("→ answer: {}", t.text),
+            _ => {}
+        }
+    }
+    if !had_reasoning {
+        println!("(模型未返回 reasoning 块——某些 reasoning 模型不外露 trace)");
+    }
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    for w in &result.warnings {
+        println!("[warning] {w:?}");
+    }
+    Ok(())
+}
+
+// ─── 7. Embedding ────────────────────────────────────────────────
+
+async fn demo_embedding(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small");
+    header(&format!("embedding · do_embed · {model_id}"));
+
+    let model = provider.embedding(model_id);
+    let result = model
+        .do_embed(EmbedOptions {
+            values: vec![
+                "Rust is a memory-safe systems programming language.".to_owned(),
+                "锈是一种内存安全的系统编程语言。".to_owned(),
+                "Bananas are yellow.".to_owned(),
+            ],
+            headers: None,
+            provider_options: None,
+        })
+        .await?;
+
+    println!("→ {} 个向量；维度 = {}", result.embeddings.len(), {
+        result.embeddings.first().map_or(0, Vec::len)
+    });
+    if let Some(usage) = result.usage {
+        println!("[usage tokens={:?}]", usage.tokens);
+    }
+    if result.embeddings.len() >= 3 {
+        let sim_en_zh = cosine(&result.embeddings[0], &result.embeddings[1]);
+        let sim_en_banana = cosine(&result.embeddings[0], &result.embeddings[2]);
+        println!("  cos(EN, ZH 同义)    = {sim_en_zh:.4}");
+        println!("  cos(EN, banana 无关) = {sim_en_banana:.4}");
+    }
+    Ok(())
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
+}
+
+// ─── 8. Image generation ─────────────────────────────────────────
+
+async fn demo_image(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_IMAGE_MODEL", "dall-e-3");
+    let out_path = env_or("OPENAI_IMAGE_OUTPUT_PATH", DEFAULT_IMAGE_OUTPUT);
+    header(&format!("image · do_generate · {model_id}"));
+
+    let model = provider.image(model_id);
+    let result = model
+        .do_generate(ImageOptions {
+            prompt: "A friendly cartoon ferris wheel made of rust gears, pastel sunset background"
+                .to_owned(),
+            n: Some(1),
+            size: Some("1024x1024".to_owned()),
+            ..Default::default()
+        })
+        .await?;
+
+    println!(
+        "→ 收到 {} 张图；warnings={}",
+        result.images.len(),
+        result.warnings.len()
+    );
+    if let Some(first) = result.images.first() {
+        let path = Path::new(&out_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &first.bytes)?;
+        println!(
+            "  写入 {} ({} bytes, type={})",
+            path.display(),
+            first.bytes.len(),
+            first.media_type
+        );
+    }
+    if let Some(usage) = result.usage {
+        println!("[usage {usage:?}]");
+    }
+    for w in &result.warnings {
+        println!("[warning] {w:?}");
+    }
+    Ok(())
+}
+
+// ─── 9. Responses API 基础生成 ───────────────────────────────────
+
+async fn demo_responses(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_RESPONSES_MODEL", "gpt-4o-mini");
+    header(&format!("responses · do_generate · {model_id}"));
+
+    let model = provider.responses(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![
+                system("你是一个简洁的助手。"),
+                user_text("用一句话概括 HTTP/3 与 HTTP/2 的关键区别。"),
+            ],
+            max_output_tokens: Some(200),
+            ..Default::default()
+        })
+        .await?;
+
+    print_text_content(&result.content);
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    Ok(())
+}
+
+// ─── 10. Responses API + web_search 工具 ─────────────────────────
+
+async fn demo_responses_web(provider: &OpenAi) -> Result<(), DynErr> {
+    let model_id = env_or("OPENAI_RESPONSES_MODEL", "gpt-4o-mini");
+    header(&format!(
+        "responses · provider tool openai.web_search · {model_id}"
+    ));
+
+    let web_search = Tool::Provider(ProviderTool {
+        id: "openai.web_search".to_owned(),
+        name: "web_search".to_owned(),
+        args: serde_json::from_value(json!({ "searchContextSize": "low" }))?,
+        provider_options: None,
+    });
+
+    let model = provider.responses(model_id);
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![user_text(
+                "请用一句话告诉我 Rust 的最新稳定版版本号（如有需要可联网搜索）。",
+            )],
+            tools: Some(vec![web_search]),
+            tool_choice: Some(ToolChoice::Auto),
+            max_output_tokens: Some(400),
+            ..Default::default()
+        })
+        .await?;
+
+    let mut printed_text = false;
+    for part in &result.content {
+        match part {
+            Content::Text(t) => {
+                println!("{}", t.text);
+                printed_text = true;
+            }
+            Content::Source(src) => println!("• source: {src:?}"),
+            Content::ToolCall(tc) => println!("• tool_call: {} input={}", tc.tool_name, tc.input),
+            Content::ToolResult(tr) => println!("• tool_result: {} ", tr.tool_name),
+            _ => {}
+        }
+    }
+    if !printed_text {
+        println!("(模型没有给出最终文本——可能账户未开通 web_search)");
+    }
+    println!(
+        "[finish={:?} usage={:?}]",
+        result.finish_reason.unified, result.usage
+    );
+    for w in &result.warnings {
+        println!("[warning] {w:?}");
+    }
+    Ok(())
+}

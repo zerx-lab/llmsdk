@@ -372,6 +372,7 @@ mod tests {
                     tool_name: "weather".into(),
                     input: serde_json::json!({"city": "NYC"}),
                     provider_executed: None,
+                    dynamic: None,
                     provider_options: None,
                 }),
             ],

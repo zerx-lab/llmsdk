@@ -382,6 +382,7 @@ fn build_tool_call(id: String, name: String, arguments: String) -> ToolCallPart 
         tool_name: name,
         input,
         provider_executed: None,
+        dynamic: None,
         provider_options: None,
     }
 }

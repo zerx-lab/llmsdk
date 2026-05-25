@@ -13,6 +13,7 @@ use llmsdk_provider_utils::http::HttpClient;
 use crate::chat::OpenAiChatModel;
 use crate::embedding::OpenAiEmbeddingModel;
 use crate::image::OpenAiImageModel;
+use crate::responses::OpenAiResponsesLanguageModel;
 use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL};
 
 /// `OpenAI` provider handle — entry point for model construction.
@@ -71,6 +72,17 @@ impl OpenAi {
     #[must_use]
     pub fn image(&self, model_id: impl Into<String>) -> OpenAiImageModel {
         OpenAiImageModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct a Responses API language model handle (`POST /v1/responses`).
+    ///
+    /// `model_id` is any model that accepts the Responses endpoint
+    /// (gpt-4o / gpt-4.1 / gpt-5 / o-series). The same `OpenAi` provider
+    /// can mix [`OpenAi::chat`] and [`OpenAi::responses`] handles; they
+    /// route to different `OpenAI` endpoints.
+    #[must_use]
+    pub fn responses(&self, model_id: impl Into<String>) -> OpenAiResponsesLanguageModel {
+        OpenAiResponsesLanguageModel::new(Arc::clone(&self.inner), model_id.into())
     }
 }
 

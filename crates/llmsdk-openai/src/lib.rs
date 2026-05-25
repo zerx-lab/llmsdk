@@ -39,11 +39,13 @@ mod config;
 mod embedding;
 mod error;
 mod image;
+mod responses;
 
 pub use chat::OpenAiChatModel;
 pub use config::{OpenAi, OpenAiBuilder};
 pub use embedding::OpenAiEmbeddingModel;
 pub use image::OpenAiImageModel;
+pub use responses::OpenAiResponsesLanguageModel;
 
 /// Default base URL for the `OpenAI` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";

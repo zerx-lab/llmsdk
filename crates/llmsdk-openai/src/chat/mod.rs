@@ -28,7 +28,7 @@
 //! - parallel tool input streaming tracker — handled in M4 with `do_stream`
 // Rust guideline compliant 2026-02-21
 
-mod capabilities;
+pub(crate) mod capabilities;
 mod convert_prompt;
 mod finish_reason;
 mod model;

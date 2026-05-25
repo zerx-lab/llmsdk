@@ -1,2 +1,6 @@
 /target
 .worktrees/
+
+# 本地密钥 — example bins 通过 .env 加载 OPENAI_API_KEY 等
+.env
+**/.env
