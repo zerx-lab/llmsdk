@@ -8,13 +8,19 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::http::HttpClient;
 
 use crate::chat::OpenAiChatModel;
+use crate::completion::OpenAiCompletionLanguageModel;
 use crate::embedding::OpenAiEmbeddingModel;
+use crate::files::OpenAiFiles;
 use crate::image::OpenAiImageModel;
 use crate::responses::OpenAiResponsesLanguageModel;
+use crate::skills::OpenAiSkills;
+use crate::speech::OpenAiSpeechModel;
+use crate::transcription::OpenAiTranscriptionModel;
 use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL, PROVIDER_ID};
 
 /// `OpenAI` provider handle — entry point for model construction.
@@ -92,6 +98,36 @@ pub struct Inner {
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
     pub(crate) provider_id: &'static str,
+    /// Optional per-request signer (e.g. AWS `SigV4` for Bedrock Mantle, AAD
+    /// token refresh for Azure with managed identity). Called once per
+    /// outgoing request after `headers` is cloned.
+    pub(crate) signer: Option<Arc<dyn RequestSigner>>,
+}
+
+/// Per-request signing hook.
+///
+/// Implementations mutate the request headers in place (typically adding
+/// `Authorization` or `x-amz-*` entries). Called from each `do_generate` /
+/// `do_stream` / `upload_*` path just before the HTTP transport.
+///
+/// Used to plug AWS `SigV4` (Bedrock Mantle) or rotating Bearer tokens (Azure
+/// AAD / managed identity) into the `OpenAI` request pipeline without
+/// duplicating the wire serialization code.
+#[async_trait]
+pub trait RequestSigner: Send + Sync + fmt::Debug {
+    /// Compute and inject auth headers for this request.
+    ///
+    /// # Errors
+    ///
+    /// Implementations return a [`ProviderError`] when credential resolution
+    /// or signing fails.
+    async fn sign(
+        &self,
+        headers: &mut HashMap<String, Option<String>>,
+        method: &str,
+        url: &str,
+        body: &[u8],
+    ) -> Result<(), ProviderError>;
 }
 
 impl Inner {
@@ -110,7 +146,40 @@ impl Inner {
             headers,
             http,
             provider_id,
+            signer: None,
         }
+    }
+
+    /// Variant of [`Self::new`] that installs a per-request [`RequestSigner`].
+    #[must_use]
+    pub fn with_signer(
+        url: UrlStrategy,
+        headers: HashMap<String, Option<String>>,
+        http: HttpClient,
+        provider_id: &'static str,
+        signer: Arc<dyn RequestSigner>,
+    ) -> Self {
+        Self {
+            url,
+            headers,
+            http,
+            provider_id,
+            signer: Some(signer),
+        }
+    }
+
+    /// Apply the optional [`RequestSigner`] hook, if any.
+    pub(crate) async fn sign_if_needed(
+        &self,
+        headers: &mut HashMap<String, Option<String>>,
+        method: &str,
+        url: &str,
+        body: &[u8],
+    ) -> Result<(), ProviderError> {
+        if let Some(signer) = &self.signer {
+            signer.sign(headers, method, url, body).await?;
+        }
+        Ok(())
     }
 
     /// Resolve `endpoint` for `model_id` using the configured strategy.
@@ -178,6 +247,41 @@ impl OpenAi {
     #[must_use]
     pub fn responses(&self, model_id: impl Into<String>) -> OpenAiResponsesLanguageModel {
         OpenAiResponsesLanguageModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct a legacy Completions (`POST /v1/completions`) model handle.
+    ///
+    /// Use for instruction-tuned legacy models such as
+    /// `gpt-3.5-turbo-instruct`. The endpoint does not support tools, JSON
+    /// response format, or multimodal user content — those generate warnings.
+    #[must_use]
+    pub fn completion(&self, model_id: impl Into<String>) -> OpenAiCompletionLanguageModel {
+        OpenAiCompletionLanguageModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct a Files API handle (`POST /v1/files`).
+    #[must_use]
+    pub fn files(&self) -> OpenAiFiles {
+        OpenAiFiles::new(Arc::clone(&self.inner), "openai.files".to_owned())
+    }
+
+    /// Construct a Skills API handle (`POST /v1/skills`).
+    #[must_use]
+    pub fn skills(&self) -> OpenAiSkills {
+        OpenAiSkills::new(Arc::clone(&self.inner), "openai.skills".to_owned())
+    }
+
+    /// Construct a Speech (TTS) model handle (`POST /v1/audio/speech`).
+    #[must_use]
+    pub fn speech(&self, model_id: impl Into<String>) -> OpenAiSpeechModel {
+        OpenAiSpeechModel::new(Arc::clone(&self.inner), model_id.into())
+    }
+
+    /// Construct a Transcription (STT) model handle
+    /// (`POST /v1/audio/transcriptions`).
+    #[must_use]
+    pub fn transcription(&self, model_id: impl Into<String>) -> OpenAiTranscriptionModel {
+        OpenAiTranscriptionModel::new(Arc::clone(&self.inner), model_id.into())
     }
 }
 
@@ -280,6 +384,7 @@ impl OpenAiBuilder {
                 headers,
                 http,
                 provider_id: PROVIDER_ID,
+                signer: None,
             }),
         })
     }

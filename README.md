@@ -21,10 +21,19 @@ let result = model.do_generate(opts).await?;
 
 | Crate | Description |
 | --- | --- |
+| [`llmsdk`](crates/llmsdk) | Umbrella facade — re-exports `llmsdk-provider` at the root plus one feature-gated module per concrete provider |
 | [`llmsdk-provider`](crates/llmsdk-provider) | Core traits, error types, shared types, middleware layer |
 | [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API-key loading |
 | [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat, Responses, Embeddings, Images |
 | [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages, Files, Skills, typed server tools |
+| [`llmsdk-xai`](crates/llmsdk-xai) | xAI Chat, Responses, Image, Video, Files, typed server tools |
+| [`llmsdk-mistral`](crates/llmsdk-mistral) | Mistral Chat + Embedding (incl. magistral reasoning) |
+| [`llmsdk-azure`](crates/llmsdk-azure) | Azure OpenAI Chat / Responses / Embedding / Image |
+| [`llmsdk-cohere`](crates/llmsdk-cohere) | Cohere Chat + Embedding + Reranking |
+| [`llmsdk-google`](crates/llmsdk-google) | Google Gemini language + Embedding + Imagen + Veo + Files + 8 typed tools |
+| [`llmsdk-anthropic-aws`](crates/llmsdk-anthropic-aws) | Claude on AWS (Anthropic-managed deployment) |
+| [`llmsdk-amazon-bedrock`](crates/llmsdk-amazon-bedrock) | Amazon Bedrock Converse + Embedding + Image + Anthropic + Reranking |
+| [`llmsdk-google-vertex`](crates/llmsdk-google-vertex) | Vertex Gemini + Embedding + Image + Video + Anthropic + xAI + MaaS |
 
 ## Capability matrix
 
@@ -42,24 +51,37 @@ Provider-specific knobs (OpenAI `prediction` / `store` / `service_tier` /
 
 ## Quick start
 
+The recommended entry point is the [`llmsdk`](crates/llmsdk) umbrella crate.
+Pick the providers you need with cargo features — everything else stays out
+of your dependency graph.
+
 `Cargo.toml`:
 
 ```toml
 [dependencies]
-llmsdk-provider = { git = "https://github.com/zerx-lab/llmsdk" }
-llmsdk-openai   = { git = "https://github.com/zerx-lab/llmsdk" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+llmsdk = { git = "https://github.com/zerx-lab/llmsdk", features = ["openai", "anthropic"] }
+tokio  = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
+
+Available features: `openai` · `anthropic` · `xai` · `mistral` · `azure` ·
+`cohere` · `google` · `anthropic-aws` · `amazon-bedrock` · `google-vertex` ·
+`utils` (the `llmsdk-provider-utils` HTTP/SSE/multipart helpers) · `full`
+(everything). All are off by default. The trait crate (`llmsdk-provider`) is
+always pulled in and its contents are re-exported at the crate root, so
+`use llmsdk::LanguageModel` works directly.
+
+If you want tighter control over what compiles, you can keep depending on
+the individual `llmsdk-*` crates — they remain the unit of versioning and
+release.
 
 ### OpenAI Chat
 
 ```rust
-use llmsdk_openai::OpenAi;
-use llmsdk_provider::LanguageModel;
-use llmsdk_provider::language_model::{CallOptions, Message, TextPart, UserPart};
+use llmsdk::openai::OpenAi;
+use llmsdk::{CallOptions, LanguageModel, Message, ProviderError, TextPart, UserPart};
 
 #[tokio::main]
-async fn main() -> Result<(), llmsdk_provider::ProviderError> {
+async fn main() -> Result<(), ProviderError> {
     let provider = OpenAi::builder().api_key("sk-...").build()?;
     let model = provider.chat("gpt-4o-mini");
 
@@ -84,9 +106,8 @@ async fn main() -> Result<(), llmsdk_provider::ProviderError> {
 ### Anthropic Messages
 
 ```rust
-use llmsdk_anthropic::Anthropic;
-use llmsdk_provider::LanguageModel;
-use llmsdk_provider::language_model::{CallOptions, Message, TextPart, UserPart};
+use llmsdk::anthropic::Anthropic;
+use llmsdk::{CallOptions, LanguageModel, Message, TextPart, UserPart};
 
 let provider = Anthropic::builder().api_key("sk-ant-...").build()?;
 let model = provider.messages("claude-3-5-sonnet-latest");
@@ -119,7 +140,7 @@ Every model surface (`LanguageModel` / `EmbeddingModel` / `ImageModel`) can be
 wrapped with composable middleware. Order is outermost-first:
 
 ```rust
-use llmsdk_provider::{
+use llmsdk::{
     CacheMiddleware, LoggingMiddleware, RetryMiddleware, StderrLogger,
     MemoryCacheStore, wrap_language_model,
 };

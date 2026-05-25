@@ -419,7 +419,13 @@ fn resolve_thinking(config: Option<&ThinkingConfig>) -> (Option<WireThinking>, O
     match config {
         None => (None, None, false),
         Some(ThinkingConfig::Disabled) => (Some(WireThinking::Disabled), None, false),
-        Some(ThinkingConfig::Adaptive) => (Some(WireThinking::Adaptive), None, true),
+        Some(ThinkingConfig::Adaptive { display }) => (
+            Some(WireThinking::Adaptive {
+                display: display.clone(),
+            }),
+            None,
+            true,
+        ),
         Some(ThinkingConfig::Enabled { budget_tokens }) => {
             // Default budget when caller did not specify (matches ai-sdk).
             let resolved = budget_tokens.or(Some(DEFAULT_THINKING_BUDGET));
@@ -625,6 +631,10 @@ fn ensure_user_first(messages: Vec<WireMessage>, warnings: &mut Vec<Warning>) ->
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single match-statement dispatcher over Anthropic's tool wire surface; splitting obscures flow"
+)]
 fn convert_tools(
     tools: Option<&[Tool]>,
     choice: Option<&ToolChoice>,
@@ -646,12 +656,50 @@ fn convert_tools(
     let converted: Vec<_> = tools
         .iter()
         .filter_map(|t| match t {
-            Tool::Function(f) => Some(WireTool::Function(super::wire::WireFunctionTool {
-                name: f.name.clone(),
-                description: f.description.clone(),
-                input_schema: f.input_schema.clone().into(),
-                eager_input_streaming: tool_streaming_default.then_some(true),
-            })),
+            Tool::Function(f) => {
+                // Per-tool `provider_options.anthropic.{deferLoading,
+                // eagerInputStreaming, allowedCallers}` overrides the
+                // model-level `toolStreaming` default.
+                let anthropic_opts = f
+                    .provider_options
+                    .as_ref()
+                    .and_then(|po| po.get("anthropic"));
+                let defer_loading = anthropic_opts
+                    .and_then(|o| o.get("deferLoading"))
+                    .and_then(serde_json::Value::as_bool);
+                let allowed_callers = anthropic_opts
+                    .and_then(|o| o.get("allowedCallers"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                    });
+                let per_tool_eager = anthropic_opts
+                    .and_then(|o| o.get("eagerInputStreaming"))
+                    .and_then(serde_json::Value::as_bool);
+                // ai-sdk: eagerInputStreaming = per-tool ?? model-level default;
+                // emitted on the wire only when truthy.
+                let eager_input_streaming = match per_tool_eager {
+                    Some(b) => b.then_some(true),
+                    None => tool_streaming_default.then_some(true),
+                };
+                let input_examples = f.input_examples.as_ref().map(|examples| {
+                    examples
+                        .iter()
+                        .map(|ex| ex.input.clone())
+                        .collect::<Vec<_>>()
+                });
+                Some(WireTool::Function(super::wire::WireFunctionTool {
+                    name: f.name.clone(),
+                    description: f.description.clone(),
+                    input_schema: f.input_schema.clone().into(),
+                    eager_input_streaming,
+                    defer_loading,
+                    allowed_callers,
+                    input_examples,
+                }))
+            }
             Tool::Provider(p) => {
                 if let Some(route) = resolve_anthropic_server_tool(&p.id) {
                     for b in route.betas {

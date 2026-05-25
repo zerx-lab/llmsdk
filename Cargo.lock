@@ -1110,6 +1110,7 @@ dependencies = [
  "bytes",
  "futures",
  "llmsdk-anthropic",
+ "llmsdk-openai",
  "llmsdk-provider",
  "llmsdk-provider-utils",
  "reqwest",

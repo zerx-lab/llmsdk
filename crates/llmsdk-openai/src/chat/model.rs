@@ -76,8 +76,13 @@ impl LanguageModel for OpenAiChatModel {
         }
 
         let request_body_value = serde_json::to_value(&request).ok();
+        let body_bytes = serde_json::to_vec(&request).unwrap_or_default();
 
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut request_headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, request);
         http_request.headers = request_headers;
 
         let response = match post_json::<_, ChatResponse>(&self.inner.http, http_request).await {
@@ -109,7 +114,12 @@ impl LanguageModel for OpenAiChatModel {
             }
         }
 
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let body_bytes = serde_json::to_vec(&request).unwrap_or_default();
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut request_headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, request);
         http_request.headers = request_headers;
 
         let stream_response = match post_for_stream(&self.inner.http, http_request).await {

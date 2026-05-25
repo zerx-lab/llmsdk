@@ -130,6 +130,7 @@ impl OpenAiImageModel {
         let (request, warnings) = build_request(&self.model_id, &options);
 
         let request_body_value = serde_json::to_value(&request).ok();
+        let body_bytes = serde_json::to_vec(&request).unwrap_or_default();
 
         let mut request_headers = self.inner.headers.clone();
         if let Some(headers) = options.headers {
@@ -138,7 +139,11 @@ impl OpenAiImageModel {
             }
         }
 
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut request_headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, request);
         http_request.headers = request_headers;
 
         let response = match post_json::<_, ImageResponse>(&self.inner.http, http_request).await {
@@ -299,6 +304,9 @@ impl OpenAiImageModel {
             }
         }
 
+        self.inner
+            .sign_if_needed(&mut request_headers, "POST", &url, &body)
+            .await?;
         let mut req = RawRequest::new(url, body, content_type);
         req.headers = request_headers;
 

@@ -87,3 +87,12 @@ pub const PROVIDER_ID_EMBEDDINGS: &str = "azure.embeddings";
 
 /// Provider id reported for the image generation surface.
 pub const PROVIDER_ID_IMAGE: &str = "azure.image";
+
+/// Provider id reported for the legacy `/v1/completions` surface.
+pub const PROVIDER_ID_COMPLETION: &str = "azure.completion";
+
+/// Provider id reported for the speech (TTS) surface.
+pub const PROVIDER_ID_SPEECH: &str = "azure.speech";
+
+/// Provider id reported for the transcription (STT) surface.
+pub const PROVIDER_ID_TRANSCRIPTION: &str = "azure.transcription";

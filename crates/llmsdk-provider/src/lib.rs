@@ -50,6 +50,8 @@ pub mod provider;
 pub mod reranking_model;
 pub mod shared;
 pub mod skills_model;
+pub mod speech_model;
+pub mod transcription_model;
 pub mod video_model;
 
 // === Top-level re-exports ===
@@ -75,6 +77,10 @@ pub use provider::Provider;
 pub use reranking_model::RerankingModel;
 #[doc(inline)]
 pub use skills_model::SkillsModel;
+#[doc(inline)]
+pub use speech_model::SpeechModel;
+#[doc(inline)]
+pub use transcription_model::TranscriptionModel;
 #[doc(inline)]
 pub use video_model::VideoModel;
 
@@ -129,6 +135,16 @@ pub use files_model::{UploadFileData, UploadFileOptions, UploadFileResult};
 // --- skills_model ---
 #[doc(inline)]
 pub use skills_model::{SkillFile, UploadSkillOptions, UploadSkillResult};
+
+// --- speech_model ---
+#[doc(inline)]
+pub use speech_model::{SpeechOptions, SpeechResponseInfo, SpeechResult};
+
+// --- transcription_model ---
+#[doc(inline)]
+pub use transcription_model::{
+    TranscriptionOptions, TranscriptionResponseInfo, TranscriptionResult, TranscriptionSegment,
+};
 
 // --- provider ---
 #[doc(inline)]

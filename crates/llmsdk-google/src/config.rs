@@ -14,6 +14,7 @@ use llmsdk_provider_utils::http::HttpClient;
 use crate::embedding::GoogleEmbeddingModel;
 use crate::files::GoogleFiles;
 use crate::image::GoogleImageModel;
+use crate::interactions::{GoogleInteractionsAgent, GoogleInteractionsLanguageModel};
 use crate::language::GoogleLanguageModel;
 use crate::video::GoogleVideoModel;
 use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL, PROVIDER_ID};
@@ -219,6 +220,16 @@ impl Google {
     #[must_use]
     pub fn files(&self) -> GoogleFiles {
         GoogleFiles::new(Arc::clone(&self.inner))
+    }
+
+    /// Construct an Interactions API handle (`POST /v1beta/interactions`).
+    ///
+    /// Pass a Gemini model id (`GoogleInteractionsAgent::Model("gemini-2.5-flash")`)
+    /// for ad-hoc inference, or an agent / managed-agent resource for the
+    /// orchestrated agent runtime.
+    #[must_use]
+    pub fn interactions(&self, agent: GoogleInteractionsAgent) -> GoogleInteractionsLanguageModel {
+        GoogleInteractionsLanguageModel::new(Arc::clone(&self.inner), agent)
     }
 }
 

@@ -8,16 +8,17 @@ use std::env;
 use std::sync::Arc;
 
 use llmsdk_openai::internal::{
-    Inner, OpenAiChatModel, OpenAiEmbeddingModel, OpenAiImageModel, OpenAiResponsesLanguageModel,
-    UrlStrategy,
+    Inner, OpenAiChatModel, OpenAiCompletionLanguageModel, OpenAiEmbeddingModel, OpenAiImageModel,
+    OpenAiResponsesLanguageModel, OpenAiSpeechModel, OpenAiTranscriptionModel, UrlStrategy,
 };
 use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::api_key::{LoadApiKey, load_api_key};
 use llmsdk_provider_utils::http::HttpClient;
 
 use crate::{
-    API_KEY_ENV_VAR, DEFAULT_API_VERSION, PROVIDER_ID_CHAT, PROVIDER_ID_EMBEDDINGS,
-    PROVIDER_ID_IMAGE, PROVIDER_ID_RESPONSES, RESOURCE_NAME_ENV_VAR,
+    API_KEY_ENV_VAR, DEFAULT_API_VERSION, PROVIDER_ID_CHAT, PROVIDER_ID_COMPLETION,
+    PROVIDER_ID_EMBEDDINGS, PROVIDER_ID_IMAGE, PROVIDER_ID_RESPONSES, PROVIDER_ID_SPEECH,
+    PROVIDER_ID_TRANSCRIPTION, RESOURCE_NAME_ENV_VAR,
 };
 
 /// Azure `OpenAI` provider handle — entry point for model construction.
@@ -39,6 +40,9 @@ pub struct AzureOpenAi {
     responses_inner: Arc<Inner>,
     embedding_inner: Arc<Inner>,
     image_inner: Arc<Inner>,
+    completion_inner: Arc<Inner>,
+    speech_inner: Arc<Inner>,
+    transcription_inner: Arc<Inner>,
 }
 
 impl AzureOpenAi {
@@ -105,6 +109,24 @@ impl AzureOpenAi {
     #[must_use]
     pub fn image_model(&self, deployment_id: impl Into<String>) -> OpenAiImageModel {
         self.image(deployment_id)
+    }
+
+    /// Construct a legacy Completions model handle (Azure `azure.completion`).
+    #[must_use]
+    pub fn completion(&self, deployment_id: impl Into<String>) -> OpenAiCompletionLanguageModel {
+        OpenAiCompletionLanguageModel::new(Arc::clone(&self.completion_inner), deployment_id.into())
+    }
+
+    /// Construct a Speech (TTS) model handle (Azure `azure.speech`).
+    #[must_use]
+    pub fn speech(&self, deployment_id: impl Into<String>) -> OpenAiSpeechModel {
+        OpenAiSpeechModel::new(Arc::clone(&self.speech_inner), deployment_id.into())
+    }
+
+    /// Construct a Transcription (STT) model handle (Azure `azure.transcription`).
+    #[must_use]
+    pub fn transcription(&self, deployment_id: impl Into<String>) -> OpenAiTranscriptionModel {
+        OpenAiTranscriptionModel::new(Arc::clone(&self.transcription_inner), deployment_id.into())
     }
 }
 
@@ -247,6 +269,9 @@ impl AzureOpenAiBuilder {
             responses_inner: mk_inner(PROVIDER_ID_RESPONSES),
             embedding_inner: mk_inner(PROVIDER_ID_EMBEDDINGS),
             image_inner: mk_inner(PROVIDER_ID_IMAGE),
+            completion_inner: mk_inner(PROVIDER_ID_COMPLETION),
+            speech_inner: mk_inner(PROVIDER_ID_SPEECH),
+            transcription_inner: mk_inner(PROVIDER_ID_TRANSCRIPTION),
         })
     }
 }

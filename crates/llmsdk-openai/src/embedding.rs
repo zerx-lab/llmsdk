@@ -98,6 +98,7 @@ impl EmbeddingModel for OpenAiEmbeddingModel {
         };
 
         let request_body_value = serde_json::to_value(&request).ok();
+        let body_bytes = serde_json::to_vec(&request).unwrap_or_default();
 
         let mut request_headers = self.inner.headers.clone();
         if let Some(headers) = options.headers {
@@ -106,7 +107,11 @@ impl EmbeddingModel for OpenAiEmbeddingModel {
             }
         }
 
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut request_headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, request);
         http_request.headers = request_headers;
 
         let response = match post_json::<_, EmbeddingResponse>(&self.inner.http, http_request).await

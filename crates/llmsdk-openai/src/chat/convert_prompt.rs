@@ -13,8 +13,8 @@ use llmsdk_provider::shared::{FileBytes, FileData, Warning};
 
 use super::model::SystemRole;
 use super::wire::{
-    WireFunctionCall, WireImageUrl, WireMessage, WireToolCall, WireToolCallKind, WireUserContent,
-    WireUserPart,
+    WireFunctionCall, WireImageUrl, WireInputAudio, WireMessage, WireToolCall, WireToolCallKind,
+    WireUserContent, WireUserFile, WireUserPart,
 };
 
 /// Convert a prompt and collect warnings about dropped parts.
@@ -71,13 +71,13 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> WireMessage 
     }
 
     let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
+    for (idx, part) in parts.iter().enumerate() {
         match part {
             UserPart::Text(t) => out.push(WireUserPart::Text {
                 text: t.text.clone(),
             }),
             UserPart::File(f) => {
-                if let Some(part) = convert_user_file(f, warnings) {
+                if let Some(part) = convert_user_file(f, idx, warnings) {
                     out.push(part);
                 }
             }
@@ -88,47 +88,163 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> WireMessage 
     }
 }
 
-fn convert_user_file(file: &FilePart, warnings: &mut Vec<Warning>) -> Option<WireUserPart> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear dispatch over media-type families mirroring ai-sdk convert-to-openai-chat-messages"
+)]
+fn convert_user_file(
+    file: &FilePart,
+    index: usize,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireUserPart> {
+    // Provider-reference data resolves to a previously-uploaded file id.
+    if let FileData::Reference { reference, .. } = &file.data {
+        // Mirror ai-sdk `resolveProviderReference({ reference, provider: 'openai' })`
+        // — the reference must address the `openai` provider.
+        let Some(file_id) = reference.get("openai").and_then(|v| v.as_str()) else {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "user.file.reference".to_owned(),
+                details: Some(
+                    "provider reference lacks an `openai` string id — cannot resolve file id"
+                        .to_owned(),
+                ),
+            });
+            return None;
+        };
+        return Some(WireUserPart::File {
+            file: WireUserFile::Reference {
+                file_id: file_id.to_owned(),
+            },
+        });
+    }
+
     let top_level = file
         .media_type
         .split('/')
         .next()
         .unwrap_or(file.media_type.as_str());
-    if top_level != "image" {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "user.file".to_owned(),
-            details: Some(format!(
-                "M3 only supports image/* user files (got {})",
-                file.media_type
-            )),
-        });
-        return None;
-    }
 
-    let url = match &file.data {
-        FileData::Url { url } => url.clone(),
-        FileData::Data { data } => data_uri(&file.media_type, data),
-        FileData::Reference { .. } | FileData::Text { .. } => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "user.file.data".to_owned(),
-                details: Some(
-                    "M3 does not support provider-reference or inline-text file data".to_owned(),
-                ),
-            });
-            return None;
+    match top_level {
+        "image" => {
+            let url = match &file.data {
+                FileData::Url { url } => url.clone(),
+                FileData::Data { data } => data_uri(&file.media_type, data),
+                FileData::Text { .. } => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.text".to_owned(),
+                        details: Some("inline-text file data unsupported for images".to_owned()),
+                    });
+                    return None;
+                }
+                FileData::Reference { .. } => unreachable!("handled above"),
+            };
+            let detail = file
+                .provider_options
+                .as_ref()
+                .and_then(|po| po.get("openai"))
+                .and_then(|openai| openai.get("imageDetail"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            Some(WireUserPart::ImageUrl {
+                image_url: WireImageUrl { url, detail },
+            })
         }
-    };
+        "audio" => {
+            // OpenAI rejects URL audio; only inline base64 is accepted.
+            let data = match &file.data {
+                FileData::Data { data } => base64_of(data),
+                FileData::Url { .. } => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.audio-url".to_owned(),
+                        details: Some(
+                            "audio file parts must be inline base64, not URLs".to_owned(),
+                        ),
+                    });
+                    return None;
+                }
+                FileData::Text { .. } => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.audio-text".to_owned(),
+                        details: None,
+                    });
+                    return None;
+                }
+                FileData::Reference { .. } => unreachable!("handled above"),
+            };
+            let format = match file.media_type.as_str() {
+                "audio/wav" => "wav",
+                "audio/mp3" | "audio/mpeg" => "mp3",
+                other => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.audio-format".to_owned(),
+                        details: Some(format!(
+                            "audio content parts with media type {other} are not supported"
+                        )),
+                    });
+                    return None;
+                }
+            };
+            Some(WireUserPart::InputAudio {
+                input_audio: WireInputAudio {
+                    data,
+                    format: format.to_owned(),
+                },
+            })
+        }
+        _ => {
+            // OpenAI only accepts application/pdf for the `file` content part.
+            if file.media_type != "application/pdf" {
+                warnings.push(Warning::UnsupportedSetting {
+                    setting: "user.file".to_owned(),
+                    details: Some(format!(
+                        "file part media type {} is not supported",
+                        file.media_type
+                    )),
+                });
+                return None;
+            }
+            let data = match &file.data {
+                FileData::Data { data } => base64_of(data),
+                FileData::Url { .. } => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.pdf-url".to_owned(),
+                        details: Some("PDF file parts must be inline base64, not URLs".to_owned()),
+                    });
+                    return None;
+                }
+                FileData::Text { .. } => {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "user.file.pdf-text".to_owned(),
+                        details: None,
+                    });
+                    return None;
+                }
+                FileData::Reference { .. } => unreachable!("handled above"),
+            };
+            let filename = file
+                .filename
+                .clone()
+                .unwrap_or_else(|| format!("part-{index}.pdf"));
+            Some(WireUserPart::File {
+                file: WireUserFile::Inline {
+                    filename,
+                    file_data: format!("data:application/pdf;base64,{data}"),
+                },
+            })
+        }
+    }
+}
 
-    Some(WireUserPart::ImageUrl {
-        image_url: WireImageUrl { url },
-    })
+/// Return the base64 payload of inline file bytes, encoding raw bytes if needed.
+fn base64_of(bytes: &FileBytes) -> String {
+    match bytes {
+        FileBytes::Base64(s) => s.clone(),
+        FileBytes::Bytes(b) => base64_encode(b),
+    }
 }
 
 fn data_uri(media_type: &str, bytes: &FileBytes) -> String {
-    let payload = match bytes {
-        FileBytes::Base64(s) => s.clone(),
-        FileBytes::Bytes(b) => base64_encode(b),
-    };
+    let payload = base64_of(bytes);
     format!("data:{media_type};base64,{payload}")
 }
 
@@ -392,6 +508,173 @@ mod tests {
             assert_eq!(calls[0].function.arguments, r#"{"city":"NYC"}"#);
         } else {
             panic!("expected assistant");
+        }
+    }
+
+    #[test]
+    fn audio_wav_becomes_input_audio() {
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Data {
+                    data: FileBytes::Bytes(vec![1, 2, 3]),
+                },
+                media_type: "audio/wav".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert!(warnings.is_empty());
+        if let WireMessage::User {
+            content: WireUserContent::Parts(parts),
+        } = &out[0]
+        {
+            assert!(
+                matches!(&parts[0], WireUserPart::InputAudio { input_audio } if input_audio.format == "wav" && !input_audio.data.is_empty())
+            );
+        } else {
+            panic!("expected user parts");
+        }
+    }
+
+    #[test]
+    fn audio_mp3_alias_normalizes_to_mp3() {
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Data {
+                    data: FileBytes::Base64("AAAA".into()),
+                },
+                media_type: "audio/mpeg".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert!(warnings.is_empty());
+        if let WireMessage::User {
+            content: WireUserContent::Parts(parts),
+        } = &out[0]
+        {
+            assert!(
+                matches!(&parts[0], WireUserPart::InputAudio { input_audio } if input_audio.format == "mp3")
+            );
+        }
+    }
+
+    #[test]
+    fn audio_url_produces_warning() {
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Url {
+                    url: "https://example.com/a.wav".into(),
+                },
+                media_type: "audio/wav".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (_, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn pdf_becomes_file_part() {
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: Some("report.pdf".into()),
+                data: FileData::Data {
+                    data: FileBytes::Bytes(b"%PDF-1.4".to_vec()),
+                },
+                media_type: "application/pdf".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert!(warnings.is_empty());
+        if let WireMessage::User {
+            content: WireUserContent::Parts(parts),
+        } = &out[0]
+        {
+            match &parts[0] {
+                WireUserPart::File {
+                    file:
+                        WireUserFile::Inline {
+                            filename,
+                            file_data,
+                        },
+                } => {
+                    assert_eq!(filename, "report.pdf");
+                    assert!(file_data.starts_with("data:application/pdf;base64,"));
+                }
+                _ => panic!("expected inline pdf file part"),
+            }
+        }
+    }
+
+    #[test]
+    fn reference_resolves_to_file_id() {
+        let mut reference = serde_json::Map::new();
+        reference.insert(
+            "openai".into(),
+            serde_json::Value::String("file_abc".into()),
+        );
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Reference { reference },
+                media_type: "application/pdf".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert!(warnings.is_empty());
+        if let WireMessage::User {
+            content: WireUserContent::Parts(parts),
+        } = &out[0]
+        {
+            assert!(matches!(
+                &parts[0],
+                WireUserPart::File { file: WireUserFile::Reference { file_id } } if file_id == "file_abc"
+            ));
+        }
+    }
+
+    #[test]
+    fn image_detail_provider_option_passes_through() {
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        po.insert(
+            "openai".into(),
+            serde_json::json!({"imageDetail": "high"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let prompt = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Url {
+                    url: "https://example.com/cat.png".into(),
+                },
+                media_type: "image/png".into(),
+                provider_options: Some(po),
+            })],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        assert!(warnings.is_empty());
+        if let WireMessage::User {
+            content: WireUserContent::Parts(parts),
+        } = &out[0]
+        {
+            assert!(matches!(
+                &parts[0],
+                WireUserPart::ImageUrl { image_url } if image_url.detail.as_deref() == Some("high")
+            ));
         }
     }
 

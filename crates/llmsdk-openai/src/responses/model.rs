@@ -87,13 +87,18 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
             ..
         } = build_request(&self.model_id, &options, false);
         let request_body_value = serde_json::to_value(&body).ok();
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = self.inner.headers.clone();
         if let Some(h) = &options.headers {
             for (k, v) in h {
                 headers.insert(k.clone(), v.clone());
             }
         }
-        let mut http_request = JsonRequest::new(self.endpoint(), body);
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, body);
         http_request.headers = headers;
 
         let response = match post_json::<_, ResponsesResponse>(&self.inner.http, http_request).await
@@ -125,13 +130,18 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
         } = build_request(&self.model_id, &options, true);
         body.stream = Some(true);
         let request_body_value = serde_json::to_value(&body).ok();
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = self.inner.headers.clone();
         if let Some(h) = &options.headers {
             for (k, v) in h {
                 headers.insert(k.clone(), v.clone());
             }
         }
-        let mut http_request = JsonRequest::new(self.endpoint(), body);
+        let url = self.endpoint();
+        self.inner
+            .sign_if_needed(&mut headers, "POST", &url, &body_bytes)
+            .await?;
+        let mut http_request = JsonRequest::new(url, body);
         http_request.headers = headers;
 
         let stream_response = match post_for_stream(&self.inner.http, http_request).await {

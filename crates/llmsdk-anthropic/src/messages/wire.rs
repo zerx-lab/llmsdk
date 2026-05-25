@@ -70,7 +70,12 @@ pub(crate) enum WireThinking {
         #[serde(skip_serializing_if = "Option::is_none")]
         budget_tokens: Option<u32>,
     },
-    Adaptive,
+    Adaptive {
+        /// `"omitted"` (Opus 4.7+ default — blocks present but empty)
+        /// or `"summarized"` (reasoning content returned).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<String>,
+    },
     Disabled,
 }
 
@@ -196,9 +201,21 @@ pub(crate) struct WireFunctionTool {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: JsonValue,
-    /// `eager_input_streaming` hint (driven by `toolStreaming` provider option).
+    /// `eager_input_streaming` hint. Per-tool override of the
+    /// model-level `toolStreaming` default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eager_input_streaming: Option<bool>,
+    /// Defer tool loading until the model asks for it
+    /// (`provider_options.anthropic.deferLoading`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
+    /// Subset of callers allowed to invoke this tool — currently:
+    /// `direct` / `code_execution_20250825` / `code_execution_20260120`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_callers: Option<Vec<String>>,
+    /// Example inputs forwarded from `FunctionTool::input_examples`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_examples: Option<Vec<serde_json::Map<String, JsonValue>>>,
 }
 
 /// Server-tool wire entry: `{type, name?, ...args}`.

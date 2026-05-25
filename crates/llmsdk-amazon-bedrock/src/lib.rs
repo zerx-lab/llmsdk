@@ -89,6 +89,7 @@ mod chat;
 mod config;
 mod embedding;
 mod image;
+mod mantle;
 mod reranking;
 mod sigv4_auth;
 
@@ -97,6 +98,7 @@ pub use chat::AmazonBedrockChatModel;
 pub use config::{AmazonBedrock, AmazonBedrockBuilder};
 pub use embedding::AmazonBedrockEmbeddingModel;
 pub use image::AmazonBedrockImageModel;
+pub use mantle::{BedrockMantle, BedrockMantleBuilder};
 pub use reranking::AmazonBedrockRerankingModel;
 
 /// Provider id reported by every Bedrock model handle.

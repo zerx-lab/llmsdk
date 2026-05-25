@@ -211,6 +211,91 @@ where
     handle_response::<T>(response, &request.url, body_value).await
 }
 
+/// Result of a binary POST: status + headers + raw response bytes.
+#[derive(Debug)]
+pub struct BinaryResponse {
+    /// Final HTTP status (always 2xx on the `Ok` path).
+    pub status: StatusCode,
+    /// Response headers.
+    pub headers: HashMap<String, String>,
+    /// Raw response body.
+    pub bytes: Bytes,
+}
+
+/// POST a JSON body and return the response as raw bytes.
+///
+/// Use this for endpoints that return binary content (e.g. audio/`/v1/audio/speech`).
+/// Status / header handling and error mapping match [`post_json`].
+///
+/// # Errors
+///
+/// See [`post_json`].
+pub async fn post_json_for_bytes<B>(
+    client: &HttpClient,
+    request: JsonRequest<B>,
+) -> Result<BinaryResponse, ProviderError>
+where
+    B: Serialize,
+{
+    let body_value = serde_json::to_value(&request.body)
+        .map_err(|e| ProviderError::json_parse("<request body>", e.to_string()))?;
+
+    let mut builder = client
+        .inner
+        .request(Method::POST, &request.url)
+        .header("content-type", "application/json")
+        .json(&request.body);
+    builder = apply_headers(builder, &request.headers);
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| map_transport_error(&e, &request.url, body_value.clone()))?;
+
+    let status = response.status();
+    let headers = collect_headers(response.headers());
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(build_api_error(
+            &request.url,
+            status,
+            &headers,
+            body,
+            body_value,
+        ));
+    }
+
+    let bytes = response.bytes().await.map_err(|e| {
+        ProviderError::api_call_builder(&request.url, format!("body read failed: {e}"))
+            .retryable(true)
+            .build()
+    })?;
+
+    Ok(BinaryResponse {
+        status,
+        headers,
+        bytes,
+    })
+}
+
+/// POST a multipart body and return a JSON response into `T`.
+///
+/// Use this for endpoints that accept form-data (e.g. transcription audio uploads).
+///
+/// # Errors
+///
+/// Same conditions as [`post_raw`].
+pub async fn post_raw_for_json<T>(
+    client: &HttpClient,
+    request: RawRequest,
+) -> Result<JsonResponse<T>, ProviderError>
+where
+    T: DeserializeOwned,
+{
+    post_raw::<T>(client, request).await
+}
+
 /// GET a JSON response into `T`.
 ///
 /// # Errors

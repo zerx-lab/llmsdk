@@ -140,12 +140,37 @@ pub(crate) enum WireUserContent {
 pub(crate) enum WireUserPart {
     Text { text: String },
     ImageUrl { image_url: WireImageUrl },
+    InputAudio { input_audio: WireInputAudio },
+    File { file: WireUserFile },
 }
 
 /// `image_url` payload.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct WireImageUrl {
     pub url: String,
+    /// `low` / `high` / `auto` — driven by `provider_options.openai.imageDetail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// `input_audio` payload — base64 audio for gpt-4o-audio-preview family.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WireInputAudio {
+    /// Base64-encoded audio bytes (no `data:` prefix).
+    pub data: String,
+    /// `wav` or `mp3`.
+    pub format: String,
+}
+
+/// `file` payload — either an inline base64 PDF or a reference to a
+/// previously-uploaded file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum WireUserFile {
+    /// Inline data: `{ filename, file_data: "data:application/pdf;base64,..." }`.
+    Inline { filename: String, file_data: String },
+    /// Reference to a `/v1/files` upload: `{ file_id }`.
+    Reference { file_id: String },
 }
 
 /// Assistant `tool_calls` entry.

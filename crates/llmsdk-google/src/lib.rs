@@ -57,6 +57,7 @@ mod embedding;
 mod error;
 mod files;
 mod image;
+mod interactions;
 mod language;
 mod schema;
 mod video;
@@ -67,6 +68,9 @@ pub use config::{Google, GoogleBuilder};
 pub use embedding::GoogleEmbeddingModel;
 pub use files::GoogleFiles;
 pub use image::GoogleImageModel;
+pub use interactions::{
+    GoogleInteractionsAgent, GoogleInteractionsLanguageModel, GoogleInteractionsStatus,
+};
 pub use language::GoogleLanguageModel;
 pub use video::GoogleVideoModel;
 

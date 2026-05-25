@@ -113,7 +113,13 @@ pub(crate) enum ThinkingConfig {
         budget_tokens: Option<u32>,
     },
     /// Adaptive thinking: server decides whether to run thinking blocks.
-    Adaptive,
+    /// `display` (Opus 4.7+) controls whether the model returns thinking
+    /// content (`summarized`) or empty placeholder blocks (`omitted`, default).
+    Adaptive {
+        /// `"omitted"` or `"summarized"`.
+        #[serde(default)]
+        display: Option<String>,
+    },
     /// Extended thinking is disabled.
     Disabled,
 }

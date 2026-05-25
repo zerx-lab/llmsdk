@@ -42,14 +42,18 @@ mod auth;
 mod config;
 mod error;
 mod files;
-mod messages;
+mod forward_container_id;
+pub mod messages;
+mod model_capabilities;
 mod skills;
 pub mod tools;
 
 pub use auth::{RequestAuth, SignedHeaders, SigningContext};
 pub use config::{Anthropic, AnthropicBuilder};
 pub use files::AnthropicFiles;
+pub use forward_container_id::forward_anthropic_container_id_from_last_step;
 pub use messages::AnthropicMessagesModel;
+pub use model_capabilities::{ModelCapabilities, model_capabilities};
 pub use skills::AnthropicSkills;
 
 /// Internal API surface for cross-crate composition.

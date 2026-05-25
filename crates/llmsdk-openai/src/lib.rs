@@ -35,17 +35,27 @@
 #![warn(missing_docs)]
 
 mod chat;
+mod completion;
 mod config;
 mod embedding;
 mod error;
+mod files;
 mod image;
 mod responses;
+mod skills;
+mod speech;
+mod transcription;
 
 pub use chat::OpenAiChatModel;
+pub use completion::OpenAiCompletionLanguageModel;
 pub use config::{OpenAi, OpenAiBuilder};
 pub use embedding::OpenAiEmbeddingModel;
+pub use files::OpenAiFiles;
 pub use image::OpenAiImageModel;
 pub use responses::OpenAiResponsesLanguageModel;
+pub use skills::OpenAiSkills;
+pub use speech::OpenAiSpeechModel;
+pub use transcription::OpenAiTranscriptionModel;
 
 /// Default base URL for the `OpenAI` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -71,10 +81,15 @@ pub const PROVIDER_ID: &str = "openai";
 /// [`UrlStrategy`]: crate::config::UrlStrategy
 pub mod internal {
     pub use crate::chat::OpenAiChatModel;
-    pub use crate::config::{Inner, UrlStrategy};
+    pub use crate::completion::OpenAiCompletionLanguageModel;
+    pub use crate::config::{Inner, RequestSigner, UrlStrategy};
     pub use crate::embedding::OpenAiEmbeddingModel;
+    pub use crate::files::OpenAiFiles;
     pub use crate::image::OpenAiImageModel;
     pub use crate::responses::OpenAiResponsesLanguageModel;
+    pub use crate::skills::OpenAiSkills;
+    pub use crate::speech::OpenAiSpeechModel;
+    pub use crate::transcription::OpenAiTranscriptionModel;
 
     /// Provider-defined tool argument / output types (Responses API).
     ///
