@@ -1,0 +1,26 @@
+[package]
+name = "llmsdk-cohere"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cohere provider for llmsdk (Rust port of @ai-sdk/cohere)"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+bytes = "1.10.1"
+futures = "0.3.32"
+llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
+llmsdk-provider-utils = { version = "0.1.0", path = "../llmsdk-provider-utils" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
+wiremock = "0.6.5"

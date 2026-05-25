@@ -55,3 +55,34 @@ pub const API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 
 /// Provider id reported via [`llmsdk_provider::LanguageModel::provider`].
 pub const PROVIDER_ID: &str = "openai";
+
+/// Internal API surface for cross-crate composition.
+///
+/// Re-exports the wiring primitives ([`Inner`], [`UrlStrategy`]) plus the
+/// four model types' `new()` constructors so wrapping providers (Azure
+/// `OpenAI` today; potentially other `OpenAI`-compatible vendors tomorrow)
+/// can build models without going through the [`OpenAi`] builder.
+///
+/// **Stability**: this module mirrors `@ai-sdk/openai/internal` — it is
+/// considered semi-public and may evolve more frequently than the
+/// user-facing API. Pin a specific version if you depend on it directly.
+///
+/// [`Inner`]: crate::config::Inner
+/// [`UrlStrategy`]: crate::config::UrlStrategy
+pub mod internal {
+    pub use crate::chat::OpenAiChatModel;
+    pub use crate::config::{Inner, UrlStrategy};
+    pub use crate::embedding::OpenAiEmbeddingModel;
+    pub use crate::image::OpenAiImageModel;
+    pub use crate::responses::OpenAiResponsesLanguageModel;
+
+    /// Provider-defined tool argument / output types (Responses API).
+    ///
+    /// Re-export of [`crate::responses::tools`] so cross-crate callers
+    /// (Azure `OpenAI` today) can construct typed `Tool::Provider` args
+    /// without needing direct visibility into the private `responses`
+    /// module tree.
+    pub mod tools {
+        pub use crate::responses::tools::*;
+    }
+}

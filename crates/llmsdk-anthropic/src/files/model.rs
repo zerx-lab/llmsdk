@@ -16,6 +16,7 @@ use llmsdk_provider_utils::http::{RawRequest, post_raw};
 use llmsdk_provider_utils::multipart::Multipart;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use crate::auth::apply_request_auth;
 use crate::config::Inner;
 use crate::error::rewrite_anthropic_error;
 use crate::files::wire::WireUploadResponse;
@@ -66,6 +67,14 @@ impl FilesModel for AnthropicFiles {
 
         let mut req = RawRequest::new(self.endpoint(), body, content_type);
         req.headers = headers;
+        apply_request_auth(
+            self.inner.request_auth.as_ref(),
+            &mut req.headers,
+            "POST",
+            &req.url,
+            &req.body,
+        )
+        .await?;
 
         let envelope = match post_raw::<WireUploadResponse>(&self.inner.http, req).await {
             Ok(r) => r,

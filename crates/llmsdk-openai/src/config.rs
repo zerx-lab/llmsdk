@@ -5,6 +5,7 @@
 // Rust guideline compliant 2026-02-21
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use llmsdk_provider::ProviderError;
@@ -14,7 +15,7 @@ use crate::chat::OpenAiChatModel;
 use crate::embedding::OpenAiEmbeddingModel;
 use crate::image::OpenAiImageModel;
 use crate::responses::OpenAiResponsesLanguageModel;
-use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL};
+use crate::{API_KEY_ENV_VAR, DEFAULT_BASE_URL, PROVIDER_ID};
 
 /// `OpenAI` provider handle — entry point for model construction.
 ///
@@ -24,11 +25,105 @@ pub struct OpenAi {
     inner: Arc<Inner>,
 }
 
+/// How a model maps an endpoint name (`"/chat/completions"`, `"/embeddings"`, ...)
+/// into a fully qualified request URL.
+///
+/// Type alias for the per-request URL builder closure used by
+/// [`UrlStrategy::Custom`]. Called as `builder(endpoint, model_id)`; must
+/// return an absolute URL.
+pub type CustomUrlFn = dyn Fn(&str, &str) -> String + Send + Sync;
+
+/// Default `OpenAI` behaviour just appends the endpoint to `base_url`.
+/// Wrapping providers (Azure `OpenAI` in particular) need to inject a
+/// deployment id into the path and / or append an `api-version` query
+/// string, which the default concatenation cannot express. They wire in a
+/// [`UrlStrategy::Custom`] closure that returns the final URL string per
+/// request.
+#[derive(Clone)]
+pub enum UrlStrategy {
+    /// Default behaviour: `format!("{base_url}{endpoint}")`. `endpoint`
+    /// always begins with `/` (e.g. `"/chat/completions"`).
+    Standard {
+        /// Base URL with no trailing slash, e.g. `"https://api.openai.com/v1"`.
+        base_url: String,
+    },
+    /// Custom URL builder. Called as `f(endpoint, model_id)` once per
+    /// request; must return an absolute URL.
+    Custom(Arc<CustomUrlFn>),
+}
+
+impl fmt::Debug for UrlStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Standard { base_url } => f
+                .debug_struct("Standard")
+                .field("base_url", base_url)
+                .finish(),
+            Self::Custom(_) => f.debug_struct("Custom").finish_non_exhaustive(),
+        }
+    }
+}
+
+impl UrlStrategy {
+    /// Resolve `endpoint` (e.g. `"/chat/completions"`) for `model_id`.
+    #[must_use]
+    pub fn build(&self, endpoint: &str, model_id: &str) -> String {
+        match self {
+            Self::Standard { base_url } => format!("{base_url}{endpoint}"),
+            Self::Custom(f) => f(endpoint, model_id),
+        }
+    }
+
+    /// True for `Custom` strategies that need per-request URL composition.
+    #[must_use]
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+}
+
+/// Internal connection / routing state shared across all model handles
+/// produced by a single provider instance.
+///
+/// Public for cross-crate wrapping providers (e.g. Azure `OpenAI`) — *not* part
+/// of the user-facing surface. Re-exported under [`crate::internal`].
 #[derive(Debug)]
-pub(crate) struct Inner {
-    pub(crate) base_url: String,
+pub struct Inner {
+    pub(crate) url: UrlStrategy,
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
+    pub(crate) provider_id: &'static str,
+}
+
+impl Inner {
+    /// Build a new `Inner` directly. Cross-crate constructor for wrapping
+    /// providers; pass a [`UrlStrategy::Custom`] when you need deployment-based
+    /// URLs or query-string `api-version` parameters.
+    #[must_use]
+    pub fn new(
+        url: UrlStrategy,
+        headers: HashMap<String, Option<String>>,
+        http: HttpClient,
+        provider_id: &'static str,
+    ) -> Self {
+        Self {
+            url,
+            headers,
+            http,
+            provider_id,
+        }
+    }
+
+    /// Resolve `endpoint` for `model_id` using the configured strategy.
+    #[must_use]
+    pub(crate) fn endpoint(&self, endpoint: &str, model_id: &str) -> String {
+        self.url.build(endpoint, model_id)
+    }
+
+    /// Provider identifier reported via `LanguageModel::provider` / similar.
+    #[must_use]
+    pub(crate) fn provider_id(&self) -> &'static str {
+        self.provider_id
+    }
 }
 
 impl OpenAi {
@@ -181,9 +276,10 @@ impl OpenAiBuilder {
 
         Ok(OpenAi {
             inner: Arc::new(Inner {
-                base_url,
+                url: UrlStrategy::Standard { base_url },
                 headers,
                 http,
+                provider_id: PROVIDER_ID,
             }),
         })
     }

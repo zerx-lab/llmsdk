@@ -32,19 +32,24 @@ pub struct OpenAiEmbeddingModel {
 }
 
 impl OpenAiEmbeddingModel {
-    pub(crate) fn new(inner: Arc<Inner>, model_id: String) -> Self {
+    /// Construct from a fully assembled [`Inner`].
+    ///
+    /// Public for cross-crate composition (Azure `OpenAI`). End-users should
+    /// prefer [`crate::OpenAi::embedding`].
+    #[must_use]
+    pub fn new(inner: Arc<Inner>, model_id: String) -> Self {
         Self { inner, model_id }
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/embeddings", self.inner.base_url)
+        self.inner.endpoint("/embeddings", &self.model_id)
     }
 }
 
 #[async_trait]
 impl EmbeddingModel for OpenAiEmbeddingModel {
     fn provider(&self) -> &str {
-        PROVIDER_ID
+        self.inner.provider_id()
     }
 
     fn model_id(&self) -> &str {

@@ -18,6 +18,7 @@ use llmsdk_provider_utils::http::{RawRequest, get_json, post_raw};
 use llmsdk_provider_utils::multipart::Multipart;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use crate::auth::apply_request_auth;
 use crate::config::Inner;
 use crate::error::rewrite_anthropic_error;
 use crate::files::upload_data_to_bytes;
@@ -79,6 +80,14 @@ impl SkillsModel for AnthropicSkills {
         let headers = self.headers_with_beta();
         let mut req = RawRequest::new(self.endpoint(), body, content_type);
         req.headers = headers.clone();
+        apply_request_auth(
+            self.inner.request_auth.as_ref(),
+            &mut req.headers,
+            "POST",
+            &req.url,
+            &req.body,
+        )
+        .await?;
 
         let envelope = match post_raw::<WireSkillResponse>(&self.inner.http, req).await {
             Ok(r) => r,
@@ -90,7 +99,18 @@ impl SkillsModel for AnthropicSkills {
         // version-metadata endpoint, then falls back to the upload response.
         let version_meta = if let Some(version) = &resp.latest_version {
             let url = self.version_endpoint(&resp.id, version);
-            match get_json::<WireSkillVersionResponse, _>(&self.inner.http, &url, &headers).await {
+            let mut get_headers = headers.clone();
+            apply_request_auth(
+                self.inner.request_auth.as_ref(),
+                &mut get_headers,
+                "GET",
+                &url,
+                &[],
+            )
+            .await?;
+            match get_json::<WireSkillVersionResponse, _>(&self.inner.http, &url, &get_headers)
+                .await
+            {
                 Ok(env) => Some(env.value),
                 Err(err) => return Err(rewrite_anthropic_error(err)),
             }

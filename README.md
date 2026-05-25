@@ -1,47 +1,48 @@
 # llmsdk
 
-[![spec](https://img.shields.io/badge/ai--sdk%20spec-v4-blue)](https://github.com/vercel/ai/tree/main/packages/provider)
 [![rust](https://img.shields.io/badge/rust-1.95%2B-orange)](#)
 [![license](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-Rust 实现的 LLM provider SDK，对标 Vercel [`ai-sdk`](https://github.com/vercel/ai) `@ai-sdk/provider` v4。
-提供统一的 `LanguageModel` / `EmbeddingModel` / `ImageModel` trait，
-以及可组合的中间件栈（retry / logging / cache / 推理抽取 / 流式模拟 / ...）。
+**English** · [简体中文](README.zh-CN.md)
 
-> 状态：M1–M10 已完成。Workspace 191 测试全绿；
-> `cargo fmt --check` 与 `cargo clippy -- -D warnings` 通过。
-> 1.0 之前 API 仍可能变动。
+A Rust SDK for talking to LLM providers with the same ergonomics as Vercel
+[`ai-sdk`](https://github.com/vercel/ai). If you have used `@ai-sdk/openai` or
+`@ai-sdk/anthropic` in TypeScript, the shape of the API here will feel
+immediately familiar — same provider/model factory pattern, same call options,
+same streaming model, same provider-options escape hatch.
 
-## Workspace 一览
+```rust
+let provider = OpenAi::builder().api_key("sk-...").build()?;
+let model = provider.chat("gpt-4o-mini");
+let result = model.do_generate(opts).await?;
+```
 
-| Crate | 说明 | 对应上游 |
-| --- | --- | --- |
-| [`llmsdk-provider`](crates/llmsdk-provider) | trait 抽象、统一错误、共享类型、中间件层 | `@ai-sdk/provider` |
-| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / api key 加载 | `@ai-sdk/provider-utils` |
-| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat / Embedding / Image | `@ai-sdk/openai` |
-| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages API | `@ai-sdk/anthropic` |
+## Workspace
 
-## 能力矩阵
+| Crate | Description |
+| --- | --- |
+| [`llmsdk-provider`](crates/llmsdk-provider) | Core traits, error types, shared types, middleware layer |
+| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API-key loading |
+| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat, Responses, Embeddings, Images |
+| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages, Files, Skills, typed server tools |
 
-| Provider | Generate | Stream | Tool Use | Embedding | Image | Reasoning / Thinking |
-| --- | --- | --- | --- | --- | --- | --- |
-| OpenAI    | ✓ | ✓ | ✓ | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1, generations + edits + variations) | ✓ (o1 / o3 / o4-mini / gpt-5*) |
-| Anthropic | ✓ | ✓ | ✓ + 8 个 server-side 工具 | — | — | ✓ (extended thinking, visible + redacted) |
+## Capability matrix
 
-ai-sdk v4 的细粒度特性几乎全部对齐：OpenAI 端覆盖 `prediction` / `store` /
-`metadata` / `service_tier` / `prompt_cache_key` / `logit_bias` / `text.verbosity` /
-`top_logprobs` / `strict_json_schema` / `web_search_preview` 工具 / `url_citation`
-注解 / 流式 error chunk 提取；Anthropic 端覆盖 8 种服务器工具路由、9 种 tool block
-解析、5 种位置的 `cache_control`、`citations` + `title` + `context`、
-`context_management` / `container` / `compaction`、`thinking` adaptive type 与
-budget。详见 [`architecture/0003-m10-design.md`](architecture/0003-m10-design.md)。
+| Provider | Generate | Stream | Tools | Embedding | Image | Reasoning | Files / Skills |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenAI Chat       | ✓ | ✓ | ✓ | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1: generations + edits + variations) | ✓ (o1 / o3 / o4-mini / gpt-5*) | — |
+| OpenAI Responses  | ✓ | ✓ | ✓ + 11 provider-defined tools | — | — | ✓ (reasoning summary streaming) | — |
+| Anthropic         | ✓ | ✓ | ✓ + 20 typed server tools | — | — | ✓ (extended thinking, visible + redacted) | ✓ |
 
-未覆盖：Gemini provider、OpenAI Responses API 端点（剩余 9 个 provider-defined
-工具）、Anthropic Files API 上传端点。见 [`todo.md`](todo.md)。
+Provider-specific knobs (OpenAI `prediction` / `store` / `service_tier` /
+`prompt_cache_key` / `logit_bias` / `text.verbosity` / `strict_json_schema` /
+…, Anthropic `cache_control` / `citations` / `context_management` /
+`container` / `thinking` budget / …) are all exposed through
+`provider_options.<provider>.*` — same pattern as `ai-sdk`.
 
-## 快速开始
+## Quick start
 
-`Cargo.toml`：
+`Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -66,7 +67,7 @@ async fn main() -> Result<(), llmsdk_provider::ProviderError> {
         .do_generate(CallOptions {
             prompt: vec![Message::User {
                 content: vec![UserPart::Text(TextPart {
-                    text: "用一句话介绍 Rust 的所有权。".into(),
+                    text: "Explain Rust ownership in one sentence.".into(),
                     provider_options: None,
                 })],
                 provider_options: None,
@@ -105,14 +106,17 @@ let result = model
     .await?;
 ```
 
-### 流式调用
+### Streaming
 
-`LanguageModel::do_stream` 返回 `Pin<Box<dyn Stream<Item = Result<StreamPart, _>> + Send>>`，
-直接用 `futures::StreamExt::next()` 消费。Drop stream 即取消（无需 `AbortSignal`）。
+`LanguageModel::do_stream` returns
+`Pin<Box<dyn Stream<Item = Result<StreamPart, _>> + Send>>`. Consume with
+`futures::StreamExt::next()`. Drop the stream to cancel — no `AbortSignal`
+needed.
 
-## 中间件栈
+## Middleware stack
 
-所有模型表面都能用 `wrap_*` 组合器叠加跨切面逻辑，列表头最外层执行：
+Every model surface (`LanguageModel` / `EmbeddingModel` / `ImageModel`) can be
+wrapped with composable middleware. Order is outermost-first:
 
 ```rust
 use llmsdk_provider::{
@@ -138,63 +142,43 @@ let model = wrap_language_model(
 );
 ```
 
-内置中间件：
+Built-in middleware:
 
-- `RetryMiddleware` — 指数退避 + jitter，仅对 `is_retryable` 错误重试
-- `LoggingMiddleware` — start / end / error + 可选 per-frame stream 事件，自有 `Logger` trait 不绑定 tracing
-- `CacheMiddleware` — TTL + LRU，stream 边走边收集，命中标记 `provider_metadata.llmsdk.cache = "hit"`
-- `DefaultSettingsMiddleware` / `DefaultEmbeddingSettingsMiddleware` — 选项默认值注入
-- `ExtractReasoningMiddleware` — tag-based reasoning 切分
-- `SimulateStreamingMiddleware` — `do_generate` 结果转 stream
-- `ExtractJsonMiddleware` — 剥离 markdown fence
-- `AddToolInputExamplesMiddleware` — examples 拼到 tool description
+- `RetryMiddleware` — exponential backoff + jitter; retries only `is_retryable` errors
+- `LoggingMiddleware` — start / end / error + optional per-frame stream events; pluggable `Logger` trait, no `tracing` lock-in
+- `CacheMiddleware` — TTL + LRU; streams are captured progressively; hits tagged with `provider_metadata.llmsdk.cache = "hit"`
+- `DefaultSettingsMiddleware` / `DefaultEmbeddingSettingsMiddleware` — inject default call options
+- `ExtractReasoningMiddleware` — tag-based reasoning extraction
+- `SimulateStreamingMiddleware` — turn a `do_generate` result into a stream
+- `ExtractJsonMiddleware` — strip markdown fences from JSON output
+- `AddToolInputExamplesMiddleware` — append examples to tool descriptions
 
-设计：[`architecture/0002-middleware-design.md`](architecture/0002-middleware-design.md)。
+## Engineering constraints
 
-## 工程约束
+- `#![forbid(unsafe_code)]` across the workspace
+- No `unwrap()` / `expect()` outside tests — errors flow through `?` + `thiserror`
+- Public API requires doc comments + at least one doctest or example
+- Minimal dependencies: jitter, LRU, multipart, and base64 are all implemented in-tree (only `schemars` is pulled in for JSON schema)
+- Default runtime: `tokio`
+- Workspace lints enable `clippy::pedantic` plus selected restriction lints
 
-- `#![forbid(unsafe_code)]` 全 workspace
-- 非测试代码禁止 `unwrap()` / `expect()`，错误一律走 `?` + `thiserror`
-- 公开 API 必须有 doc comment + 至少一个 doctest 或 example
-- 依赖最小化：除 `schemars` 外，jitter / LRU / multipart / base64 全部自实现
-- 默认 runtime：`tokio`
-- workspace lints 启用 clippy `pedantic` + 部分 restriction lint
-
-## 构建与测试
+## Build & test
 
 ```bash
 cargo check --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace        # 推荐
-# cargo test --workspace             # 备选
+cargo nextest run --workspace        # preferred
+# cargo test --workspace             # fallback
 ```
 
-单 crate 验证：
+Single-crate verification:
 
 ```bash
 cargo check -p llmsdk-openai --lib
 cargo nextest run -p llmsdk-anthropic
 ```
 
-## 文档
-
-- [`architecture/0001-trait-design.md`](architecture/0001-trait-design.md) — provider trait ground truth
-- [`architecture/0002-middleware-design.md`](architecture/0002-middleware-design.md) — middleware 层设计
-- [`architecture/0003-m10-design.md`](architecture/0003-m10-design.md) — M10 全量 ai-sdk v4 对齐
-- [`todo.md`](todo.md) — 跨里程碑追踪与 M11+ 候选
-- [`CLAUDE.md`](CLAUDE.md) — 协作约束与里程碑边界
-
-## 路线图
-
-M11+ 候选（待规划，未排序）：
-
-- Gemini provider — 验证 trait 抽象在第三家上的稳定性
-- OpenAI Responses API 端点 — 解锁剩余 9 个 provider-defined tools
-- Anthropic Files API 端点
-- 中间件：分布式缓存参考实现（Redis）、双向 `MiddlewareContext`、tracing span 自动衔接
-- 契约测试扩展：image-edit / image-variation / anthropic server tool
-
 ## License
 
-Apache License 2.0 — 见 [LICENSE](LICENSE)。
+Apache License 2.0 — see [LICENSE](LICENSE).

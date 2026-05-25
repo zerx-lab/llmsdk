@@ -16,7 +16,8 @@ mod usage;
 
 pub use call_options::{CallOptions, ReasoningEffort, ResponseFormat};
 pub use content::{
-    Content, ReasoningPart, Source, ToolApprovalRequest, ToolResult, ToolResultOutput,
+    Content, ReasoningPart, Source, ToolApprovalRequest, ToolOutputPart, ToolResult,
+    ToolResultOutput,
 };
 pub use finish_reason::{FinishReason, FinishReasonKind};
 pub use prompt::{

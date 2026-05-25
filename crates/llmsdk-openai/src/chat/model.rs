@@ -15,7 +15,6 @@ use llmsdk_provider::shared::Warning;
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
 use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
 
-use crate::PROVIDER_ID;
 use crate::config::Inner;
 
 use super::capabilities::Capabilities;
@@ -41,19 +40,24 @@ pub struct OpenAiChatModel {
 }
 
 impl OpenAiChatModel {
-    pub(crate) fn new(inner: Arc<Inner>, model_id: String) -> Self {
+    /// Construct from a fully assembled [`Inner`].
+    ///
+    /// Public for cross-crate composition (Azure `OpenAI`). End-users should
+    /// prefer [`crate::OpenAi::chat`].
+    #[must_use]
+    pub fn new(inner: Arc<Inner>, model_id: String) -> Self {
         Self { inner, model_id }
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/chat/completions", self.inner.base_url)
+        self.inner.endpoint("/chat/completions", &self.model_id)
     }
 }
 
 #[async_trait]
 impl LanguageModel for OpenAiChatModel {
     fn provider(&self) -> &str {
-        PROVIDER_ID
+        self.inner.provider_id()
     }
 
     fn model_id(&self) -> &str {

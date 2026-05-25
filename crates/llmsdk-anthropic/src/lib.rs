@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod auth;
 mod config;
 mod error;
 mod files;
@@ -45,10 +46,33 @@ mod messages;
 mod skills;
 pub mod tools;
 
+pub use auth::{RequestAuth, SignedHeaders, SigningContext};
 pub use config::{Anthropic, AnthropicBuilder};
 pub use files::AnthropicFiles;
 pub use messages::AnthropicMessagesModel;
 pub use skills::AnthropicSkills;
+
+/// Internal API surface for cross-crate composition.
+///
+/// Re-exports the wiring primitives ([`Inner`], [`InnerBuilder`],
+/// [`EndpointFn`], [`BodyTransformFn`]) plus [`AnthropicMessagesModel`]'s
+/// `new()` constructor so wrapping providers (Google Vertex Anthropic,
+/// Amazon Bedrock Anthropic) can build a Messages model with custom
+/// URL composition + body transform without going through the
+/// user-facing [`Anthropic`] builder.
+///
+/// **Stability**: this module mirrors `@ai-sdk/anthropic/internal` — it is
+/// considered semi-public and may evolve more frequently than the
+/// user-facing API. Pin a specific version if you depend on it directly.
+///
+/// [`Inner`]: crate::config::Inner
+/// [`InnerBuilder`]: crate::config::InnerBuilder
+/// [`EndpointFn`]: crate::config::EndpointFn
+/// [`BodyTransformFn`]: crate::config::BodyTransformFn
+pub mod internal {
+    pub use crate::config::{BodyTransformFn, EndpointFn, Inner, InnerBuilder};
+    pub use crate::messages::AnthropicMessagesModel;
+}
 
 /// Default base URL for the `Anthropic` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";

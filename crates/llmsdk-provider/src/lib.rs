@@ -13,6 +13,8 @@
 //! - [`language_model`]: chat / completion models with streaming.
 //! - [`embedding_model`]: vector embedding models.
 //! - [`image_model`]: image generation models.
+//! - [`video_model`]: video generation models.
+//! - [`reranking_model`]: document reranking models.
 //! - [`files_model`]: file-upload models (e.g. `Anthropic`'s `POST /files`).
 //! - [`skills_model`]: skill-upload models (`Anthropic` skills bundles).
 //! - [`middleware`]: decorators for stacking cross-cutting concerns
@@ -45,8 +47,10 @@ pub mod json;
 pub mod language_model;
 pub mod middleware;
 pub mod provider;
+pub mod reranking_model;
 pub mod shared;
 pub mod skills_model;
+pub mod video_model;
 
 #[doc(inline)]
 pub use embedding_model::EmbeddingModel;
@@ -62,14 +66,23 @@ pub use language_model::LanguageModel;
 pub use middleware::{
     CacheMiddleware, CacheStore, CachedEntry, CallKind, EmbeddingModelMiddleware,
     ImageModelMiddleware, LanguageModelMiddleware, Logger, LoggingMiddleware, MemoryCacheStore,
-    MemoryCacheStoreBuilder, MiddlewareContext, ProviderMiddlewareSet, RetryMiddleware,
-    RetryMiddlewareBuilder, StderrLogger, wrap_embedding_model, wrap_image_model,
-    wrap_language_model, wrap_provider,
+    MemoryCacheStoreBuilder, MiddlewareContext, ProviderMiddlewareSet, RerankingModelMiddleware,
+    RetryMiddleware, RetryMiddlewareBuilder, StderrLogger, VideoModelMiddleware,
+    wrap_embedding_model, wrap_image_model, wrap_language_model, wrap_provider,
+    wrap_reranking_model, wrap_video_model,
 };
 #[doc(inline)]
 pub use provider::Provider;
 #[doc(inline)]
+pub use reranking_model::{
+    RankingEntry, RerankingDocuments, RerankingModel, RerankingOptions, RerankingResult,
+};
+#[doc(inline)]
 pub use skills_model::{SkillFile, SkillsModel, UploadSkillOptions, UploadSkillResult};
+#[doc(inline)]
+pub use video_model::{
+    VideoData, VideoFile, VideoModel, VideoOptions, VideoResponseInfo, VideoResult,
+};
 
 /// Specification version this crate implements.
 ///

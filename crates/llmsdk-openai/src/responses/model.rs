@@ -27,7 +27,6 @@ use super::wire::chunk::ResponsesChunk;
 use super::wire::request::ResponsesRequest;
 use super::wire::response::ResponsesResponse;
 
-use crate::PROVIDER_ID;
 use crate::chat::capabilities::Capabilities;
 use crate::config::Inner;
 use crate::error::rewrite_openai_error;
@@ -45,19 +44,24 @@ pub struct OpenAiResponsesLanguageModel {
 }
 
 impl OpenAiResponsesLanguageModel {
-    pub(crate) fn new(inner: Arc<Inner>, model_id: String) -> Self {
+    /// Construct from a fully assembled [`Inner`].
+    ///
+    /// Public for cross-crate composition (Azure `OpenAI`). End-users should
+    /// prefer [`crate::OpenAi::responses`].
+    #[must_use]
+    pub fn new(inner: Arc<Inner>, model_id: String) -> Self {
         Self { inner, model_id }
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/responses", self.inner.base_url)
+        self.inner.endpoint("/responses", &self.model_id)
     }
 }
 
 #[async_trait]
 impl LanguageModel for OpenAiResponsesLanguageModel {
     fn provider(&self) -> &str {
-        PROVIDER_ID
+        self.inner.provider_id()
     }
 
     fn model_id(&self) -> &str {

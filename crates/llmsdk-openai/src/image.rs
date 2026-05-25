@@ -52,27 +52,32 @@ pub struct OpenAiImageModel {
 }
 
 impl OpenAiImageModel {
-    pub(crate) fn new(inner: Arc<Inner>, model_id: String) -> Self {
+    /// Construct from a fully assembled [`Inner`].
+    ///
+    /// Public for cross-crate composition (Azure `OpenAI`). End-users should
+    /// prefer [`crate::OpenAi::image`].
+    #[must_use]
+    pub fn new(inner: Arc<Inner>, model_id: String) -> Self {
         Self { inner, model_id }
     }
 
     fn endpoint(&self) -> String {
-        format!("{}/images/generations", self.inner.base_url)
+        self.inner.endpoint("/images/generations", &self.model_id)
     }
 
     fn edits_endpoint(&self) -> String {
-        format!("{}/images/edits", self.inner.base_url)
+        self.inner.endpoint("/images/edits", &self.model_id)
     }
 
     fn variations_endpoint(&self) -> String {
-        format!("{}/images/variations", self.inner.base_url)
+        self.inner.endpoint("/images/variations", &self.model_id)
     }
 }
 
 #[async_trait]
 impl ImageModel for OpenAiImageModel {
     fn provider(&self) -> &str {
-        PROVIDER_ID
+        self.inner.provider_id()
     }
 
     fn model_id(&self) -> &str {

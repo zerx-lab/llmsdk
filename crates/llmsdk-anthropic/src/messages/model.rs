@@ -13,6 +13,7 @@ use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, respo
 use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
 
 use crate::PROVIDER_ID;
+use crate::auth::apply_request_auth;
 use crate::config::Inner;
 use crate::error::rewrite_anthropic_error;
 
@@ -40,12 +41,28 @@ pub struct AnthropicMessagesModel {
 }
 
 impl AnthropicMessagesModel {
-    pub(crate) fn new(inner: Arc<Inner>, model_id: String) -> Self {
+    /// Construct from a fully assembled [`Inner`].
+    ///
+    /// Public for cross-crate composition (Google Vertex Anthropic, Amazon
+    /// Bedrock Anthropic). End-users should prefer
+    /// [`crate::Anthropic::messages`].
+    #[must_use]
+    pub fn new(inner: Arc<Inner>, model_id: String) -> Self {
         Self { inner, model_id }
     }
 
-    fn endpoint(&self) -> String {
-        format!("{}/messages", self.inner.base_url)
+    fn endpoint(&self, is_streaming: bool) -> String {
+        self.inner.endpoint_url(&self.model_id, is_streaming)
+    }
+
+    /// Serialize the typed request to JSON, then apply the optional
+    /// body-transformer hook (Vertex / Bedrock strip `model` and inject
+    /// `anthropic_version`).
+    fn prepare_body(&self, request: &MessagesRequest) -> Result<serde_json::Value, ProviderError> {
+        let mut value = serde_json::to_value(request)
+            .map_err(|e| ProviderError::json_parse("<request body>", e.to_string()))?;
+        self.inner.transform_body(&mut value);
+        Ok(value)
     }
 
     fn merged_headers(
@@ -75,10 +92,22 @@ impl LanguageModel for AnthropicMessagesModel {
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
         let (request, warnings, betas) = build_request(&self.model_id, &options, false);
 
-        let request_body_value = serde_json::to_value(&request).ok();
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let body_value = self.prepare_body(&request)?;
+        let request_body_value = Some(body_value.clone());
+        let mut http_request = JsonRequest::new(self.endpoint(false), body_value);
         http_request.headers = self.merged_headers(options.headers.as_ref());
         apply_beta_header(&mut http_request.headers, betas);
+        // Serialize once so the auth hook can sign exactly what we send.
+        let body_bytes = serde_json::to_vec(&http_request.body)
+            .map_err(|e| ProviderError::json_parse("<request body>", e.to_string()))?;
+        apply_request_auth(
+            self.inner.request_auth.as_ref(),
+            &mut http_request.headers,
+            "POST",
+            &http_request.url,
+            &body_bytes,
+        )
+        .await?;
 
         let response = match post_json::<_, MessagesResponse>(&self.inner.http, http_request).await
         {
@@ -97,10 +126,21 @@ impl LanguageModel for AnthropicMessagesModel {
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
         let (request, warnings, betas) = build_request(&self.model_id, &options, true);
 
-        let request_body_value = serde_json::to_value(&request).ok();
-        let mut http_request = JsonRequest::new(self.endpoint(), request);
+        let body_value = self.prepare_body(&request)?;
+        let request_body_value = Some(body_value.clone());
+        let mut http_request = JsonRequest::new(self.endpoint(true), body_value);
         http_request.headers = self.merged_headers(options.headers.as_ref());
         apply_beta_header(&mut http_request.headers, betas);
+        let body_bytes = serde_json::to_vec(&http_request.body)
+            .map_err(|e| ProviderError::json_parse("<request body>", e.to_string()))?;
+        apply_request_auth(
+            self.inner.request_auth.as_ref(),
+            &mut http_request.headers,
+            "POST",
+            &http_request.url,
+            &body_bytes,
+        )
+        .await?;
 
         let stream_response = match post_for_stream(&self.inner.http, http_request).await {
             Ok(r) => r,

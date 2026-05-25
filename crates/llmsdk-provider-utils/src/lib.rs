@@ -9,7 +9,11 @@
 //! crate-local error type is introduced.
 // Rust guideline compliant 2026-02-21
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so test modules can opt in with a local
+// `#[allow(unsafe_code)]` + SAFETY comment when calling `unsafe`-marked stdlib
+// functions (e.g. Edition 2024 `env::set_var`). Production code remains
+// guaranteed unsafe-free by the lint.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod api_key;
@@ -17,6 +21,12 @@ pub mod headers;
 pub mod http;
 pub mod multipart;
 pub mod sse;
+
+#[cfg(feature = "aws-sigv4")]
+pub mod aws_sigv4;
+
+#[cfg(feature = "aws-event-stream")]
+pub mod aws_eventstream;
 
 #[doc(inline)]
 pub use api_key::load_api_key;

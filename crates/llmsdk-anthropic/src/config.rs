@@ -6,11 +6,14 @@
 // Rust guideline compliant 2026-02-21
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::http::HttpClient;
+use serde_json::Value;
 
+use crate::auth::RequestAuth;
 use crate::files::AnthropicFiles;
 use crate::messages::AnthropicMessagesModel;
 use crate::skills::AnthropicSkills;
@@ -20,6 +23,22 @@ use crate::{
 
 const DEFAULT_PROVIDER_NAME: &str = "anthropic.messages";
 
+/// Per-request URL builder used by [`Inner::endpoint_override`].
+///
+/// Called as `f(base_url, model_id, is_streaming)`. Returns the absolute
+/// URL the messages endpoint should target. Wrapping providers (Google
+/// Vertex Anthropic, Amazon Bedrock Anthropic) use this to inject
+/// `{model_id}:rawPredict` style paths instead of the default
+/// `{base_url}/messages`.
+pub type EndpointFn = dyn Fn(&str, &str, bool) -> String + Send + Sync;
+
+/// Per-request body transformer used by [`Inner::body_transformer`].
+///
+/// Called on the JSON wire body just before serialization. Wrapping
+/// providers use this to strip `model` (Bedrock / Vertex put it in the
+/// URL) and inject `anthropic_version`.
+pub type BodyTransformFn = dyn Fn(&mut Value) + Send + Sync;
+
 /// `Anthropic` provider handle.
 ///
 /// Cheap to clone; HTTP client and headers are shared.
@@ -28,12 +47,194 @@ pub struct Anthropic {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
-pub(crate) struct Inner {
+/// Internal connection / routing state shared across all model handles
+/// produced by a single provider instance.
+///
+/// Public for cross-crate wrapping providers (Google Vertex Anthropic,
+/// Amazon Bedrock Anthropic) — *not* part of the user-facing surface.
+/// Re-exported under [`crate::internal`].
+pub struct Inner {
     pub(crate) base_url: String,
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
     pub(crate) provider_name: String,
+    /// Optional per-request signer. Default `Anthropic` providers leave this
+    /// `None` and rely entirely on the static headers above.
+    pub(crate) request_auth: Option<Arc<dyn RequestAuth>>,
+    /// Optional custom URL builder. When `None`, the default
+    /// `{base_url}/messages` is used.
+    pub(crate) endpoint_override: Option<Arc<EndpointFn>>,
+    /// Optional request body transformer. When `None`, the JSON body is
+    /// sent verbatim.
+    pub(crate) body_transformer: Option<Arc<BodyTransformFn>>,
+}
+
+impl fmt::Debug for Inner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Inner")
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http)
+            .field("provider_name", &self.provider_name)
+            .field("request_auth", &self.request_auth.is_some())
+            .field("endpoint_override", &self.endpoint_override.is_some())
+            .field("body_transformer", &self.body_transformer.is_some())
+            .finish()
+    }
+}
+
+impl Inner {
+    /// Open a typed builder for [`Inner`].
+    ///
+    /// Cross-crate composition entry point: wrapping providers build the
+    /// [`Inner`] directly with custom provider name / base URL / headers /
+    /// HTTP client / URL hook / body transform and inject it into
+    /// [`AnthropicMessagesModel::new`].
+    #[must_use]
+    pub fn builder() -> InnerBuilder {
+        InnerBuilder::default()
+    }
+
+    /// Resolve the messages endpoint for `model_id`.
+    ///
+    /// Default: `{base_url}/messages`. Wrapping providers override via
+    /// [`InnerBuilder::endpoint`].
+    #[must_use]
+    pub fn endpoint_url(&self, model_id: &str, is_streaming: bool) -> String {
+        match &self.endpoint_override {
+            Some(f) => f(&self.base_url, model_id, is_streaming),
+            None => format!("{}/messages", self.base_url),
+        }
+    }
+
+    /// Apply the registered body transformer (no-op when none set).
+    pub fn transform_body(&self, body: &mut Value) {
+        if let Some(f) = &self.body_transformer {
+            f(body);
+        }
+    }
+}
+
+/// Builder for the cross-crate [`Inner`].
+///
+/// Used by wrapping providers (Google Vertex Anthropic, Amazon Bedrock
+/// Anthropic) to assemble an [`Inner`] without going through the
+/// user-facing [`Anthropic`] builder.
+#[derive(Default, Clone)]
+pub struct InnerBuilder {
+    base_url: Option<String>,
+    headers: HashMap<String, Option<String>>,
+    http: Option<HttpClient>,
+    provider_name: Option<String>,
+    request_auth: Option<Arc<dyn RequestAuth>>,
+    endpoint_override: Option<Arc<EndpointFn>>,
+    body_transformer: Option<Arc<BodyTransformFn>>,
+}
+
+impl fmt::Debug for InnerBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InnerBuilder")
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http)
+            .field("provider_name", &self.provider_name)
+            .field("request_auth", &self.request_auth.is_some())
+            .field("endpoint_override", &self.endpoint_override.is_some())
+            .field("body_transformer", &self.body_transformer.is_some())
+            .finish()
+    }
+}
+
+impl InnerBuilder {
+    /// Override the base URL. Defaults to [`crate::DEFAULT_BASE_URL`].
+    #[must_use]
+    pub fn base_url(mut self, value: impl Into<String>) -> Self {
+        self.base_url = Some(value.into());
+        self
+    }
+
+    /// Append or override a header. `None` removes it.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: Option<String>) -> Self {
+        self.headers.insert(name.into(), value);
+        self
+    }
+
+    /// Inject a pre-configured HTTP client.
+    #[must_use]
+    pub fn http_client(mut self, client: HttpClient) -> Self {
+        self.http = Some(client);
+        self
+    }
+
+    /// Override the reported provider name.
+    ///
+    /// Defaults to `"anthropic.messages"`. Cross-crate composition uses
+    /// values like `"google.vertex.anthropic.messages"` or
+    /// `"bedrock.anthropic.messages"`.
+    #[must_use]
+    pub fn provider_name(mut self, value: impl Into<String>) -> Self {
+        self.provider_name = Some(value.into());
+        self
+    }
+
+    /// Install a per-request authentication hook (e.g. AWS `SigV4`).
+    #[must_use]
+    pub fn request_auth(mut self, auth: Arc<dyn RequestAuth>) -> Self {
+        self.request_auth = Some(auth);
+        self
+    }
+
+    /// Install a custom URL builder.
+    ///
+    /// Wrapping providers use this to route to publisher-prefixed
+    /// `{model_id}:rawPredict` / `:streamRawPredict` paths instead of
+    /// the default `{base_url}/messages`.
+    #[must_use]
+    pub fn endpoint<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str, &str, bool) -> String + Send + Sync + 'static,
+    {
+        self.endpoint_override = Some(Arc::new(f));
+        self
+    }
+
+    /// Install a request-body transformer.
+    ///
+    /// Wrapping providers use this to strip `model` from the body (already
+    /// in the URL) and inject `anthropic_version`.
+    #[must_use]
+    pub fn body_transform<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut Value) + Send + Sync + 'static,
+    {
+        self.body_transformer = Some(Arc::new(f));
+        self
+    }
+
+    /// Finalize the [`Inner`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the default HTTP client fails to
+    /// build (rare; misconfigured TLS).
+    pub fn build(self) -> Result<Inner, ProviderError> {
+        let http = match self.http {
+            Some(client) => client,
+            None => HttpClient::new()?,
+        };
+        Ok(Inner {
+            base_url: self.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
+            headers: self.headers,
+            http,
+            provider_name: self
+                .provider_name
+                .unwrap_or_else(|| DEFAULT_PROVIDER_NAME.to_owned()),
+            request_auth: self.request_auth,
+            endpoint_override: self.endpoint_override,
+            body_transformer: self.body_transformer,
+        })
+    }
 }
 
 impl Anthropic {
@@ -120,6 +321,8 @@ pub struct AnthropicBuilder {
     provider_name: Option<String>,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    request_auth: Option<Arc<dyn RequestAuth>>,
+    skip_default_auth_headers: bool,
 }
 
 impl AnthropicBuilder {
@@ -178,6 +381,33 @@ impl AnthropicBuilder {
         self
     }
 
+    /// Install a per-request authentication hook.
+    ///
+    /// When set, the hook is invoked before every Messages / Files / Skills
+    /// request and its returned headers are merged in on top of the
+    /// builder-time headers. This enables AWS `SigV4` (see
+    /// `llmsdk-anthropic-aws`) and similar dynamic auth schemes without
+    /// forking the request pipeline.
+    #[must_use]
+    pub fn request_auth(mut self, auth: Arc<dyn RequestAuth>) -> Self {
+        self.request_auth = Some(auth);
+        self
+    }
+
+    /// Skip resolving the default `x-api-key` / `Authorization: Bearer`
+    /// headers from env / explicit options.
+    ///
+    /// Use this when the caller has installed a [`Self::request_auth`] hook
+    /// that supplies an alternative auth scheme (e.g. AWS `SigV4`, IAM key
+    /// header) and the static API-key env vars are intentionally absent.
+    /// Has no effect when `api_key` or `auth_token` is set explicitly
+    /// (those continue to populate the corresponding header).
+    #[must_use]
+    pub fn skip_default_auth_headers(mut self, skip: bool) -> Self {
+        self.skip_default_auth_headers = skip;
+        self
+    }
+
     /// Finalize the provider.
     ///
     /// # Errors
@@ -195,8 +425,8 @@ impl AnthropicBuilder {
             ));
         }
 
-        let resolved_auth_token = self
-            .auth_token
+        let explicit_token = self.auth_token.clone();
+        let resolved_auth_token = explicit_token
             .clone()
             .or_else(|| std::env::var(AUTH_TOKEN_ENV_VAR).ok())
             .filter(|s| !s.is_empty());
@@ -204,7 +434,10 @@ impl AnthropicBuilder {
         let mut headers = self.extra_headers;
         if let Some(token) = resolved_auth_token {
             headers.insert("Authorization".into(), Some(format!("Bearer {token}")));
-        } else {
+        } else if self.api_key.is_some() || !self.skip_default_auth_headers {
+            // Either an explicit api_key was provided, or we have to fall
+            // back to env-resolution because no alternative auth hook was
+            // installed via skip_default_auth_headers + request_auth.
             let api_key = llmsdk_provider_utils::api_key::load_api_key(
                 &llmsdk_provider_utils::api_key::LoadApiKey {
                     api_key: self.api_key.as_deref(),
@@ -240,6 +473,9 @@ impl AnthropicBuilder {
                 headers,
                 http,
                 provider_name,
+                request_auth: self.request_auth,
+                endpoint_override: None,
+                body_transformer: None,
             }),
         })
     }

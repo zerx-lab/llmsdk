@@ -7,7 +7,17 @@
 //!
 //! Tool routing lives in [`super::prepare_tools`]; wire types in
 //! [`super::wire::request::WireTool`].
+//!
+//! Field-level doc lints are disabled here: the shapes mirror upstream
+//! `@ai-sdk/openai` verbatim, and `internal` re-exports them for
+//! cross-crate consumers (Azure OpenAI).
 // Rust guideline compliant 2026-02-21
+
+#![allow(
+    missing_docs,
+    reason = "shapes mirror @ai-sdk/openai upstream verbatim; \
+              doc coverage is tracked at the upstream level"
+)]
 
 pub mod apply_patch;
 pub mod code_interpreter;

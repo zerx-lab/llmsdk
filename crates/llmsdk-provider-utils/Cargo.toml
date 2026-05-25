@@ -12,6 +12,11 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+aws-credential-types = { version = "1.2.14", optional = true }
+aws-sigv4 = { version = "1.4.4", optional = true }
+aws-smithy-eventstream = { version = "0.60.20", optional = true }
+aws-smithy-runtime-api = { version = "1.12.1", default-features = false, features = ["client"], optional = true }
+aws-smithy-types = { version = "1.4.8", optional = true }
 bytes = "1.11.1"
 eventsource-stream = "0.2.3"
 futures = "0.3.32"
@@ -23,3 +28,23 @@ serde_json = "1.0.150"
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
 wiremock = "0.6.5"
+
+[features]
+# Optional AWS helpers — opt-in only; default build pulls neither.
+# `aws-sigv4` enables `crate::aws_sigv4` (SigV4 request signing + SigV4Fetch).
+# Pulls in the official `aws-sigv4` crate plus its mandatory companion crates
+# (`aws-credential-types`, `aws-smithy-runtime-api` for `Identity`). These are
+# implementation details of `aws-sigv4` — we do not surface them in the public
+# API.
+aws-sigv4 = [
+    "dep:aws-sigv4",
+    "dep:aws-credential-types",
+    "dep:aws-smithy-runtime-api",
+]
+# `aws-event-stream` enables `crate::aws_eventstream` (binary frame decoder).
+# Pulls in the official `aws-smithy-eventstream` plus `aws-smithy-types` for
+# the underlying `Message` / `HeaderValue` types it returns.
+aws-event-stream = [
+    "dep:aws-smithy-eventstream",
+    "dep:aws-smithy-types",
+]

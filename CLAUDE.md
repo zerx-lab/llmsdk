@@ -58,7 +58,7 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M12 完成。375 个 workspace 测试全绿；
+当前进度：M1–M13 完成。986 个 workspace 测试全绿；
 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 ```
@@ -263,23 +263,81 @@ M12 ✓ Anthropic Full API Parity（达到 ai-sdk Anthropic 包 100% feature par
      - 设计文档：`architecture/0005-m12-anthropic-full-design.md`
      - workspace 健康：375 测试全绿（M11 → M12 +54）；fmt + clippy 通过
      - subagent 审核 PASS（与 ai-sdk Anthropic 包 100% feature parity）
+M13 ✓ First-Tier Provider Parity（8 个一线大厂 provider 全量接入）：
+     - **新增 2 个 trait + middleware**（llmsdk-provider，纯新增不破坏）：
+       * `VideoModel` + `VideoOptions` + `VideoFile`(File|Url) + `VideoData`(Url|Base64|Binary) +
+         `VideoResponseInfo`（必填 timestamp+model_id）+ `VideoModelMiddleware` +
+         `wrap_video_model`（对齐 ai-sdk `Experimental_VideoModelV4`）
+       * `RerankingModel` + `RerankingOptions` + `RerankingDocuments`(Text|Object) +
+         `RerankingResult` + `RankingEntry` + `RerankingModelMiddleware` +
+         `wrap_reranking_model`（对齐 ai-sdk `RerankingModelV4`）
+     - **新增 3 个 optional features in llmsdk-provider-utils**：
+       * `aws-sigv4`（依赖 aws-sigv4 + aws-credential-types + aws-smithy-runtime-api）
+         → `aws_sigv4::{SigV4Fetch, AwsCredentials, AwsCredentialsProvider, sign_request, sign_post}`
+       * `aws-event-stream`（依赖 aws-smithy-eventstream + aws-smithy-types）
+         → `aws_eventstream::{EventStreamMessage, EventStreamValue, decode_event_stream}`
+       * gcp_auth 依赖（在 llmsdk-google-vertex 内部，非 utils feature）
+     - **8 个新 provider crate**（全部 1:1 复刻 ai-sdk 上游）：
+       * `llmsdk-xai`：Chat + Image + Video（首个 VideoModel impl，4 模式 + 异步轮询 LRO）
+         + Files + Responses + 7 个 typed tools（web_search/x_search/code_execution/
+         view_image/view_x_video/file_search/mcp_server）— 232 测试
+       * `llmsdk-mistral`：Chat + Embedding（prefix 续写 / random_seed /
+         document_image_url / safe_prompt / reasoning_content for magistral）— 88 测试
+       * `llmsdk-azure`：Azure OpenAI Chat + Responses + Embedding + Image（复用
+         llmsdk-openai 内核，通过新增 `pub mod internal { Inner, UrlStrategy }`；
+         URL 双模式：deployments-based 与 openai/v1 兼容；api-key 认证）— 13 测试
+       * `llmsdk-cohere`：Chat + Embedding + Reranking（首个 RerankingModel impl，
+         Cohere v2 wire + tool_plan → Reasoning + citations → Source）— 73 测试
+       * `llmsdk-google`：Gemini Language + Embedding + Image (Imagen) + Video (Veo LRO)
+         + Files (resumable upload) + 8 个 typed tools（google_search/google_search_retrieval/
+         enterprise_web_search/code_execution/url_context/file_search/google_maps/
+         vertex_rag_store）+ JSON Schema → OpenAPI 3.0 转换 — 74 测试
+       * `llmsdk-anthropic-aws`：Claude on AWS（Anthropic 自有 AWS 部署，
+         service=`aws-external-anthropic`）；新增 `RequestAuth` async trait hook 在
+         llmsdk-anthropic（最小侵入，纯新增）；双认证（SigV4 或 API Key）+
+         workspace-id header — 16 测试
+       * `llmsdk-amazon-bedrock`：Converse API + ConverseStream（EventStream binary）
+         + Embedding (Titan/Cohere/Nova family dispatch) + Image (5 task types) +
+         Anthropic on Bedrock（复用 llmsdk-anthropic 通过 InnerBuilder endpoint+
+         body_transform hooks）+ Reranking — 56 测试
+       * `llmsdk-google-vertex`：Vertex Gemini + Embedding + Image + Video + Anthropic on
+         Vertex + xAI on Vertex + MaaS（OpenAI-compatible）；Express Mode（API Key）+
+         Standard Mode（OAuth via gcp_auth）双模式；global location 特殊处理 — 38 测试
+     - **跨 crate internal 模块暴露**（azure/vertex 复用需要）：
+       * `llmsdk-openai::internal` ← Inner / UrlStrategy / 4 model new()
+       * `llmsdk-google::internal` ← Inner / InnerBuilder / GoogleLanguageModel::new
+       * `llmsdk-anthropic::internal` ← Inner / InnerBuilder（endpoint + body_transform
+         hooks）/ AnthropicMessagesModel::new
+     - **trait 改动**：纯新增（VideoModel / RerankingModel + 关联类型 + 2 middleware
+       trait + wrap_*）；llmsdk-anthropic 新增 RequestAuth async trait hook（纯新增）
+     - 设计文档：`architecture/0006-m13-design.md`
+     - workspace 健康：986 测试全绿（M12 → M13 +611）；fmt + clippy 通过
+     - subagent 审核 PASS（每个 provider 独立审核 + 总审）
 ```
 
-**已验证的 trait 抽象**：M1–M12 累计 trait 改动 9 处旧 + 2 套新（皆非破坏）：
+**已验证的 trait 抽象**：M1–M13 累计 trait 改动 9 处旧 + 4 套新（皆非破坏）：
 M8 `ImageResult.warnings` 补漏 + M10 `JsonSchema = schemars::Schema`、
 `ImageOptions.files/mask`、`ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails`
 + M10.5 `StreamPart::File` / `StreamPart::ReasoningFile` 两个 variant +
-`Tool::Provider` wire tag 变更 + M11 `ToolCallPart.dynamic` + M12 纯新增 `FilesModel`
-trait + `SkillsModel` trait + 关联类型（`UploadFileData/Options/Result` /
-`SkillFile/UploadSkillOptions/Result` / `ProviderReference`）。三个核心模型表面
-（Language/Embedding/Image）+ 两个上传模型表面（Files/Skills）+ 三层 middleware
-+ 两个 provider 四个端点（OpenAI Chat + OpenAI Responses + Anthropic Messages
-+ Anthropic Files + Anthropic Skills）+ 20 个 Anthropic typed tool factory，
-所有 ai-sdk v4 特性都基于这套 trait 消化。
+`Tool::Provider` wire tag 变更 + M11 `ToolCallPart.dynamic` + M12 纯新增 `FilesModel` +
+`SkillsModel` trait + 关联类型 + M13 纯新增 `VideoModel` + `RerankingModel` trait +
+关联类型（VideoOptions/VideoFile/VideoData/VideoResponseInfo / RerankingOptions/
+RerankingDocuments/RerankingResult/RankingEntry）+ 2 个对应 middleware trait +
+wrap_video_model/wrap_reranking_model。5 个核心模型表面（Language/Embedding/Image/
+Video/Reranking）+ 两个上传模型表面（Files/Skills）+ 五层 middleware + 10 个
+provider crate 覆盖 6 个 OpenAI / Anthropic / xAI / Mistral / Azure / Cohere / Google /
+Anthropic-AWS / Bedrock / Vertex 一线大厂全部端点（Chat / Responses / Stream /
+Embedding / Image / Video / Files / Skills / Reranking / 70+ typed server tool
+factories），所有 ai-sdk v4 特性都基于这套 trait 消化。
 
-**下一阶段候选**（待规划）：
-- 第三个 provider（Gemini）以验证 trait 抽象在第三家上的稳定性
-- 详见 `todo.md` 中"M13+ 推迟"段
+**下一阶段候选**（待规划，详见 `todo.md`）：
+- M14 候选：TTS / STT（SpeechModel + TranscriptionModel trait + elevenlabs/hume/lmnt
+  + deepgram/assemblyai/gladia/revai）
+- M15 候选：高速推理 / 国内大厂（Groq / Cerebras / Fireworks / Together / DeepInfra /
+  Baseten / HuggingFace / Replicate / Alibaba / ByteDance / Moonshot / DeepSeek）
+- M16 候选：搜索增强 / 网关 / 专项（Perplexity / OpenAI-Compatible / Open-Responses /
+  Gateway / Vercel / Voyage / Black-Forest-Labs / Fal / Prodia / Luma / Klingai /
+  MCP / QuiverAI）
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐，并按"强制规则"末条
 列出本阶段**全部**特性（不允许中途推迟，详见强制规则段）。
