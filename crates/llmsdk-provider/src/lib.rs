@@ -52,16 +52,89 @@ pub mod shared;
 pub mod skills_model;
 pub mod video_model;
 
+// === Top-level re-exports ===
+//
+// High-frequency types are pulled to the crate root so downstream code can
+// write `use llmsdk_provider::CallOptions;` instead of
+// `use llmsdk_provider::language_model::CallOptions;`. The original
+// `pub mod` paths above remain available for callers that prefer the
+// fully qualified form.
+
+// --- Traits ---
 #[doc(inline)]
 pub use embedding_model::EmbeddingModel;
 #[doc(inline)]
-pub use error::{ProviderError, Result};
+pub use files_model::FilesModel;
 #[doc(inline)]
-pub use files_model::{FilesModel, UploadFileData, UploadFileOptions, UploadFileResult};
-#[doc(inline)]
-pub use image_model::{ImageModel, ImageOptions, ImageResult, ImageUsage, ImageUsageInputDetails};
+pub use image_model::ImageModel;
 #[doc(inline)]
 pub use language_model::LanguageModel;
+#[doc(inline)]
+pub use provider::Provider;
+#[doc(inline)]
+pub use reranking_model::RerankingModel;
+#[doc(inline)]
+pub use skills_model::SkillsModel;
+#[doc(inline)]
+pub use video_model::VideoModel;
+
+// --- Error ---
+#[doc(inline)]
+pub use error::{ApiCallErrorBuilder, ProviderError, Result};
+
+// --- JSON ---
+#[doc(inline)]
+pub use json::{JsonObject, JsonSchema, JsonValue};
+
+// --- Shared ---
+#[doc(inline)]
+pub use shared::{
+    FileBytes, FileData, Headers, ProviderMetadata, ProviderOptions, ProviderReference,
+    RequestInfo, ResponseInfo, Warning,
+};
+
+// --- language_model ---
+#[doc(inline)]
+pub use language_model::{
+    AssistantPart, BoxStream, CallOptions, Content, FilePart, FinishReason, FinishReasonKind,
+    FunctionTool, GenerateResponse, GenerateResult, InputTokenUsage, Message, OutputTokenUsage,
+    Prompt, ProviderTool, ReasoningEffort, ReasoningPart, ResponseFormat, ResponseMetadata, Source,
+    StreamPart, StreamResponse, StreamResult, SupportedUrls, TextPart, Tool, ToolApprovalRequest,
+    ToolApprovalResponsePart, ToolCallPart, ToolChoice, ToolInputExample, ToolMessagePart,
+    ToolOutputPart, ToolResult, ToolResultOutput, ToolResultPart, UrlPattern, Usage, UserPart,
+};
+
+// --- embedding_model ---
+#[doc(inline)]
+pub use embedding_model::{EmbedOptions, EmbedResult, Embedding, EmbeddingUsage};
+
+// --- image_model ---
+#[doc(inline)]
+pub use image_model::{
+    GeneratedImage, ImageOptions, ImageResult, ImageUsage, ImageUsageInputDetails,
+};
+
+// --- video_model ---
+#[doc(inline)]
+pub use video_model::{VideoData, VideoFile, VideoOptions, VideoResponseInfo, VideoResult};
+
+// --- reranking_model ---
+#[doc(inline)]
+pub use reranking_model::{RankingEntry, RerankingDocuments, RerankingOptions, RerankingResult};
+
+// --- files_model ---
+#[doc(inline)]
+pub use files_model::{UploadFileData, UploadFileOptions, UploadFileResult};
+
+// --- skills_model ---
+#[doc(inline)]
+pub use skills_model::{SkillFile, UploadSkillOptions, UploadSkillResult};
+
+// --- provider ---
+#[doc(inline)]
+pub use provider::{DynEmbeddingModel, DynImageModel, DynLanguageModel};
+
+// --- middleware ---
 #[doc(inline)]
 pub use middleware::{
     CacheMiddleware, CacheStore, CachedEntry, CallKind, EmbeddingModelMiddleware,
@@ -70,18 +143,6 @@ pub use middleware::{
     RetryMiddleware, RetryMiddlewareBuilder, StderrLogger, VideoModelMiddleware,
     wrap_embedding_model, wrap_image_model, wrap_language_model, wrap_provider,
     wrap_reranking_model, wrap_video_model,
-};
-#[doc(inline)]
-pub use provider::Provider;
-#[doc(inline)]
-pub use reranking_model::{
-    RankingEntry, RerankingDocuments, RerankingModel, RerankingOptions, RerankingResult,
-};
-#[doc(inline)]
-pub use skills_model::{SkillFile, SkillsModel, UploadSkillOptions, UploadSkillResult};
-#[doc(inline)]
-pub use video_model::{
-    VideoData, VideoFile, VideoModel, VideoOptions, VideoResponseInfo, VideoResult,
 };
 
 /// Specification version this crate implements.

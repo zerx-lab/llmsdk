@@ -1,0 +1,52 @@
+[package]
+name = "llmsdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vercel ai-sdk for Rust — unified facade re-exporting the provider trait crate and one feature-gated module per concrete provider"
+
+[lints]
+workspace = true
+
+[dependencies]
+llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
+llmsdk-provider-utils = { version = "0.1.0", path = "../llmsdk-provider-utils", optional = true }
+llmsdk-openai = { version = "0.1.0", path = "../llmsdk-openai", optional = true }
+llmsdk-anthropic = { version = "0.1.0", path = "../llmsdk-anthropic", optional = true }
+llmsdk-xai = { version = "0.1.0", path = "../llmsdk-xai", optional = true }
+llmsdk-mistral = { version = "0.1.0", path = "../llmsdk-mistral", optional = true }
+llmsdk-azure = { version = "0.1.0", path = "../llmsdk-azure", optional = true }
+llmsdk-cohere = { version = "0.1.0", path = "../llmsdk-cohere", optional = true }
+llmsdk-google = { version = "0.1.0", path = "../llmsdk-google", optional = true }
+llmsdk-anthropic-aws = { version = "0.1.0", path = "../llmsdk-anthropic-aws", optional = true }
+llmsdk-amazon-bedrock = { version = "0.1.0", path = "../llmsdk-amazon-bedrock", optional = true }
+llmsdk-google-vertex = { version = "0.1.0", path = "../llmsdk-google-vertex", optional = true }
+
+[features]
+default = []
+utils = ["dep:llmsdk-provider-utils"]
+openai = ["dep:llmsdk-openai"]
+anthropic = ["dep:llmsdk-anthropic"]
+xai = ["dep:llmsdk-xai"]
+mistral = ["dep:llmsdk-mistral"]
+azure = ["dep:llmsdk-azure"]
+cohere = ["dep:llmsdk-cohere"]
+google = ["dep:llmsdk-google"]
+anthropic-aws = ["dep:llmsdk-anthropic-aws"]
+amazon-bedrock = ["dep:llmsdk-amazon-bedrock"]
+google-vertex = ["dep:llmsdk-google-vertex"]
+full = [
+    "utils",
+    "openai",
+    "anthropic",
+    "xai",
+    "mistral",
+    "azure",
+    "cohere",
+    "google",
+    "anthropic-aws",
+    "amazon-bedrock",
+    "google-vertex",
+]
