@@ -40,16 +40,25 @@
 
 mod config;
 mod error;
+mod files;
 mod messages;
+mod skills;
+pub mod tools;
 
 pub use config::{Anthropic, AnthropicBuilder};
+pub use files::AnthropicFiles;
 pub use messages::AnthropicMessagesModel;
+pub use skills::AnthropicSkills;
 
 /// Default base URL for the `Anthropic` HTTP API.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 /// Environment variable consulted when no explicit API key is given.
 pub const API_KEY_ENV_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// Environment variable consulted for the bearer auth token (alternative to
+/// [`API_KEY_ENV_VAR`]).
+pub const AUTH_TOKEN_ENV_VAR: &str = "ANTHROPIC_AUTH_TOKEN";
 
 /// Provider id reported via [`llmsdk_provider::LanguageModel::provider`].
 pub const PROVIDER_ID: &str = "anthropic";

@@ -33,6 +33,22 @@ pub type ProviderOptions = HashMap<String, JsonObject>;
 /// Mirrors `SharedV4ProviderMetadata`.
 pub type ProviderMetadata = HashMap<String, JsonObject>;
 
+/// Mapping of provider names to provider-specific file / skill identifiers.
+///
+/// Mirrors `SharedV4ProviderReference`. Lets the same logical file or skill
+/// be referenced across multiple providers without re-uploading.
+///
+/// # Examples
+///
+/// ```
+/// use llmsdk_provider::shared::ProviderReference;
+///
+/// let mut r = ProviderReference::new();
+/// r.insert("anthropic".into(), "file-abc123".into());
+/// assert_eq!(r.get("anthropic"), Some(&"file-abc123".to_owned()));
+/// ```
+pub type ProviderReference = HashMap<String, String>;
+
 /// HTTP headers attached to a request or response.
 ///
 /// Mirrors `SharedV4Headers`. Value may be `None` when the caller wants the

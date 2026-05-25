@@ -13,10 +13,13 @@ use llmsdk_provider::language_model::{
     Content, GenerateResponse, GenerateResult, ReasoningPart, ResponseMetadata, TextPart,
     ToolCallPart, ToolResult, ToolResultOutput,
 };
-use llmsdk_provider::shared::{Headers, ProviderOptions, Warning};
+use llmsdk_provider::shared::{Headers, ProviderMetadata, ProviderOptions, Warning};
 use serde_json::{Map, Value as JsonValue};
 
-use super::wire::{MessagesResponse, ResponseContent};
+use super::wire::{
+    MessagesResponse, ResponseContent, WireAppliedEdit, WireContainerMetadata,
+    WireContextManagement,
+};
 use super::{finish_reason, usage};
 
 /// Parse a successful Messages response.
@@ -157,15 +160,130 @@ pub(crate) fn parse_response(
         body: None,
     };
 
+    let provider_metadata = build_provider_metadata(
+        response.usage.iterations.as_deref(),
+        response.container.as_ref(),
+        response.context_management.as_ref(),
+    );
+
     Ok(GenerateResult {
         content,
         finish_reason: finish,
         usage,
-        provider_metadata: None,
+        provider_metadata,
         request: request_body.map(|body| llmsdk_provider::shared::RequestInfo { body: Some(body) }),
         response: Some(response_meta),
         warnings,
     })
+}
+
+/// Build the `provider_metadata.anthropic.*` block from the response-level
+/// metadata fields (`iterations` / `container` / `context_management`).
+///
+/// Returns `None` when no metadata is present so we keep the on-wire payload
+/// minimal for ordinary calls.
+fn build_provider_metadata(
+    iterations: Option<&[super::wire::WireUsageIteration]>,
+    container: Option<&WireContainerMetadata>,
+    context_management: Option<&WireContextManagement>,
+) -> Option<ProviderMetadata> {
+    let mut anthropic = Map::new();
+
+    if let Some(its) = iterations
+        && !its.is_empty()
+    {
+        let value = serde_json::to_value(its).ok()?;
+        anthropic.insert("usageIterations".into(), value);
+    }
+
+    if let Some(c) = container {
+        let mut obj = Map::new();
+        obj.insert("expiresAt".into(), JsonValue::String(c.expires_at.clone()));
+        obj.insert("id".into(), JsonValue::String(c.id.clone()));
+        if let Some(skills) = &c.skills {
+            let skill_values: Vec<JsonValue> = skills
+                .iter()
+                .map(|s| {
+                    let mut so = Map::new();
+                    so.insert("type".into(), JsonValue::String(s.kind.clone()));
+                    so.insert("skillId".into(), JsonValue::String(s.skill_id.clone()));
+                    if let Some(v) = &s.version {
+                        so.insert("version".into(), JsonValue::String(v.clone()));
+                    }
+                    JsonValue::Object(so)
+                })
+                .collect();
+            obj.insert("skills".into(), JsonValue::Array(skill_values));
+        }
+        anthropic.insert("container".into(), JsonValue::Object(obj));
+    }
+
+    if let Some(cm) = context_management {
+        let edits = cm
+            .applied_edits
+            .iter()
+            .filter_map(applied_edit_to_value)
+            .collect::<Vec<_>>();
+        let mut obj = Map::new();
+        obj.insert("appliedEdits".into(), JsonValue::Array(edits));
+        anthropic.insert("contextManagement".into(), JsonValue::Object(obj));
+    }
+
+    if anthropic.is_empty() {
+        return None;
+    }
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".into(), anthropic);
+    Some(pm)
+}
+
+fn applied_edit_to_value(edit: &WireAppliedEdit) -> Option<JsonValue> {
+    let mut obj = Map::new();
+    match edit {
+        WireAppliedEdit::ClearToolUses {
+            cleared_tool_uses,
+            cleared_input_tokens,
+        } => {
+            obj.insert(
+                "type".into(),
+                JsonValue::String("clear_tool_uses_20250919".into()),
+            );
+            if let Some(n) = cleared_tool_uses {
+                obj.insert("clearedToolUses".into(), JsonValue::Number((*n).into()));
+            }
+            if let Some(n) = cleared_input_tokens {
+                obj.insert("clearedInputTokens".into(), JsonValue::Number((*n).into()));
+            }
+        }
+        WireAppliedEdit::ClearThinking {
+            cleared_thinking_turns,
+            cleared_input_tokens,
+        } => {
+            obj.insert(
+                "type".into(),
+                JsonValue::String("clear_thinking_20251015".into()),
+            );
+            if let Some(n) = cleared_thinking_turns {
+                obj.insert(
+                    "clearedThinkingTurns".into(),
+                    JsonValue::Number((*n).into()),
+                );
+            }
+            if let Some(n) = cleared_input_tokens {
+                obj.insert("clearedInputTokens".into(), JsonValue::Number((*n).into()));
+            }
+        }
+        WireAppliedEdit::Compact {
+            cleared_input_tokens,
+        } => {
+            obj.insert("type".into(), JsonValue::String("compact_20260112".into()));
+            if let Some(n) = cleared_input_tokens {
+                obj.insert("clearedInputTokens".into(), JsonValue::Number((*n).into()));
+            }
+        }
+        WireAppliedEdit::Other => return None,
+    }
+    Some(JsonValue::Object(obj))
 }
 
 fn headers_to_provider(raw: HashMap<String, String>) -> Headers {
@@ -237,7 +355,10 @@ mod tests {
                 output_tokens: 2,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                iterations: None,
             },
+            container: None,
+            context_management: None,
         };
         let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
         assert_eq!(r.content.len(), 1);
@@ -263,7 +384,10 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                iterations: None,
             },
+            container: None,
+            context_management: None,
         };
         let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
         if let Content::ToolCall(tc) = &r.content[0] {
@@ -273,6 +397,155 @@ mod tests {
             panic!("expected tool call");
         }
         assert_eq!(r.finish_reason.unified, FinishReasonKind::ToolCalls);
+    }
+
+    #[test]
+    fn iterations_surface_under_provider_metadata() {
+        use crate::messages::wire::WireUsageIteration;
+        let resp = MessagesResponse {
+            id: Some("msg_x".into()),
+            model: Some("claude-opus-4-7".into()),
+            content: vec![ResponseContent::Text {
+                text: "ok".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: Some(vec![
+                    WireUsageIteration::Compaction {
+                        input_tokens: 200,
+                        output_tokens: 80,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                    WireUsageIteration::AdvisorMessage {
+                        model: "claude-opus-4-7".into(),
+                        input_tokens: 50,
+                        output_tokens: 30,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: Some(10),
+                    },
+                ]),
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let pm = r.provider_metadata.unwrap();
+        let anthropic = pm.get("anthropic").unwrap();
+        let iters = anthropic
+            .get("usageIterations")
+            .and_then(JsonValue::as_array)
+            .unwrap();
+        assert_eq!(iters.len(), 2);
+        assert_eq!(iters[0]["type"], "compaction");
+        assert_eq!(iters[1]["type"], "advisor_message");
+        assert_eq!(iters[1]["model"], "claude-opus-4-7");
+    }
+
+    #[test]
+    fn container_metadata_surfaces() {
+        use crate::messages::wire::{WireContainerMetadata, WireContainerSkill};
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::Text {
+                text: "ok".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage::default(),
+            container: Some(WireContainerMetadata {
+                expires_at: "2026-05-25T12:00:00Z".into(),
+                id: "ctr-xyz".into(),
+                skills: Some(vec![WireContainerSkill {
+                    kind: "user".into(),
+                    skill_id: "skill-1".into(),
+                    version: Some("v3".into()),
+                }]),
+            }),
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let pm = r.provider_metadata.unwrap();
+        let container = pm.get("anthropic").unwrap().get("container").unwrap();
+        assert_eq!(container["id"], "ctr-xyz");
+        assert_eq!(container["expiresAt"], "2026-05-25T12:00:00Z");
+        assert_eq!(container["skills"][0]["skillId"], "skill-1");
+        assert_eq!(container["skills"][0]["version"], "v3");
+    }
+
+    #[test]
+    fn context_management_three_edit_types_all_surface() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::Text {
+                text: "ok".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage::default(),
+            container: None,
+            context_management: Some(WireContextManagement {
+                applied_edits: vec![
+                    WireAppliedEdit::ClearToolUses {
+                        cleared_tool_uses: Some(3),
+                        cleared_input_tokens: Some(120),
+                    },
+                    WireAppliedEdit::ClearThinking {
+                        cleared_thinking_turns: Some(2),
+                        cleared_input_tokens: None,
+                    },
+                    WireAppliedEdit::Compact {
+                        cleared_input_tokens: Some(2000),
+                    },
+                    WireAppliedEdit::Other,
+                ],
+            }),
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let pm = r.provider_metadata.unwrap();
+        let edits = pm
+            .get("anthropic")
+            .unwrap()
+            .get("contextManagement")
+            .unwrap()
+            .get("appliedEdits")
+            .and_then(JsonValue::as_array)
+            .unwrap();
+        // Other is filtered out; only 3 known edits.
+        assert_eq!(edits.len(), 3);
+        assert_eq!(edits[0]["type"], "clear_tool_uses_20250919");
+        assert_eq!(edits[0]["clearedToolUses"], 3);
+        assert_eq!(edits[0]["clearedInputTokens"], 120);
+        assert_eq!(edits[1]["type"], "clear_thinking_20251015");
+        assert_eq!(edits[1]["clearedThinkingTurns"], 2);
+        assert!(edits[1].get("clearedInputTokens").is_none());
+        assert_eq!(edits[2]["type"], "compact_20260112");
+        assert_eq!(edits[2]["clearedInputTokens"], 2000);
+    }
+
+    #[test]
+    fn no_extra_metadata_yields_none() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::Text {
+                text: "ok".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage::default(),
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        assert!(r.provider_metadata.is_none());
     }
 
     #[test]
@@ -287,7 +560,10 @@ mod tests {
                 output_tokens: 0,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                iterations: None,
             },
+            container: None,
+            context_management: None,
         };
         let err = parse_response(resp, empty_headers(), None, vec![]).unwrap_err();
         assert!(format!("{err}").contains("no content"));

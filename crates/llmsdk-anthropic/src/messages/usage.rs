@@ -1,7 +1,9 @@
 //! `Anthropic` usage -> normalized [`Usage`].
 //!
-//! Mirrors `convert-anthropic-usage.ts` (simplified: no `iterations`,
-//! which is for compaction / advisor — deferred to a later milestone).
+//! Mirrors `convert-anthropic-usage.ts`. Iterations (compaction / advisor
+//! sub-usage breakdown) are surfaced separately under
+//! `provider_metadata.anthropic.usageIterations`; this module only flattens
+//! the headline `input_tokens` / `output_tokens` / cache numbers.
 // Rust guideline compliant 2026-02-21
 
 use llmsdk_provider::language_model::{InputTokenUsage, OutputTokenUsage, Usage};
@@ -48,6 +50,7 @@ mod tests {
             output_tokens: 42,
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: Some(20),
+            iterations: None,
         };
         let u = convert(&wire);
         assert_eq!(u.input_tokens.total, Some(130));
@@ -64,6 +67,7 @@ mod tests {
             output_tokens: 3,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            iterations: None,
         };
         let u = convert(&wire);
         assert_eq!(u.input_tokens.total, Some(5));

@@ -247,6 +247,68 @@ pub(crate) struct MessagesResponse {
     #[serde(default)]
     pub stop_reason: Option<String>,
     pub usage: ResponseUsage,
+    /// Server-allocated Skills container metadata.
+    #[serde(default)]
+    pub container: Option<WireContainerMetadata>,
+    /// Applied `context_management` edits (compaction / clear / etc.).
+    #[serde(default)]
+    pub context_management: Option<WireContextManagement>,
+}
+
+/// `container` block on the response.
+///
+/// Mirrors `AnthropicMessageMetadata.container`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireContainerMetadata {
+    pub expires_at: String,
+    pub id: String,
+    #[serde(default)]
+    pub skills: Option<Vec<WireContainerSkill>>,
+}
+
+/// One skill entry under `container.skills`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireContainerSkill {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub skill_id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// `context_management.applied_edits` envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WireContextManagement {
+    pub applied_edits: Vec<WireAppliedEdit>,
+}
+
+/// One applied context edit. Three known variants, plus a catch-all so future
+/// edit types parse without erroring.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum WireAppliedEdit {
+    #[serde(rename = "clear_tool_uses_20250919")]
+    ClearToolUses {
+        #[serde(default)]
+        cleared_tool_uses: Option<u32>,
+        #[serde(default)]
+        cleared_input_tokens: Option<u64>,
+    },
+    #[serde(rename = "clear_thinking_20251015")]
+    ClearThinking {
+        #[serde(default)]
+        cleared_thinking_turns: Option<u32>,
+        #[serde(default)]
+        cleared_input_tokens: Option<u64>,
+    },
+    #[serde(rename = "compact_20260112")]
+    Compact {
+        #[serde(default)]
+        cleared_input_tokens: Option<u64>,
+    },
+    /// Unknown applied-edit variant; surfaced as raw JSON.
+    #[serde(other)]
+    Other,
 }
 
 /// Response content part (only the variants we surface today).
@@ -314,8 +376,8 @@ pub(crate) enum ResponseContent {
 }
 
 /// Response `usage` object.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[expect(
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[allow(
     clippy::struct_field_names,
     reason = "field names match Anthropic JSON wire format and must not be renamed"
 )]
@@ -326,4 +388,43 @@ pub(crate) struct ResponseUsage {
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
+    /// Per-iteration sub-usage (advisor / compaction breakdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<Vec<WireUsageIteration>>,
+}
+
+/// One entry in `usage.iterations[]`.
+///
+/// Mirrors `AnthropicUsageIteration` in `convert-anthropic-usage.ts`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireUsageIteration {
+    /// Sub-iteration of a compaction step.
+    Compaction {
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u64>,
+    },
+    /// Generic message-level iteration.
+    Message {
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u64>,
+    },
+    /// Advisor sub-inference (carries the advisor model id).
+    AdvisorMessage {
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_read_input_tokens: Option<u64>,
+    },
 }

@@ -2,7 +2,29 @@
 
 > 入口文件：跨里程碑追踪所有 deferred / TODO 项目；任何阶段性停顿都先记到这里。
 
-## 当前里程碑：M11 OpenAI Responses API 完成 ✓
+## 当前里程碑：M12 Anthropic Full API Parity 完成 ✓
+
+M12 把 Anthropic 剩余三条 API 路径全部接入，达成 ai-sdk Anthropic 包 100% feature parity：
+
+- **新增 2 个 trait**：`FilesModel` + `SkillsModel` + 关联类型（纯新增，不破坏）
+- **AnthropicFiles** (`POST /v1/files`, beta `files-api-2025-04-14`)：multipart 上传
+  + 响应映射到 `provider_metadata.anthropic.{filename,mimeType,sizeBytes,createdAt,downloadable}`
+- **AnthropicSkills** (`POST /v1/skills` + `GET /v1/skills/{id}/versions/{v}`,
+  beta `skills-2025-10-02`)：multipart files[]+display_title + version metadata
+  二次回填 name/description
+- **20 个 typed tool factory**：advisor_20260301 / bash×2 / code_execution×3 /
+  computer×3 / memory / text_editor×4 / web_fetch×2 / web_search×2 /
+  tool_search×2，全部 typed args + snake_case wire
+- **AnthropicBuilder 扩展**：auth_token（与 api_key 互斥）/ name / chat /
+  language_model / files / skills 工厂；新增 ANTHROPIC_AUTH_TOKEN env var
+- **响应元数据深度解析**：usageIterations 三 variant + container + applied_edits
+  三 variant 全部 typed 写入 `provider_metadata.anthropic.*`
+- 设计文档：`architecture/0005-m12-anthropic-full-design.md`
+- 3 套契约测试（17 wiremock 用例）+ 23 个新单元测试
+- workspace 健康：375 测试全绿（M11 → M12 +54）；fmt + clippy 通过
+- subagent 审核 PASS（与 ai-sdk Anthropic 包 100% feature parity）
+
+### M11（历史）
 
 M11 完整接入 OpenAI 第二条 LanguageModel 端点 `POST /v1/responses`，与现有 Chat
 端点并存：
@@ -34,15 +56,15 @@ M10 单一阶段对齐了 ai-sdk v4 的 OpenAI / Anthropic provider 全部推迟
 M10.5 review fix-pack 补齐 ai-sdk Chat API 对齐审核中发现的所有偏差。设计文档
 `architecture/0003-m10-design.md`。
 
-## 仍然推迟（M12+）
+## 仍然推迟（M13+）
 
 ### Provider 扩展
 
-- **Gemini provider**（M12 候选）：用户已推迟两轮，先把现有两家对齐。验证 trait
-  抽象的第三个 provider。
-- **Anthropic Files API endpoint**：当前所有文件类内容用 base64 inline 或 URL；
-  上传 + 引用 file id 的端点未实现。
-- **fileIdPrefixes 用户可配置化**：M11 暂硬编码常量；M12+ 改为
+- **Gemini provider**（M13 候选）：用户已推迟两轮（M12 也优先 Anthropic
+  feature parity）。验证 trait 抽象的第三个 provider。
+- ~~**Anthropic Files API endpoint**~~：M12 完成。
+- ~~**Anthropic Skills API endpoint**~~：M12 完成。
+- **fileIdPrefixes 用户可配置化**：M11 暂硬编码常量；M13+ 改为
   `OpenAi::builder().file_id_prefixes(...)` 公开 API。
 
 ### Middleware

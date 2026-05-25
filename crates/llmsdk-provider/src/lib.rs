@@ -13,6 +13,8 @@
 //! - [`language_model`]: chat / completion models with streaming.
 //! - [`embedding_model`]: vector embedding models.
 //! - [`image_model`]: image generation models.
+//! - [`files_model`]: file-upload models (e.g. `Anthropic`'s `POST /files`).
+//! - [`skills_model`]: skill-upload models (`Anthropic` skills bundles).
 //! - [`middleware`]: decorators for stacking cross-cutting concerns
 //!   (retry / logging / caching) on top of any [`LanguageModel`].
 //! - [`provider`]: top-level factory returning model instances by id.
@@ -37,17 +39,21 @@
 
 pub mod embedding_model;
 pub mod error;
+pub mod files_model;
 pub mod image_model;
 pub mod json;
 pub mod language_model;
 pub mod middleware;
 pub mod provider;
 pub mod shared;
+pub mod skills_model;
 
 #[doc(inline)]
 pub use embedding_model::EmbeddingModel;
 #[doc(inline)]
 pub use error::{ProviderError, Result};
+#[doc(inline)]
+pub use files_model::{FilesModel, UploadFileData, UploadFileOptions, UploadFileResult};
 #[doc(inline)]
 pub use image_model::{ImageModel, ImageOptions, ImageResult, ImageUsage, ImageUsageInputDetails};
 #[doc(inline)]
@@ -62,6 +68,8 @@ pub use middleware::{
 };
 #[doc(inline)]
 pub use provider::Provider;
+#[doc(inline)]
+pub use skills_model::{SkillFile, SkillsModel, UploadSkillOptions, UploadSkillResult};
 
 /// Specification version this crate implements.
 ///

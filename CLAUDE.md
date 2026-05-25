@@ -58,7 +58,7 @@
 
 ## 里程碑约束（强制）
 
-当前进度：M1–M11 完成。321 个 workspace 测试全绿；
+当前进度：M1–M12 完成。375 个 workspace 测试全绿；
 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过。
 
 ```
@@ -222,20 +222,64 @@ M11 ✓ OpenAI Responses API 全量接入（POST /v1/responses）：
        （23 个 wiremock 用例）+ 64 个 responses 单元测试
      - workspace 健康：321 测试全绿（M10.5 → M11 +100）；fmt + clippy 通过
      - subagent 审核 PASS（与 ai-sdk 上游 100% 特性对齐）
+M12 ✓ Anthropic Full API Parity（达到 ai-sdk Anthropic 包 100% feature parity）：
+     - **新增 2 个 trait**（llmsdk-provider，纯新增不破坏）：
+       * `FilesModel` + `UploadFileOptions` + `UploadFileData`(Data|Text) +
+         `UploadFileResult`（对齐 `@ai-sdk/provider FilesV4`）
+       * `SkillsModel` + `UploadSkillOptions` + `SkillFile` + `UploadSkillResult`
+         （对齐 `@ai-sdk/provider SkillsV4`）
+       * 新增共享类型 `ProviderReference = HashMap<String, String>`
+     - **AnthropicFiles** (`POST /v1/files`)：multipart/form-data + beta header
+       `files-api-2025-04-14`；响应映射到 `provider_metadata.anthropic.{filename,
+       mimeType,sizeBytes,createdAt,downloadable}`
+     - **AnthropicSkills** (`POST /v1/skills` + `GET /v1/skills/{id}/versions/{v}`)：
+       multipart files[] + display_title；beta `skills-2025-10-02`；version
+       metadata 二次拉取优先回填 name/description；`provider_metadata.anthropic.
+       {source,createdAt,updatedAt}`
+     - **20 个 typed tool factory**（`crates/llmsdk-anthropic/src/tools/`）：
+       advisor_20260301 / bash_{20241022,20250124} /
+       code_execution_{20250522,20250825,20260120} /
+       computer_{20241022,20250124,20251124} / memory_20250818 /
+       text_editor_{20241022,20250124,20250429,20250728} /
+       web_fetch_{20250910,20260209} / web_search_{20250305,20260209} /
+       tool_search_{regex,bm25}_20251119；每个 typed args struct + Serialize
+       到 snake_case wire；与 messages/model.rs 现有 server tool 路由表完全
+       兼容
+     - **AnthropicBuilder 扩展**：`auth_token`（与 api_key 互斥校验 + 互斥错误
+       envelope）/ `name`（自定义 provider 名 + 自动派生 .files / .skills 后缀）/
+       `chat(id)` / `language_model(id)`（messages 的别名）/ `files()` /
+       `skills()` 工厂方法；新增 `ANTHROPIC_AUTH_TOKEN` env var
+     - **响应元数据深度解析**：iterations（typed enum 三 variant：Compaction /
+       Message / AdvisorMessage）→ `provider_metadata.anthropic.usageIterations`；
+       container（expiresAt + id + skills[]）→ `.container`；
+       context_management.applied_edits（typed enum 三 variant：
+       clear_tool_uses_20250919 / clear_thinking_20251015 / compact_20260112）
+       → `.contextManagement.appliedEdits`
+     - **trait 改动 0 处破坏性**：仅纯新增（FilesModel / SkillsModel + 7 个
+       关联类型 + ProviderReference 别名）
+     - 3 套契约测试：contract_files.rs / contract_skills.rs /
+       contract_tools_typed.rs（17 个 wiremock 用例）+ 4 个 metadata 单元测试
+       + 8 个 config 单元测试 + 11 个 tools 单元测试
+     - 设计文档：`architecture/0005-m12-anthropic-full-design.md`
+     - workspace 健康：375 测试全绿（M11 → M12 +54）；fmt + clippy 通过
+     - subagent 审核 PASS（与 ai-sdk Anthropic 包 100% feature parity）
 ```
 
-**已验证的 trait 抽象**：M1–M11 累计 trait 改动仅 9 处（M8 `ImageResult.warnings`
-补漏 + M10 `JsonSchema = schemars::Schema`、`ImageOptions.files/mask`、
-`ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails` + M10.5 `StreamPart::File` /
-`StreamPart::ReasoningFile` 两个 variant + `Tool::Provider` wire tag 变更 + M11
-`ToolCallPart.dynamic`）。三个模型表面（Language/Embedding/Image）+ 三层 middleware
-+ 两个 provider 三个端点（Chat + Responses + Anthropic Messages）的所有 ai-sdk v4
-特性都基于这套 trait 消化。
+**已验证的 trait 抽象**：M1–M12 累计 trait 改动 9 处旧 + 2 套新（皆非破坏）：
+M8 `ImageResult.warnings` 补漏 + M10 `JsonSchema = schemars::Schema`、
+`ImageOptions.files/mask`、`ImageResult.usage`、新增 `ImageUsage`/`ImageUsageInputDetails`
++ M10.5 `StreamPart::File` / `StreamPart::ReasoningFile` 两个 variant +
+`Tool::Provider` wire tag 变更 + M11 `ToolCallPart.dynamic` + M12 纯新增 `FilesModel`
+trait + `SkillsModel` trait + 关联类型（`UploadFileData/Options/Result` /
+`SkillFile/UploadSkillOptions/Result` / `ProviderReference`）。三个核心模型表面
+（Language/Embedding/Image）+ 两个上传模型表面（Files/Skills）+ 三层 middleware
++ 两个 provider 四个端点（OpenAI Chat + OpenAI Responses + Anthropic Messages
++ Anthropic Files + Anthropic Skills）+ 20 个 Anthropic typed tool factory，
+所有 ai-sdk v4 特性都基于这套 trait 消化。
 
 **下一阶段候选**（待规划）：
 - 第三个 provider（Gemini）以验证 trait 抽象在第三家上的稳定性
-- Anthropic Files API 端点
-- 详见 `todo.md` 中"M12+ 推迟"段
+- 详见 `todo.md` 中"M13+ 推迟"段
 
 **跨越里程碑/阶段禁止**。开新阶段前必须停下来对齐，并按"强制规则"末条
 列出本阶段**全部**特性（不允许中途推迟，详见强制规则段）。
