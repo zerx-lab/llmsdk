@@ -133,7 +133,10 @@ impl LanguageModel for GoogleLanguageModel {
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
         let prepared = self.prepare_request(&options, false)?;
         let url = self.build_url("generateContent");
-        let headers = self.merged_headers(options.headers.as_ref());
+        let mut headers = self.merged_headers(options.headers.as_ref());
+        for (k, v) in &prepared.extra_headers {
+            headers.insert(k.clone(), v.clone());
+        }
 
         let mut req = JsonRequest::new(url, prepared.body.clone());
         req.headers = headers;
@@ -200,7 +203,10 @@ impl LanguageModel for GoogleLanguageModel {
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
         let prepared = self.prepare_request(&options, true)?;
         let url = self.build_url("streamGenerateContent?alt=sse");
-        let headers = self.merged_headers(options.headers.as_ref());
+        let mut headers = self.merged_headers(options.headers.as_ref());
+        for (k, v) in &prepared.extra_headers {
+            headers.insert(k.clone(), v.clone());
+        }
 
         let mut req = JsonRequest::new(url, prepared.body.clone());
         req.headers = headers;
@@ -244,6 +250,7 @@ struct PreparedRequest {
     body: Value,
     warnings: Vec<Warning>,
     provider_keys: Vec<String>,
+    extra_headers: Headers,
 }
 
 impl GoogleLanguageModel {
@@ -464,10 +471,24 @@ impl GoogleLanguageModel {
             body.insert("serviceTier".into(), Value::String(st));
         }
 
+        let mut extra_headers = Headers::new();
+        if is_vertex {
+            if let Some(srt) = google_options.shared_request_type.as_deref() {
+                extra_headers.insert(
+                    "X-Vertex-AI-LLM-Shared-Request-Type".into(),
+                    Some(srt.to_owned()),
+                );
+            }
+            if let Some(rt) = google_options.request_type.as_deref() {
+                extra_headers.insert("X-Vertex-AI-LLM-Request-Type".into(), Some(rt.to_owned()));
+            }
+        }
+
         Ok(PreparedRequest {
             body: Value::Object(body),
             warnings,
             provider_keys: option_keys.iter().map(|s| (*s).to_owned()).collect(),
+            extra_headers,
         })
     }
 }

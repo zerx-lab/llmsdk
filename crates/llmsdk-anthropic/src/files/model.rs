@@ -65,7 +65,7 @@ impl FilesModel for AnthropicFiles {
         let mut headers = self.inner.headers.clone();
         headers.insert("anthropic-beta".into(), Some(FILES_BETA_HEADER.to_owned()));
 
-        let mut req = RawRequest::new(self.endpoint(), body, content_type);
+        let mut req = RawRequest::new(self.endpoint(), body, content_type.clone());
         req.headers = headers;
         apply_request_auth(
             self.inner.request_auth.as_ref(),
@@ -73,6 +73,7 @@ impl FilesModel for AnthropicFiles {
             "POST",
             &req.url,
             &req.body,
+            Some(content_type.as_str()),
         )
         .await?;
 

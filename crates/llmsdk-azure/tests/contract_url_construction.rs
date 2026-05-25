@@ -181,3 +181,30 @@ async fn extra_header_merges_with_api_key() {
         .await
         .expect("ok");
 }
+
+#[tokio::test]
+async fn bearer_token_sends_authorization_header_and_skips_api_key() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer aad-token-xyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(happy_chat_response()))
+        .mount(&server)
+        .await;
+
+    let provider = AzureOpenAi::builder()
+        .bearer_token("aad-token-xyz")
+        .base_url(server.uri())
+        .build()
+        .expect("provider builds with bearer only");
+
+    let model = provider.chat("dep-1");
+    model
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+}

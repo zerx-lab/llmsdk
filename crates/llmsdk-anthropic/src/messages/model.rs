@@ -106,6 +106,7 @@ impl LanguageModel for AnthropicMessagesModel {
             "POST",
             &http_request.url,
             &body_bytes,
+            Some("application/json"),
         )
         .await?;
 
@@ -139,6 +140,7 @@ impl LanguageModel for AnthropicMessagesModel {
             "POST",
             &http_request.url,
             &body_bytes,
+            Some("application/json"),
         )
         .await?;
 
@@ -357,7 +359,10 @@ fn build_request(
         tools,
         tool_choice,
         thinking,
-        context_management: provider_opts.context_management.clone(),
+        context_management: provider_opts
+            .context_management
+            .as_ref()
+            .map(normalize_context_management),
         container: provider_opts.container.clone(),
         output_config,
         speed: provider_opts.speed.clone(),
@@ -379,6 +384,50 @@ fn build_request(
     }
 
     (request, warnings, betas)
+}
+
+/// Normalize the `context_management` provider-option value into the
+/// wire shape Anthropic expects (`snake_case` edit fields).
+///
+/// Users may pass camelCase (matching ai-sdk option keys); this transform
+/// renames the known per-edit fields without altering structure for keys
+/// that pass-through unchanged. Mirrors the inline renames in upstream
+/// `anthropic-language-model.ts` `context_management.edits[]` builder.
+fn normalize_context_management(value: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (key, val) in map {
+        if key == "edits"
+            && let serde_json::Value::Array(items) = val
+        {
+            let edits = items.iter().map(normalize_edit).collect();
+            out.insert("edits".into(), serde_json::Value::Array(edits));
+            continue;
+        }
+        out.insert(key.clone(), val.clone());
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Rename known `camelCase` keys inside one edit entry to `snake_case`.
+fn normalize_edit(edit: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = edit else {
+        return edit.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (key, val) in map {
+        let renamed = match key.as_str() {
+            "clearAtLeast" => "clear_at_least",
+            "clearToolInputs" => "clear_tool_inputs",
+            "excludeTools" => "exclude_tools",
+            "pauseAfterCompaction" => "pause_after_compaction",
+            other => other,
+        };
+        out.insert(renamed.to_owned(), val.clone());
+    }
+    serde_json::Value::Object(out)
 }
 
 /// Merge collected beta tokens into the `anthropic-beta` header.

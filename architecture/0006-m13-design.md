@@ -249,8 +249,7 @@ ai-sdk 用 `aws4fetch`（小型 JS 库）；Rust 侧选择 `aws-sigv4` 官方实
     - `prefix` 续写模式（assistant 最后一条消息加 `prefix: true`）
     - `safe_prompt` provider option
     - `random_seed` 替代 `seed`
-    - `document_image_url` 文档图像
-    - `document_url` PDF 文档
+    - `document_url` PDF 文档（图像走 `image_url`）
   - Function calling 与 OpenAI 兼容
   - 解析 `reasoning_content`（magistral）→ `Content::Reasoning`
 - **Embedding** (`POST /v1/embeddings`)：

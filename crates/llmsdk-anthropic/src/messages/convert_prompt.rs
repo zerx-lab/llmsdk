@@ -15,14 +15,14 @@
 // Rust guideline compliant 2026-02-21
 
 use llmsdk_provider::language_model::{
-    AssistantPart, Message, Prompt, ToolCallPart, ToolMessagePart, ToolResultOutput,
-    ToolResultPart, UserPart,
+    AssistantPart, Message, Prompt, ToolCallPart, ToolMessagePart, ToolOutputPart,
+    ToolResultOutput, ToolResultPart, UserPart,
 };
 use llmsdk_provider::shared::{FileBytes, FileData, Warning};
 
 use super::wire::{
     CacheControl, CitationsConfig, WireAssistantPart, WireDocumentSource, WireImageSource,
-    WireMessage, WireUserPart,
+    WireMessage, WireNestedToolResultContent, WireToolResultContent, WireUserPart,
 };
 
 /// Result of [`convert_prompt`].
@@ -337,7 +337,7 @@ fn convert_tool(parts: &[ToolMessagePart], warnings: &mut Vec<Warning>) -> Vec<W
     for part in parts {
         match part {
             ToolMessagePart::ToolResult(r) => {
-                let (content, is_error) = tool_result_to_string(r, warnings);
+                let (content, is_error) = tool_result_to_content(r, warnings);
                 out.push(WireUserPart::ToolResult {
                     tool_use_id: r.tool_call_id.clone(),
                     content,
@@ -356,35 +356,177 @@ fn convert_tool(parts: &[ToolMessagePart], warnings: &mut Vec<Warning>) -> Vec<W
     out
 }
 
-fn tool_result_to_string(
+fn tool_result_to_content(
     part: &ToolResultPart,
     warnings: &mut Vec<Warning>,
-) -> (String, Option<bool>) {
+) -> (WireToolResultContent, Option<bool>) {
     match &part.output {
-        ToolResultOutput::Text { value, .. } => (value.clone(), None),
+        ToolResultOutput::Text { value, .. } => (WireToolResultContent::Text(value.clone()), None),
         ToolResultOutput::Json { value, .. } => (
-            serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned()),
+            WireToolResultContent::Text(
+                serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned()),
+            ),
             None,
         ),
-        ToolResultOutput::ErrorText { value, .. } => (value.clone(), Some(true)),
+        ToolResultOutput::ErrorText { value, .. } => {
+            (WireToolResultContent::Text(value.clone()), Some(true))
+        }
         ToolResultOutput::ErrorJson { value, .. } => (
-            serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned()),
+            WireToolResultContent::Text(
+                serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned()),
+            ),
             Some(true),
         ),
         ToolResultOutput::ExecutionDenied { reason, .. } => (
-            reason
-                .clone()
-                .unwrap_or_else(|| "execution denied".to_owned()),
+            WireToolResultContent::Text(
+                reason
+                    .clone()
+                    .unwrap_or_else(|| "execution denied".to_owned()),
+            ),
             Some(true),
         ),
-        ToolResultOutput::Content { .. } => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool-result.content".to_owned(),
-                details: Some("M6 flattens multi-part tool output to empty string".to_owned()),
-            });
-            (String::new(), None)
+        ToolResultOutput::Content { value } => {
+            let parts: Vec<WireNestedToolResultContent> = value
+                .iter()
+                .filter_map(|p| convert_nested_tool_output(p, warnings))
+                .collect();
+            (WireToolResultContent::Parts(parts), None)
         }
     }
+}
+
+/// Map one [`ToolOutputPart`] to its nested wire counterpart.
+///
+/// Returns `None` (with a warning) for unsupported parts, matching ai-sdk's
+/// `unsupported tool content part` warning path.
+fn convert_nested_tool_output(
+    part: &ToolOutputPart,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireNestedToolResultContent> {
+    match part {
+        ToolOutputPart::Text {
+            text,
+            provider_options,
+        } => Some(WireNestedToolResultContent::Text {
+            text: text.clone(),
+            cache_control: read_cache_control(provider_options.as_ref()),
+        }),
+        ToolOutputPart::File {
+            data,
+            media_type,
+            provider_options,
+            ..
+        } => convert_nested_file(data, media_type, provider_options.as_ref(), warnings),
+        ToolOutputPart::Custom { provider_options } => {
+            convert_nested_custom(provider_options.as_ref(), warnings)
+        }
+    }
+}
+
+/// `ToolOutputPart::File` → nested wire image / document.
+fn convert_nested_file(
+    data: &FileData,
+    media_type: &str,
+    provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireNestedToolResultContent> {
+    let cache_control = read_cache_control(provider_options);
+    let top = media_type.split('/').next().unwrap_or(media_type);
+    if top == "image" {
+        let source = match data {
+            FileData::Url { url } => WireImageSource::Url { url: url.clone() },
+            FileData::Data { data } => WireImageSource::Base64 {
+                media_type: media_type.to_owned(),
+                data: file_bytes_to_base64(data),
+            },
+            FileData::Reference { .. } | FileData::Text { .. } => {
+                warnings.push(Warning::UnsupportedSetting {
+                    setting: "tool-result.content.file.data".to_owned(),
+                    details: Some(
+                        "image files in tool_result accept only Url or inline bytes".to_owned(),
+                    ),
+                });
+                return None;
+            }
+        };
+        return Some(WireNestedToolResultContent::Image {
+            source,
+            cache_control,
+        });
+    }
+    let (title, context) = read_document_meta(provider_options);
+    let citations = read_citations_config(provider_options);
+    let source = match (media_type, data) {
+        ("application/pdf", FileData::Url { url }) => WireDocumentSource::Url {
+            url: url.clone(),
+            media_type: "application/pdf".to_owned(),
+        },
+        ("application/pdf", FileData::Data { data }) => WireDocumentSource::Base64 {
+            media_type: "application/pdf".to_owned(),
+            data: file_bytes_to_base64(data),
+        },
+        ("text/plain", FileData::Url { url }) => WireDocumentSource::Url {
+            url: url.clone(),
+            media_type: "text/plain".to_owned(),
+        },
+        ("text/plain", FileData::Text { text }) => WireDocumentSource::Text {
+            media_type: "text/plain".to_owned(),
+            data: text.clone(),
+        },
+        ("text/plain", FileData::Data { data }) => WireDocumentSource::Base64 {
+            media_type: "text/plain".to_owned(),
+            data: file_bytes_to_base64(data),
+        },
+        (mt, _) => {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "tool-result.content.file".to_owned(),
+                details: Some(format!(
+                    "media_type '{mt}' not supported as tool_result nested content"
+                )),
+            });
+            return None;
+        }
+    };
+    Some(WireNestedToolResultContent::Document {
+        source,
+        title,
+        context,
+        citations,
+    })
+}
+
+/// `ToolOutputPart::Custom` → nested wire `tool_reference`, or a warning.
+fn convert_nested_custom(
+    provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireNestedToolResultContent> {
+    // `tool-reference`: emit `{type:"tool_reference", tool_name}` for the
+    // tool_search server-tool path. Mirrors upstream
+    // convert-to-anthropic-prompt.ts `custom` branch.
+    let anthropic = provider_options.and_then(|o| o.get("anthropic"));
+    let kind = anthropic
+        .and_then(|a| a.get("type"))
+        .and_then(|v| v.as_str());
+    if kind == Some("tool-reference") {
+        if let Some(name) = anthropic
+            .and_then(|a| a.get("toolName"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(WireNestedToolResultContent::ToolReference {
+                tool_name: name.to_owned(),
+            });
+        }
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "tool-result.content.custom.tool-reference".to_owned(),
+            details: Some("tool-reference requires anthropic.toolName".to_owned()),
+        });
+        return None;
+    }
+    warnings.push(Warning::UnsupportedSetting {
+        setting: "tool-result.content.custom".to_owned(),
+        details: None,
+    });
+    None
 }
 
 fn file_bytes_to_base64(bytes: &FileBytes) -> String {
@@ -500,7 +642,7 @@ mod tests {
         if let WireMessage::User { content } = &out.messages[2]
             && let WireUserPart::ToolResult {
                 tool_use_id,
-                content: text,
+                content: WireToolResultContent::Text(text),
                 ..
             } = &content[0]
         {
@@ -571,6 +713,105 @@ mod tests {
         let out = convert_prompt(&prompt, true);
         assert_eq!(out.warnings.len(), 1);
         assert!(out.messages.is_empty());
+    }
+
+    #[test]
+    fn tool_result_content_with_tool_reference() {
+        use llmsdk_provider::language_model::ToolOutputPart;
+        use llmsdk_provider::shared::ProviderOptions;
+
+        let mut po = ProviderOptions::new();
+        po.insert(
+            "anthropic".into(),
+            serde_json::json!({
+                "type": "tool-reference",
+                "toolName": "get_weather"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+
+        let prompt = vec![Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "srvtoolu_1".into(),
+                tool_name: "tool_search_tool_regex".into(),
+                output: ToolResultOutput::Content {
+                    value: vec![ToolOutputPart::Custom {
+                        provider_options: Some(po),
+                    }],
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+
+        let out = convert_prompt(&prompt, true);
+        assert!(out.warnings.is_empty(), "tool-reference is supported");
+        let WireMessage::User { content } = &out.messages[0] else {
+            panic!("expected user message");
+        };
+        let WireUserPart::ToolResult {
+            content: WireToolResultContent::Parts(parts),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected ToolResult with Parts");
+        };
+        assert_eq!(parts.len(), 1);
+        let WireNestedToolResultContent::ToolReference { tool_name } = &parts[0] else {
+            panic!("expected ToolReference variant");
+        };
+        assert_eq!(tool_name, "get_weather");
+    }
+
+    #[test]
+    fn tool_result_content_with_text_and_image() {
+        use llmsdk_provider::language_model::ToolOutputPart;
+
+        let prompt = vec![Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "tu_x".into(),
+                tool_name: "fake".into(),
+                output: ToolResultOutput::Content {
+                    value: vec![
+                        ToolOutputPart::Text {
+                            text: "snippet".into(),
+                            provider_options: None,
+                        },
+                        ToolOutputPart::File {
+                            data: FileData::Url {
+                                url: "https://example.com/x.png".into(),
+                            },
+                            media_type: "image/png".into(),
+                            filename: None,
+                            provider_options: None,
+                        },
+                    ],
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+
+        let out = convert_prompt(&prompt, true);
+        assert!(out.warnings.is_empty());
+        let WireMessage::User { content } = &out.messages[0] else {
+            panic!("expected user");
+        };
+        let WireUserPart::ToolResult {
+            content: WireToolResultContent::Parts(parts),
+            ..
+        } = &content[0]
+        else {
+            panic!("expected Parts");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(parts[0], WireNestedToolResultContent::Text { .. }));
+        assert!(matches!(
+            parts[1],
+            WireNestedToolResultContent::Image { .. }
+        ));
     }
 
     #[test]

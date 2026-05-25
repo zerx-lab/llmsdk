@@ -10,6 +10,7 @@
 use llmsdk_google_vertex::GoogleVertex;
 use llmsdk_provider::LanguageModel;
 use llmsdk_provider::language_model::{CallOptions, Content, Message, TextPart, UserPart};
+use llmsdk_provider::shared::ProviderOptions;
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -66,4 +67,85 @@ async fn provider_string_routes_to_vertex_chat() {
     let p = provider(&server).await;
     let m = p.chat("gemini-2.5-flash");
     assert_eq!(m.provider(), "google.vertex.chat");
+}
+
+#[tokio::test]
+async fn shared_request_type_sent_as_vertex_paygo_header() {
+    let server = MockServer::start().await;
+    let mut opts = ProviderOptions::new();
+    opts.insert(
+        "googleVertex".into(),
+        json!({"sharedRequestType": "flex"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-flash:generateContent"))
+        .and(header("X-Vertex-AI-LLM-Shared-Request-Type", "flex"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "ok"}]},
+                "finishReason": "STOP"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let p = provider(&server).await;
+    let m = p.language_model("gemini-2.5-flash");
+    let _ = m
+        .do_generate(CallOptions {
+            prompt: vec![Message::User {
+                content: vec![UserPart::Text(TextPart {
+                    text: "hi".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
+            }],
+            provider_options: Some(opts),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+}
+
+#[tokio::test]
+async fn request_type_sent_as_vertex_paygo_header() {
+    let server = MockServer::start().await;
+    let mut opts = ProviderOptions::new();
+    opts.insert(
+        "googleVertex".into(),
+        json!({"sharedRequestType": "priority", "requestType": "shared"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-flash:generateContent"))
+        .and(header("X-Vertex-AI-LLM-Shared-Request-Type", "priority"))
+        .and(header("X-Vertex-AI-LLM-Request-Type", "shared"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [{"text": "ok"}]},
+                "finishReason": "STOP"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let p = provider(&server).await;
+    let m = p.language_model("gemini-2.5-flash");
+    let _ = m
+        .do_generate(CallOptions {
+            prompt: vec![Message::User {
+                content: vec![UserPart::Text(TextPart {
+                    text: "hi".into(),
+                    provider_options: None,
+                })],
+                provider_options: None,
+            }],
+            provider_options: Some(opts),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
 }

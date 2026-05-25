@@ -68,6 +68,7 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
                     "anthropic_version".to_owned(),
                     Value::String("bedrock-2023-05-31".to_owned()),
                 );
+                apply_bedrock_tool_upgrades(obj);
             })
             .build()?;
 
@@ -79,4 +80,188 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
 /// without depending on the chat module type.
 fn encode_path_segment(input: &str) -> String {
     crate::chat::encode_path_segment(input)
+}
+
+/// Upgrade legacy Anthropic tool versions to the variants Bedrock accepts,
+/// rename tools that picked up a new name (`text_editor_20250728` →
+/// `str_replace_based_edit_tool`), and collect the required
+/// `anthropic_beta` tokens into the request body.
+///
+/// Mirrors `BEDROCK_TOOL_VERSION_MAP` / `BEDROCK_TOOL_NAME_MAP` /
+/// `BEDROCK_TOOL_BETA_MAP` from
+/// `amazon-bedrock-anthropic-provider.ts`.
+fn apply_bedrock_tool_upgrades(obj: &mut serde_json::Map<String, Value>) {
+    let Some(Value::Array(tools)) = obj.get_mut("tools") else {
+        return;
+    };
+    let mut required_betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for tool in tools.iter_mut() {
+        let Some(tool_obj) = tool.as_object_mut() else {
+            continue;
+        };
+        let original_type = tool_obj
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let Some(original_type) = original_type else {
+            continue;
+        };
+
+        let upgraded_type = bedrock_tool_version_map(&original_type);
+        if let Some(new_type) = upgraded_type {
+            tool_obj.insert("type".to_owned(), Value::String(new_type.to_owned()));
+            if let Some(new_name) = bedrock_tool_name_map(new_type) {
+                tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+            }
+            if let Some(beta) = bedrock_tool_beta_map(new_type) {
+                required_betas.insert(beta.to_owned());
+            }
+            continue;
+        }
+
+        // Even when no version upgrade is needed, surface the required beta
+        // and apply any name override (parity with upstream's else branch).
+        if let Some(beta) = bedrock_tool_beta_map(&original_type) {
+            required_betas.insert(beta.to_owned());
+        }
+        if let Some(new_name) = bedrock_tool_name_map(&original_type) {
+            tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+        }
+    }
+
+    if required_betas.is_empty() {
+        return;
+    }
+
+    // Merge with any existing `anthropic_beta` array a caller may have set.
+    let mut merged: std::collections::BTreeSet<String> = required_betas;
+    if let Some(Value::Array(existing)) = obj.get("anthropic_beta") {
+        for v in existing {
+            if let Some(s) = v.as_str() {
+                merged.insert(s.to_owned());
+            }
+        }
+    }
+    let array: Vec<Value> = merged.into_iter().map(Value::String).collect();
+    obj.insert("anthropic_beta".to_owned(), Value::Array(array));
+}
+
+fn bedrock_tool_version_map(type_id: &str) -> Option<&'static str> {
+    match type_id {
+        "bash_20241022" => Some("bash_20250124"),
+        "text_editor_20241022" => Some("text_editor_20250728"),
+        "computer_20241022" => Some("computer_20250124"),
+        _ => None,
+    }
+}
+
+fn bedrock_tool_name_map(type_id: &str) -> Option<&'static str> {
+    match type_id {
+        "text_editor_20250728" => Some("str_replace_based_edit_tool"),
+        _ => None,
+    }
+}
+
+fn bedrock_tool_beta_map(type_id: &str) -> Option<&'static str> {
+    match type_id {
+        "bash_20250124"
+        | "text_editor_20250124"
+        | "text_editor_20250429"
+        | "text_editor_20250728"
+        | "computer_20250124" => Some("computer-use-2025-01-24"),
+        "bash_20241022" | "text_editor_20241022" | "computer_20241022" => {
+            Some("computer-use-2024-10-22")
+        }
+        "tool_search_tool_regex_20251119" | "tool_search_tool_bm25_20251119" => {
+            Some("tool-search-tool-2025-10-19")
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(input: Value) -> Value {
+        let Value::Object(mut obj) = input else {
+            panic!("test input must be object");
+        };
+        apply_bedrock_tool_upgrades(&mut obj);
+        Value::Object(obj)
+    }
+
+    #[test]
+    fn upgrades_bash_20241022_and_adds_beta() {
+        let out = run(json!({
+            "tools": [{"type": "bash_20241022", "name": "bash"}]
+        }));
+        assert_eq!(
+            out["tools"][0]["type"].as_str(),
+            Some("bash_20250124"),
+            "type upgraded"
+        );
+        assert!(
+            out["anthropic_beta"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "computer-use-2025-01-24")
+        );
+    }
+
+    #[test]
+    fn upgrades_text_editor_renames_tool() {
+        let out = run(json!({
+            "tools": [{"type": "text_editor_20241022", "name": "str_replace_editor"}]
+        }));
+        assert_eq!(
+            out["tools"][0]["type"].as_str(),
+            Some("text_editor_20250728")
+        );
+        assert_eq!(
+            out["tools"][0]["name"].as_str(),
+            Some("str_replace_based_edit_tool")
+        );
+    }
+
+    #[test]
+    fn preserves_already_current_versions_but_adds_beta() {
+        let out = run(json!({
+            "tools": [{"type": "computer_20250124", "name": "computer"}]
+        }));
+        assert_eq!(out["tools"][0]["type"].as_str(), Some("computer_20250124"));
+        assert!(
+            out["anthropic_beta"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "computer-use-2025-01-24")
+        );
+    }
+
+    #[test]
+    fn ignores_non_mapped_tools() {
+        let out = run(json!({
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}]
+        }));
+        assert!(out.get("anthropic_beta").is_none());
+        assert_eq!(
+            out["tools"][0]["type"].as_str(),
+            Some("web_search_20250305")
+        );
+    }
+
+    #[test]
+    fn merges_with_existing_anthropic_beta() {
+        let out = run(json!({
+            "anthropic_beta": ["preexisting-flag"],
+            "tools": [{"type": "bash_20241022", "name": "bash"}]
+        }));
+        let arr = out["anthropic_beta"].as_array().unwrap();
+        assert!(arr.iter().any(|v| v == "preexisting-flag"));
+        assert!(arr.iter().any(|v| v == "computer-use-2025-01-24"));
+    }
 }

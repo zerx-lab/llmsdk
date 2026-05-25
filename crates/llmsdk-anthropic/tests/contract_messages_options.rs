@@ -467,3 +467,118 @@ async fn tool_streaming_default_emits_eager_input_streaming_on_function_tools() 
         .await
         .expect("ok");
 }
+
+#[tokio::test]
+async fn context_management_camel_case_fields_rename_to_snake_case_on_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .and(body_partial_json(json!({
+            "context_management": {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "clear_at_least": { "type": "input_tokens", "value": 10000 },
+                        "clear_tool_inputs": true,
+                        "exclude_tools": ["important_tool"]
+                    },
+                    {
+                        "type": "compact_20260112",
+                        "pause_after_compaction": true,
+                        "instructions": "summarize"
+                    }
+                ]
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_response()))
+        .mount(&server)
+        .await;
+
+    provider(&server)
+        .messages("claude-opus-4-7")
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hello")],
+            provider_options: Some(po_with_anthropic(&json!({
+                "contextManagement": {
+                    "edits": [
+                        {
+                            "type": "clear_tool_uses_20250919",
+                            "clearAtLeast": { "type": "input_tokens", "value": 10000 },
+                            "clearToolInputs": true,
+                            "excludeTools": ["important_tool"]
+                        },
+                        {
+                            "type": "compact_20260112",
+                            "pauseAfterCompaction": true,
+                            "instructions": "summarize"
+                        }
+                    ]
+                }
+            }))),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+}
+
+#[tokio::test]
+async fn tool_result_with_tool_reference_emits_nested_array_content() {
+    use llmsdk_provider::language_model::{
+        ToolMessagePart, ToolOutputPart, ToolResultOutput, ToolResultPart,
+    };
+
+    let server = MockServer::start().await;
+    let mut po_tool_ref = ProviderOptions::new();
+    po_tool_ref.insert(
+        "anthropic".into(),
+        json!({"type": "tool-reference", "toolName": "get_weather"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .and(body_partial_json(json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "hi" },
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "srvtoolu_1",
+                            "content": [{"type": "tool_reference", "tool_name": "get_weather"}]
+                        }
+                    ]
+                }
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_response()))
+        .mount(&server)
+        .await;
+
+    provider(&server)
+        .messages("claude-opus-4-7")
+        .do_generate(CallOptions {
+            prompt: vec![
+                user_text("hi"),
+                Message::Tool {
+                    content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                        tool_call_id: "srvtoolu_1".into(),
+                        tool_name: "tool_search_tool_regex".into(),
+                        output: ToolResultOutput::Content {
+                            value: vec![ToolOutputPart::Custom {
+                                provider_options: Some(po_tool_ref),
+                            }],
+                        },
+                        provider_options: None,
+                    })],
+                    provider_options: None,
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+}

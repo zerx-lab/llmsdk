@@ -136,9 +136,16 @@ impl AzureOpenAi {
 /// [`base_url`](Self::base_url) (or their env equivalents) must resolve;
 /// otherwise [`build`](Self::build) returns [`ProviderError::load_setting`].
 /// `base_url` wins over `resource_name` when both are provided.
+///
+/// Authentication: pass either an [`api_key`](Self::api_key) (sent as the
+/// `api-key` header) or a [`bearer_token`](Self::bearer_token) (sent as
+/// `Authorization: Bearer <token>`, used for Microsoft Entra ID / AAD
+/// authentication). `bearer_token` wins when both are provided. Falls back
+/// to `AZURE_API_KEY` env var when neither is set.
 #[derive(Debug, Default, Clone)]
 pub struct AzureOpenAiBuilder {
     api_key: Option<String>,
+    bearer_token: Option<String>,
     resource_name: Option<String>,
     base_url: Option<String>,
     api_version: Option<String>,
@@ -152,6 +159,20 @@ impl AzureOpenAiBuilder {
     #[must_use]
     pub fn api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
+        self
+    }
+
+    /// Authenticate via Microsoft Entra ID / Azure Active Directory.
+    ///
+    /// Sends `Authorization: Bearer <token>` on every request. Wins over
+    /// [`api_key`](Self::api_key) / `AZURE_API_KEY` when both resolve.
+    ///
+    /// The token is captured at builder time, so callers wanting per-call
+    /// refresh should re-build the provider periodically or inject a custom
+    /// `Authorization` header via [`header`](Self::header).
+    #[must_use]
+    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
         self
     }
 
@@ -214,12 +235,21 @@ impl AzureOpenAiBuilder {
     /// - [`ProviderError::invalid_argument`] if no `base_url`/`resource_name`
     ///   and `AZURE_RESOURCE_NAME` is unset.
     pub fn build(self) -> Result<AzureOpenAi, ProviderError> {
-        let api_key = load_api_key(&LoadApiKey {
-            api_key: self.api_key.as_deref(),
-            env_var: API_KEY_ENV_VAR,
-            description: "Azure OpenAI",
-            parameter_name: Some("api_key"),
-        })?;
+        // Authentication resolves to either a bearer token (Microsoft Entra
+        // ID / AAD) or an `api-key`. Bearer wins when both resolve so
+        // callers using AAD don't accidentally fall back to a stale env
+        // `AZURE_API_KEY`.
+        let auth_header = if let Some(token) = self.bearer_token.as_deref() {
+            ("authorization".to_owned(), format!("Bearer {token}"))
+        } else {
+            let api_key = load_api_key(&LoadApiKey {
+                api_key: self.api_key.as_deref(),
+                env_var: API_KEY_ENV_VAR,
+                description: "Azure OpenAI",
+                parameter_name: Some("api_key"),
+            })?;
+            ("api-key".to_owned(), api_key)
+        };
 
         // Resolve URL prefix: explicit base_url > resource_name > env.
         let base_prefix = if let Some(base) = self.base_url {
@@ -248,7 +278,7 @@ impl AzureOpenAiBuilder {
             build_url_strategy(base_prefix, api_version, self.use_deployment_based_urls);
 
         let mut headers = self.extra_headers;
-        headers.insert("api-key".into(), Some(api_key));
+        headers.insert(auth_header.0, Some(auth_header.1));
 
         let http = match self.http {
             Some(client) => client,
@@ -376,6 +406,29 @@ mod tests {
             strat.build("/embeddings", "text-embedding-3-small"),
             "https://x.openai.azure.com/openai/v1/embeddings?api-version=v1"
         );
+    }
+
+    #[test]
+    fn bearer_token_takes_precedence_over_api_key() {
+        use llmsdk_provider::LanguageModel;
+        let p = AzureOpenAi::builder()
+            .resource_name("myresource")
+            .api_key("k")
+            .bearer_token("aad-token")
+            .build()
+            .expect("builds");
+        assert_eq!(p.chat("gpt-4o-mini").provider(), PROVIDER_ID_CHAT);
+    }
+
+    #[test]
+    fn bearer_token_alone_builds_without_api_key() {
+        use llmsdk_provider::LanguageModel;
+        let p = AzureOpenAi::builder()
+            .resource_name("myresource")
+            .bearer_token("aad-token")
+            .build()
+            .expect("builds with bearer only");
+        assert_eq!(p.chat("gpt-4o-mini").provider(), PROVIDER_ID_CHAT);
     }
 
     #[test]

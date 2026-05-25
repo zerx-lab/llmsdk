@@ -29,6 +29,13 @@ pub struct SigningContext<'a> {
     pub url: &'a str,
     /// Raw request body bytes. Empty slice for `GET` / bodyless requests.
     pub body: &'a [u8],
+    /// On-wire `content-type` already chosen by the request builder, when
+    /// known (`application/json` for Messages, `multipart/form-data; ...`
+    /// for Files/Skills). `None` for `GET` / bodyless requests.
+    ///
+    /// Hooks that need this for canonicalization (e.g. AWS `SigV4`) should
+    /// prefer this value over body-byte sniffing — it's authoritative.
+    pub content_type: Option<&'a str>,
 }
 
 /// Headers produced by [`RequestAuth::sign`], merged into the final request.
@@ -47,11 +54,19 @@ pub(crate) async fn apply_request_auth(
     method: &str,
     url: &str,
     body: &[u8],
+    content_type: Option<&str>,
 ) -> Result<(), ProviderError> {
     let Some(hook) = auth else {
         return Ok(());
     };
-    let signed = hook.sign(&SigningContext { method, url, body }).await?;
+    let signed = hook
+        .sign(&SigningContext {
+            method,
+            url,
+            body,
+            content_type,
+        })
+        .await?;
     for (name, value) in signed {
         headers.insert(name, Some(value));
     }

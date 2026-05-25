@@ -81,6 +81,62 @@ async fn reasoning_thinking_budget_set_for_25() {
 }
 
 #[tokio::test]
+async fn shared_request_type_ignored_on_google_provider_with_warning() {
+    let server = MockServer::start().await;
+    let mut opts = ProviderOptions::new();
+    opts.insert(
+        "google".into(),
+        json!({"sharedRequestType": "flex", "requestType": "shared"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-flash:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]
+        })))
+        .mount(&server)
+        .await;
+    let model = provider(&server).chat("gemini-2.5-flash");
+    let result = model
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(opts),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+    // The Google (non-Vertex) provider must ignore these Vertex-only options
+    // with a warning rather than injecting the paygo headers.
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| format!("{w:?}").contains("sharedRequestType")),
+        "expected a warning about sharedRequestType/requestType being ignored on the Google provider, got {:?}",
+        result.warnings,
+    );
+    // The captured request on the mock server should *not* carry the paygo
+    // headers — verified by inspecting recorded requests.
+    let requests = server
+        .received_requests()
+        .await
+        .expect("captured requests available");
+    let last = requests.last().expect("at least one request received");
+    assert!(
+        last.headers
+            .get("x-vertex-ai-llm-shared-request-type")
+            .is_none(),
+        "Google provider must not inject Vertex paygo headers"
+    );
+    assert!(
+        last.headers.get("x-vertex-ai-llm-request-type").is_none(),
+        "Google provider must not inject Vertex paygo headers"
+    );
+}
+
+#[tokio::test]
 async fn cached_content_passthrough() {
     let server = MockServer::start().await;
     let mut opts = ProviderOptions::new();

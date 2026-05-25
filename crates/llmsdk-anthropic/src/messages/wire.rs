@@ -114,11 +114,56 @@ pub(crate) enum WireUserPart {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: WireToolResultContent,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+    },
+}
+
+/// `tool_result.content` payload.
+///
+/// Anthropic accepts either a string or an array of nested content parts
+/// (text / image / document / `tool_reference`). Mirrors the union type in
+/// `anthropic-api.ts` `AnthropicToolResultContent.content`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum WireToolResultContent {
+    Text(String),
+    Parts(Vec<WireNestedToolResultContent>),
+}
+
+/// One nested part inside [`WireToolResultContent::Parts`].
+///
+/// Mirrors `AnthropicNestedTextContent` / `AnthropicNestedImageContent` /
+/// `AnthropicNestedDocumentContent` / `AnthropicToolReferenceContent` in
+/// upstream. Nested document parts intentionally omit `cache_control`
+/// (upstream `Omit<AnthropicDocumentContent, 'cache_control'>`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WireNestedToolResultContent {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    Image {
+        source: WireImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    Document {
+        source: WireDocumentSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citations: Option<CitationsConfig>,
+    },
+    ToolReference {
+        tool_name: String,
     },
 }
 

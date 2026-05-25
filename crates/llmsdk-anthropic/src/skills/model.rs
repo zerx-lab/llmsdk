@@ -78,7 +78,7 @@ impl SkillsModel for AnthropicSkills {
         let content_type = format!("multipart/form-data; boundary={boundary}");
 
         let headers = self.headers_with_beta();
-        let mut req = RawRequest::new(self.endpoint(), body, content_type);
+        let mut req = RawRequest::new(self.endpoint(), body, content_type.clone());
         req.headers = headers.clone();
         apply_request_auth(
             self.inner.request_auth.as_ref(),
@@ -86,6 +86,7 @@ impl SkillsModel for AnthropicSkills {
             "POST",
             &req.url,
             &req.body,
+            Some(content_type.as_str()),
         )
         .await?;
 
@@ -106,6 +107,7 @@ impl SkillsModel for AnthropicSkills {
                 "GET",
                 &url,
                 &[],
+                None,
             )
             .await?;
             match get_json::<WireSkillVersionResponse, _>(&self.inner.http, &url, &get_headers)

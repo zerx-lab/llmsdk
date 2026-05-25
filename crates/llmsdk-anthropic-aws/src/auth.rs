@@ -105,17 +105,18 @@ impl RequestAuth for SigV4Auth {
         }
 
         let credentials = self.credentials_provider.get_credentials().await?;
-        // We don't know the on-wire content-type from inside the hook, so
-        // detect it from the body bytes: a leading `{` or `[` indicates
-        // JSON; otherwise the body is a `multipart/form-data` payload.
-        // The value must match what `reqwest` actually sends (provider-utils
-        // post_json sets `application/json`; post_raw forwards the caller's
-        // string). llmsdk-anthropic only emits these two shapes today.
-        let content_type = sniff_content_type(context.body);
+        // Prefer the authoritative `content-type` the request builder already
+        // chose (`application/json` for Messages, `multipart/form-data; ...`
+        // for Files/Skills). Fall back to body-byte sniffing only when the
+        // framework can't supply one (legacy or third-party RequestAuth
+        // construction sites).
+        let content_type = context
+            .content_type
+            .map_or_else(|| sniff_content_type(context.body).to_owned(), str::to_owned);
         sign_post(
             context.url,
             context.body,
-            &[("content-type", content_type)],
+            &[("content-type", content_type.as_str())],
             &credentials,
             &self.region,
             SIGV4_SERVICE,
@@ -129,28 +130,60 @@ const _: fn() = || {
     let _ = SystemTime::now;
 };
 
-/// Best-effort MIME sniffer: JSON if it parses as JSON, otherwise multipart.
+/// Best-effort MIME sniffer used as a fallback when [`SigningContext::content_type`]
+/// is `None`.
 ///
-/// llmsdk-anthropic emits exactly two content types on POST:
-/// `application/json` (Messages) and `multipart/form-data` (Files /
-/// Skills). For `SigV4` we only need the value that participates in the
-/// canonical request — the receiving Claude Platform on AWS gateway is
-/// flexible about which `content-type` participates as long as the same
-/// value is on the wire, and reqwest sets the wire value from the
-/// `RawRequest::content_type` / JSON serializer, both of which we forward
-/// via `SignedHeaders` so the gateway accepts the signature.
+/// Skips ASCII whitespace before looking at the first significant byte so a
+/// pretty-printed JSON document with a leading newline still classifies as
+/// JSON. Multipart bodies always start with `--` (the boundary marker per
+/// RFC 7578), so we explicitly check that prefix before falling back to
+/// `application/octet-stream` for opaque payloads.
+///
+/// llmsdk-anthropic emits exactly two POST content types today
+/// (`application/json` and `multipart/form-data`), but the fallback is kept
+/// permissive so third-party `RequestAuth` impls that don't yet pass an
+/// explicit `content_type` keep working.
 fn sniff_content_type(body: &[u8]) -> &'static str {
-    if body.first() == Some(&b'{') || body.first() == Some(&b'[') {
-        "application/json"
-    } else {
-        "multipart/form-data"
+    let trimmed = body
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map_or(body, |idx| &body[idx..]);
+    if trimmed.starts_with(b"--") {
+        return "multipart/form-data";
     }
+    if matches!(trimmed.first(), Some(&(b'{' | b'[' | b'"'))) {
+        return "application/json";
+    }
+    "application/octet-stream"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use llmsdk_provider_utils::aws_sigv4::{AwsCredentials, StaticCredentialsProvider};
+
+    #[test]
+    fn sniff_skips_leading_whitespace_for_json() {
+        assert_eq!(sniff_content_type(b"\n  {\"k\":1}"), "application/json");
+        assert_eq!(sniff_content_type(b"\t[1,2]"), "application/json");
+        assert_eq!(sniff_content_type(b"\"hi\""), "application/json");
+    }
+
+    #[test]
+    fn sniff_detects_multipart_boundary_prefix() {
+        assert_eq!(
+            sniff_content_type(b"--boundary\r\nContent-Disposition"),
+            "multipart/form-data"
+        );
+    }
+
+    #[test]
+    fn sniff_unknown_binary_falls_back_to_octet_stream() {
+        assert_eq!(
+            sniff_content_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            "application/octet-stream"
+        );
+    }
 
     #[tokio::test]
     async fn api_key_auth_emits_xapikey() {
@@ -160,6 +193,7 @@ mod tests {
                 method: "POST",
                 url: "https://example.com/messages",
                 body: b"{}",
+                content_type: Some("application/json"),
             })
             .await
             .unwrap();
@@ -181,6 +215,7 @@ mod tests {
                 method: "GET",
                 url: "https://example.com/skills/abc/versions/1",
                 body: &[],
+                content_type: None,
             })
             .await
             .unwrap();
@@ -191,6 +226,7 @@ mod tests {
                 method: "POST",
                 url: "https://example.com/messages",
                 body: &[],
+                content_type: Some("application/json"),
             })
             .await
             .unwrap();
@@ -211,6 +247,7 @@ mod tests {
                 method: "POST",
                 url: "https://aws-external-anthropic.us-east-1.api.aws/v1/messages",
                 body: br#"{"hello":"world"}"#,
+                content_type: Some("application/json"),
             })
             .await
             .unwrap();
@@ -241,6 +278,7 @@ mod tests {
                 method: "POST",
                 url: "https://aws-external-anthropic.us-west-2.api.aws/v1/messages",
                 body: br#"{"ok":true}"#,
+                content_type: Some("application/json"),
             })
             .await
             .unwrap();
