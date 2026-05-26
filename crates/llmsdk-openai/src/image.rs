@@ -216,8 +216,22 @@ impl OpenAiImageModel {
         if let Some(size) = &options.size {
             mp.text("size", size);
         }
+        // Mirror upstream `openai-image-model.ts:111-141` `/images/edits`
+        // form data: quality / background / output_format / output_compression /
+        // input_fidelity / user. Previously only quality / input_fidelity /
+        // user were forwarded, silently dropping the other three knobs from
+        // user-supplied `provider_options.openai.*`.
         if let Some(q) = &openai.quality {
             mp.text("quality", q);
+        }
+        if let Some(bg) = &openai.background {
+            mp.text("background", bg);
+        }
+        if let Some(of) = &openai.output_format {
+            mp.text("output_format", of);
+        }
+        if let Some(oc) = openai.output_compression {
+            mp.text("output_compression", &oc.to_string());
         }
         if let Some(fi) = &openai.input_fidelity {
             mp.text("input_fidelity", fi);
@@ -408,15 +422,17 @@ fn into_provider_usage(u: &ImageUsage) -> ProviderImageUsage {
 ///
 /// Source: <https://platform.openai.com/docs/guides/images>.
 fn max_images_for(model_id: &str) -> u32 {
-    if model_id == "dall-e-3" || model_id.starts_with("chatgpt-image-") {
-        1
-    } else if model_id.starts_with("gpt-image-")
-        || model_id == "dall-e-2"
-        || model_id.starts_with("chatgpt-image")
-    {
-        10
-    } else {
-        1
+    // Mirror upstream `modelMaxImagesPerCall` record in
+    // `openai-image-model-options.ts:19-27`. `dall-e-3` is the only model
+    // capped at 1; everything else in the official roster supports 10
+    // (`dall-e-2` / `gpt-image-{1,1-mini,1.5,2}` / `chatgpt-image-latest`).
+    // The previous prefix check `chatgpt-image-` over-matched
+    // `chatgpt-image-latest` and silently capped it at 1.
+    match model_id {
+        "dall-e-3" => 1,
+        "dall-e-2" | "chatgpt-image-latest" => 10,
+        id if id.starts_with("gpt-image-") => 10,
+        _ => 1,
     }
 }
 
@@ -517,10 +533,36 @@ fn parse_provider_options(
 /// upstream surfaced (`revised_prompt`, `created`, `size`, etc.) — matches
 /// ai-sdk's shape.
 fn build_provider_metadata(resp: &ImageResponse) -> ProviderMetadata {
+    let total = resp.data.len();
+    // Mirror upstream `distributeTokenDetails` in `openai-image-model.ts:269-296`:
+    // when `usage.input_tokens_details` is present, split image / text token
+    // counts evenly across the response's images; the last image absorbs the
+    // remainder so the sum still matches the reported total.
+    let token_details = resp
+        .usage
+        .as_ref()
+        .and_then(|u| u.input_tokens_details.as_ref());
+    let distribute = |tokens: Option<u64>, index: usize, total: usize| -> Option<u64> {
+        let total_u = u64::try_from(total).ok()?;
+        let tokens = tokens?;
+        if total == 0 {
+            return None;
+        }
+        let base = tokens / total_u;
+        if index + 1 == total {
+            // Last image absorbs the remainder: `base * (total-1)` consumed,
+            // remaining = `tokens - base*(total-1)`.
+            let consumed = base.saturating_mul(total_u.saturating_sub(1));
+            Some(tokens.saturating_sub(consumed))
+        } else {
+            Some(base)
+        }
+    };
     let images: Vec<JsonValue> = resp
         .data
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(idx, item)| {
             let mut obj = Map::new();
             if let Some(rp) = &item.revised_prompt {
                 obj.insert("revisedPrompt".to_owned(), JsonValue::String(rp.clone()));
@@ -539,6 +581,16 @@ fn build_provider_metadata(resp: &ImageResponse) -> ProviderMetadata {
             }
             if let Some(of) = &resp.output_format {
                 obj.insert("outputFormat".to_owned(), JsonValue::String(of.clone()));
+            }
+            if let Some(details) = token_details
+                && let Some(image_tokens) = distribute(details.image_tokens, idx, total)
+            {
+                obj.insert("imageTokens".to_owned(), JsonValue::from(image_tokens));
+            }
+            if let Some(details) = token_details
+                && let Some(text_tokens) = distribute(details.text_tokens, idx, total)
+            {
+                obj.insert("textTokens".to_owned(), JsonValue::from(text_tokens));
             }
             JsonValue::Object(obj)
         })
@@ -747,11 +799,15 @@ mod tests {
 
     #[test]
     fn max_images_for_known_models() {
+        // Mirrors upstream `modelMaxImagesPerCall` table in
+        // `openai-image-model-options.ts:19-27`. `dall-e-3` is the only
+        // model capped at 1; `chatgpt-image-latest` supports 10 — prior
+        // prefix match `chatgpt-image-` over-matched it as 1.
         assert_eq!(max_images_for("dall-e-3"), 1);
         assert_eq!(max_images_for("dall-e-2"), 10);
         assert_eq!(max_images_for("gpt-image-1"), 10);
         assert_eq!(max_images_for("gpt-image-1-mini"), 10);
-        assert_eq!(max_images_for("chatgpt-image-latest"), 1);
+        assert_eq!(max_images_for("chatgpt-image-latest"), 10);
         // Unknown id defaults to the safe value.
         assert_eq!(max_images_for("custom-image-alias"), 1);
     }
