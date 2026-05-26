@@ -252,8 +252,8 @@ impl OpenAiImageModel {
         let mut warnings = Vec::new();
         collect_unsupported_warnings(&options, &mut warnings);
         if !options.prompt.trim().is_empty() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "prompt".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "prompt".to_owned(),
                 details: Some("OpenAI image variations endpoint ignores prompt".to_owned()),
             });
         }
@@ -358,14 +358,14 @@ impl OpenAiImageModel {
 /// Surface `aspectRatio` / `seed` warnings for `do_edit` / `do_variation` too.
 fn collect_unsupported_warnings(options: &ImageOptions, warnings: &mut Vec<Warning>) {
     if options.aspect_ratio.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "aspectRatio".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".to_owned(),
             details: Some("OpenAI image endpoints do not support aspect ratio.".to_owned()),
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_owned(),
             details: Some("OpenAI image endpoints do not support seed.".to_owned()),
         });
     }
@@ -431,8 +431,8 @@ fn build_request(model_id: &str, options: &ImageOptions) -> (ImageRequest, Vec<W
     let mut warnings = Vec::new();
 
     if options.aspect_ratio.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "aspectRatio".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".to_owned(),
             details: Some(
                 "OpenAI image models do not support aspect ratio. Use `size` instead.".to_owned(),
             ),
@@ -440,8 +440,8 @@ fn build_request(model_id: &str, options: &ImageOptions) -> (ImageRequest, Vec<W
     }
 
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_owned(),
             details: Some("OpenAI image models do not support a seed.".to_owned()),
         });
     }
@@ -787,7 +787,7 @@ mod tests {
         let (_, warnings) = build_request("dall-e-3", &opts);
         assert!(matches!(
             &warnings[0],
-            Warning::UnsupportedSetting { setting, .. } if setting == "aspectRatio"
+            Warning::Unsupported { feature, .. } if feature == "aspectRatio"
         ));
     }
 
@@ -801,7 +801,7 @@ mod tests {
         let (_, warnings) = build_request("dall-e-3", &opts);
         assert!(warnings.iter().any(|w| matches!(
             w,
-            Warning::UnsupportedSetting { setting, .. } if setting == "seed"
+            Warning::Unsupported { feature, .. } if feature == "seed"
         )));
     }
 

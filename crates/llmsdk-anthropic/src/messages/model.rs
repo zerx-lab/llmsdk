@@ -220,20 +220,20 @@ fn build_request(
     } = convert_prompt(&options.prompt, send_reasoning);
 
     if options.frequency_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "frequencyPenalty".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "frequencyPenalty".to_owned(),
             details: Some("Anthropic does not support frequencyPenalty".to_owned()),
         });
     }
     if options.presence_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "presencePenalty".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "presencePenalty".to_owned(),
             details: Some("Anthropic does not support presencePenalty".to_owned()),
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_owned(),
             details: Some("Anthropic does not support seed".to_owned()),
         });
     }
@@ -360,8 +360,8 @@ fn build_request(
         Some(ThinkingConfig::Adaptive { .. })
     ) && !caps.supports_adaptive_thinking
     {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "thinking.adaptive".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "thinking.adaptive".to_owned(),
             details: Some(format!(
                 "Adaptive thinking is not supported by {model_id}; the server may ignore it"
             )),
@@ -383,22 +383,22 @@ fn build_request(
     if thinking_enabled {
         if temperature.is_some() {
             temperature = None;
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "temperature".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".to_owned(),
                 details: Some("temperature is not supported when thinking is enabled".to_owned()),
             });
         }
         if top_k.is_some() {
             top_k = None;
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topK".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "topK".to_owned(),
                 details: Some("topK is not supported when thinking is enabled".to_owned()),
             });
         }
         if top_p.is_some() {
             top_p = None;
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topP".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "topP".to_owned(),
                 details: Some("topP is not supported when thinking is enabled".to_owned()),
             });
         }
@@ -905,8 +905,8 @@ fn convert_tools(
                     f.strict
                 } else {
                     if let Some(s) = f.strict {
-                        warnings.push(Warning::UnsupportedSetting {
-                            setting: "strict".to_owned(),
+                        warnings.push(Warning::Unsupported {
+                            feature: "strict".to_owned(),
                             details: Some(format!(
                                 "Tool '{}' has strict: {s}, but strict mode is not supported by this model; ignored",
                                 f.name
@@ -949,10 +949,10 @@ fn convert_tools(
                         args: p.args.clone().unwrap_or_default(),
                     }))
                 } else {
-                    warnings.push(Warning::UnsupportedTool {
-                        tool: p.name.clone(),
+                    warnings.push(Warning::Unsupported {
+                        feature: p.name.clone(),
                         details: Some(format!(
-                            "provider-defined tool '{}' not recognized by llmsdk-anthropic",
+                            "provider-defined feature '{}' not recognized by llmsdk-anthropic",
                             p.id
                         )),
                     });
@@ -977,10 +977,10 @@ fn convert_tools(
             Some(match c {
                 ToolChoice::Auto | ToolChoice::None => {
                     if matches!(c, ToolChoice::None) {
-                        warnings.push(Warning::UnsupportedSetting {
-                            setting: "toolChoice".to_owned(),
+                        warnings.push(Warning::Unsupported {
+                            feature: "toolChoice".to_owned(),
                             details: Some(
-                                "Anthropic has no `none` tool choice; downgraded to `auto`"
+                                "Anthropic has no `none` feature choice; downgraded to `auto`"
                                     .to_owned(),
                             ),
                         });

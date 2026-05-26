@@ -110,7 +110,7 @@ async fn reasoning_model_strips_temperature_and_top_p_and_warns() {
         .warnings
         .iter()
         .filter_map(|w| match w {
-            Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+            Warning::Unsupported { feature, .. } => Some(feature.as_str()),
             _ => None,
         })
         .collect();
@@ -223,7 +223,7 @@ async fn gpt_5_1_none_effort_keeps_temperature() {
     assert!(
         !result.warnings.iter().any(|w| matches!(
             w,
-            Warning::UnsupportedSetting { setting, .. } if setting == "temperature"
+            Warning::Unsupported { feature, .. } if feature == "temperature"
         )),
         "temperature should not be stripped for gpt-5.1 with effort=none"
     );
@@ -256,7 +256,7 @@ async fn search_preview_strips_temperature() {
 
     assert!(result.warnings.iter().any(|w| matches!(
         w,
-        Warning::UnsupportedSetting { setting, .. } if setting == "temperature"
+        Warning::Unsupported { feature, .. } if feature == "temperature"
     )));
 }
 
@@ -525,7 +525,7 @@ async fn prompt_cache_retention_invalid_emits_warning() {
         .expect("ok");
     assert!(res.warnings.iter().any(|w| matches!(
         w,
-        Warning::UnsupportedSetting { setting, .. } if setting == "openai.promptCacheRetention"
+        Warning::Unsupported { feature, .. } if feature == "openai.promptCacheRetention"
     )));
 }
 
@@ -634,7 +634,7 @@ async fn flex_processing_dropped_for_unsupported_model() {
         .expect("ok");
     assert!(res.warnings.iter().any(|w| matches!(
         w,
-        Warning::UnsupportedSetting { setting, details } if setting == "serviceTier"
+        Warning::Unsupported { feature, details } if feature == "serviceTier"
             && details.as_deref().unwrap_or("").contains("flex processing")
     )));
 }
@@ -661,7 +661,7 @@ async fn priority_processing_rejected_for_gpt5_nano() {
         .expect("ok");
     assert!(res.warnings.iter().any(|w| matches!(
         w,
-        Warning::UnsupportedSetting { setting, details } if setting == "serviceTier"
+        Warning::Unsupported { feature, details } if feature == "serviceTier"
             && details.as_deref().unwrap_or("").contains("priority")
     )));
 }

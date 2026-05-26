@@ -68,8 +68,13 @@ impl RerankingModel for CohereRerankingModel {
         };
 
         if was_object {
-            warnings.push(Warning::Other {
-                message: "object documents converted to JSON strings".to_owned(),
+            // Mirror upstream cohere-reranking-model.ts:59-65 — object
+            // documents trigger a `{ type: 'compatibility' }` warning so
+            // downstream tooling can route on the warning type, not on
+            // free-form message text.
+            warnings.push(Warning::Compatibility {
+                feature: "object documents".to_owned(),
+                details: Some("Object documents are converted to strings.".to_owned()),
             });
         }
 

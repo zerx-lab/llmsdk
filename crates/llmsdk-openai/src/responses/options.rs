@@ -190,8 +190,8 @@ pub fn validate(
     use llmsdk_provider::shared::Warning;
     let mut warnings = Vec::new();
 
-    let mk = |setting: &str, details: &str| Warning::UnsupportedSetting {
-        setting: setting.into(),
+    let mk = |feature: &str, details: &str| Warning::Unsupported {
+        feature: feature.into(),
         details: Some(details.into()),
     };
 
@@ -367,7 +367,7 @@ mod tests {
         let warnings = validate(&mut opts, &caps);
         assert!(warnings.iter().any(|w| matches!(
             w,
-            llmsdk_provider::shared::Warning::UnsupportedSetting { setting, .. } if setting == "conversation"
+            llmsdk_provider::shared::Warning::Unsupported { feature, .. } if feature == "conversation"
         )));
     }
 

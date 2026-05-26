@@ -125,8 +125,8 @@ fn route_provider_tool(tool: &ProviderTool, prepared: &mut PreparedTools) -> Opt
         .unwrap_or(json!({}));
 
     let push_invalid = |prepared: &mut PreparedTools, err: serde_json::Error| {
-        prepared.warnings.push(Warning::UnsupportedTool {
-            tool: tool.id.clone(),
+        prepared.warnings.push(Warning::Unsupported {
+            feature: tool.id.clone(),
             details: Some(format!("invalid args: {err}")),
         });
     };
@@ -291,8 +291,8 @@ fn route_provider_tool(tool: &ProviderTool, prepared: &mut PreparedTools) -> Opt
                 }
             };
             if args.server_url.is_none() && args.connector_id.is_none() {
-                prepared.warnings.push(Warning::UnsupportedTool {
-                    tool: tool.id.clone(),
+                prepared.warnings.push(Warning::Unsupported {
+                    feature: tool.id.clone(),
                     details: Some("MCP tool requires serverUrl or connectorId".into()),
                 });
                 return None;
@@ -375,9 +375,9 @@ fn route_provider_tool(tool: &ProviderTool, prepared: &mut PreparedTools) -> Opt
             Some(JsonValue::Object(obj))
         }
         other => {
-            prepared.warnings.push(Warning::UnsupportedTool {
-                tool: other.to_string(),
-                details: Some(format!("unknown provider tool id {other}")),
+            prepared.warnings.push(Warning::Unsupported {
+                feature: other.to_string(),
+                details: Some(format!("unknown provider feature id {other}")),
             });
             None
         }

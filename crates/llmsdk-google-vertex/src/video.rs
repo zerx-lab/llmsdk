@@ -94,8 +94,8 @@ impl VideoModel for GoogleVertexVideoModel {
         if let Some(image) = &options.image {
             match image {
                 VideoFile::Url { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "URL-based image input".into(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "URL-based image input".into(),
                         details: Some(
                             "Vertex AI video models require base64-encoded images or GCS URIs. URL will be ignored."
                                 .into(),

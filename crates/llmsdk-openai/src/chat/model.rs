@@ -234,8 +234,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
     if let Some(mode) = provider_opts.system_message_mode.as_deref()
         && !matches!(mode, "system" | "developer" | "remove")
     {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "openai.systemMessageMode".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "openai.systemMessageMode".to_owned(),
             details: Some(format!(
                 "unknown systemMessageMode '{mode}' — must be one of system/developer/remove"
             )),
@@ -243,8 +243,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
     }
 
     if options.top_k.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "topK".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "topK".to_owned(),
             details: Some("OpenAI Chat Completions does not accept topK".to_owned()),
         });
     }
@@ -268,8 +268,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
                 if caps.supports_flex_processing {
                     true
                 } else {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "serviceTier".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "serviceTier".to_owned(),
                         details: Some(
                             "flex processing is only available for o3, o4-mini, and gpt-5 models"
                                 .to_owned(),
@@ -282,8 +282,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
                 if caps.supports_priority_processing {
                     true
                 } else {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "serviceTier".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "serviceTier".to_owned(),
                         details: Some(
                             "priority processing is only available for supported models (gpt-4, gpt-5, gpt-5-mini, o3, o4-mini) and requires Enterprise access. gpt-5-nano is not supported".to_owned(),
                         ),
@@ -292,8 +292,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
                 }
             }
             tier => {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "openai.serviceTier".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "openai.serviceTier".to_owned(),
                     details: Some(format!(
                         "unknown service_tier '{tier}' — must be one of auto/default/flex/priority"
                     )),
@@ -347,8 +347,8 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         prompt_cache_retention: provider_opts.prompt_cache_retention.clone().filter(|v| {
             let ok = matches!(v.as_str(), "in_memory" | "24h");
             if !ok {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "openai.promptCacheRetention".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "openai.promptCacheRetention".to_owned(),
                     details: Some(format!(
                         "unknown promptCacheRetention '{v}' — must be 'in_memory' or '24h'"
                     )),
@@ -390,15 +390,15 @@ fn apply_reasoning_model_strip(
     if strip_sampling {
         if request.temperature.is_some() {
             request.temperature = None;
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "temperature".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".to_owned(),
                 details: Some("temperature is not supported for reasoning models".to_owned()),
             });
         }
         if request.top_p.is_some() {
             request.top_p = None;
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topP".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "topP".to_owned(),
                 details: Some("topP is not supported for reasoning models".to_owned()),
             });
         }
@@ -412,15 +412,15 @@ fn apply_reasoning_model_strip(
 
     if request.frequency_penalty.is_some() {
         request.frequency_penalty = None;
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "frequencyPenalty".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "frequencyPenalty".to_owned(),
             details: Some("frequencyPenalty is not supported for reasoning models".to_owned()),
         });
     }
     if request.presence_penalty.is_some() {
         request.presence_penalty = None;
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "presencePenalty".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "presencePenalty".to_owned(),
             details: Some("presencePenalty is not supported for reasoning models".to_owned()),
         });
     }
@@ -447,8 +447,8 @@ fn apply_reasoning_model_strip(
 fn apply_search_preview_strip(request: &mut ChatRequest, warnings: &mut Vec<Warning>) {
     if request.temperature.is_some() {
         request.temperature = None;
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "temperature".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "temperature".to_owned(),
             details: Some(
                 "temperature is not supported for the search preview models and has been removed."
                     .to_owned(),
@@ -526,10 +526,10 @@ fn convert_tools(
                 args: p.args.clone().unwrap_or_default(),
             }),
             other => {
-                warnings.push(Warning::UnsupportedTool {
-                    tool: p.name.clone(),
+                warnings.push(Warning::Unsupported {
+                    feature: p.name.clone(),
                     details: Some(format!(
-                        "provider-defined tool '{other}' requires the OpenAI Responses API endpoint (not yet supported by llmsdk-openai)"
+                        "provider-defined feature '{other}' requires the OpenAI Responses API endpoint (not yet supported by llmsdk-openai)"
                     )),
                 });
                 None

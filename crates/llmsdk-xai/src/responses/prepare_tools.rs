@@ -2,7 +2,7 @@
 //!
 //! Mirrors `xai-responses-prepare-tools.ts`. Recognises the seven xAI
 //! provider-defined tool ids plus generic `function` tools; anything else
-//! raises [`Warning::UnsupportedTool`].
+//! raises [`Warning::Unsupported`].
 // Rust guideline compliant 2026-05-25
 
 use llmsdk_provider::language_model::{ProviderTool, Tool, ToolChoice};
@@ -92,8 +92,8 @@ pub(crate) fn prepare(tools: &[Tool], tool_choice: Option<&ToolChoice>) -> Prepa
                     names.mcp = Some(p.name.clone());
                     wire_tools.push(build_mcp(p));
                 }
-                _ => warnings.push(Warning::UnsupportedTool {
-                    tool: format!("provider-defined tool {}", p.name),
+                _ => warnings.push(Warning::Unsupported {
+                    feature: format!("provider-defined feature {}", p.name),
                     details: Some(format!("unknown xAI tool id `{}`", p.id)),
                 }),
             },
@@ -126,10 +126,10 @@ fn resolve_tool_choice(
                     || matches!(t, Tool::Provider(p) if p.name == *tool_name)
             })?;
             if matches!(selected, Tool::Provider(_)) {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "toolChoice".into(),
+                warnings.push(Warning::Unsupported {
+                    feature: "toolChoice".into(),
                     details: Some(format!(
-                        "toolChoice for server-side tool \"{tool_name}\" is not supported by xAI"
+                        "toolChoice for server-side feature \"{tool_name}\" is not supported by xAI"
                     )),
                 });
                 return None;

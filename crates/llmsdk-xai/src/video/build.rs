@@ -141,8 +141,8 @@ fn apply_resolution(
         if let Some(mapped) = map_top_level_resolution(raw) {
             body.resolution = Some(mapped.to_owned());
         } else {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "resolution".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "resolution".into(),
                 details: Some(format!(
                     "Unrecognized resolution \"{raw}\". \
                      Use providerOptions.xai.resolution with \"480p\" or \"720p\" instead."
@@ -163,20 +163,20 @@ fn collect_unsupported_warnings(
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
     if options.fps.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "fps".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "fps".into(),
             details: Some("xAI video models do not support custom FPS.".into()),
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".into(),
             details: Some("xAI video models do not support seed.".into()),
         });
     }
     if options.n > 1 {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "n".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "n".into(),
             details: Some(
                 "xAI video models do not support generating multiple videos per call. \
                  Only 1 video will be generated."
@@ -185,32 +185,32 @@ fn collect_unsupported_warnings(
         });
     }
     if is_edit && options.duration_seconds.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "duration".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "duration".into(),
             details: Some("xAI video editing does not support custom duration.".into()),
         });
     }
     if is_edit && options.aspect_ratio.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "aspectRatio".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".into(),
             details: Some("xAI video editing does not support custom aspect ratio.".into()),
         });
     }
     if is_edit && (xai.resolution.is_some() || options.resolution.is_some()) {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "resolution".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "resolution".into(),
             details: Some("xAI video editing does not support custom resolution.".into()),
         });
     }
     if is_extension && options.aspect_ratio.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "aspectRatio".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "aspectRatio".into(),
             details: Some("xAI video extension does not support custom aspect ratio.".into()),
         });
     }
     if is_extension && (xai.resolution.is_some() || options.resolution.is_some()) {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "resolution".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "resolution".into(),
             details: Some("xAI video extension does not support custom resolution.".into()),
         });
     }
@@ -298,7 +298,7 @@ mod tests {
         let names: Vec<&str> = warnings
             .iter()
             .filter_map(|w| match w {
-                Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+                Warning::Unsupported { feature, .. } => Some(feature.as_str()),
                 _ => None,
             })
             .collect();
@@ -331,7 +331,7 @@ mod tests {
         let kinds: Vec<&str> = warnings
             .iter()
             .filter_map(|w| match w {
-                Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+                Warning::Unsupported { feature, .. } => Some(feature.as_str()),
                 _ => None,
             })
             .collect();
@@ -368,7 +368,7 @@ mod tests {
         assert!(body.resolution.is_none());
         assert!(warnings.iter().any(|w| matches!(
             w,
-            Warning::UnsupportedSetting { setting, .. } if setting == "resolution"
+            Warning::Unsupported { feature, .. } if feature == "resolution"
         )));
     }
 

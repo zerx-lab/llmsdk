@@ -204,7 +204,7 @@ async fn flex_on_unsupported_model_warns_and_drops() {
         .expect("call");
     assert!(r.warnings.iter().any(|w| matches!(
         w,
-        llmsdk_provider::shared::Warning::UnsupportedSetting { setting, .. } if setting == "serviceTier"
+        llmsdk_provider::shared::Warning::Unsupported { feature, .. } if feature == "serviceTier"
     )));
 }
 

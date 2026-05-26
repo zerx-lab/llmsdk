@@ -52,8 +52,8 @@ impl SkillsModel for OpenAiSkills {
         let mut warnings = Vec::new();
         // OpenAI Skills API doesn't store a display title — mirror upstream warning.
         if options.display_title.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "displayTitle".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "displayTitle".to_owned(),
                 details: None,
             });
         }

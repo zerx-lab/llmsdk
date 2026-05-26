@@ -1,7 +1,7 @@
 //! Convert an [`llmsdk_provider::language_model::Prompt`] into `OpenAI` wire messages.
 //!
 //! Mirrors `convert-to-openai-chat-messages.ts` (simplified for M3). Anything
-//! not yet supported is reported as a [`Warning::UnsupportedSetting`] and
+//! not yet supported is reported as a [`Warning::Unsupported`] and
 //! dropped — we never silently lose information.
 // Rust guideline compliant 2026-02-21
 
@@ -102,8 +102,8 @@ fn convert_user_file(
         // Mirror ai-sdk `resolveProviderReference({ reference, provider: 'openai' })`
         // — the reference must address the `openai` provider.
         let Some(file_id) = reference.get("openai").and_then(|v| v.as_str()) else {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "user.file.reference".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "user.file.reference".to_owned(),
                 details: Some(
                     "provider reference lacks an `openai` string id — cannot resolve file id"
                         .to_owned(),
@@ -130,8 +130,8 @@ fn convert_user_file(
                 FileData::Url { url } => url.clone(),
                 FileData::Data { data } => data_uri(&file.media_type, data),
                 FileData::Text { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.text".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.text".to_owned(),
                         details: Some("inline-text file data unsupported for images".to_owned()),
                     });
                     return None;
@@ -154,8 +154,8 @@ fn convert_user_file(
             let data = match &file.data {
                 FileData::Data { data } => base64_of(data),
                 FileData::Url { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.audio-url".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.audio-url".to_owned(),
                         details: Some(
                             "audio file parts must be inline base64, not URLs".to_owned(),
                         ),
@@ -163,8 +163,8 @@ fn convert_user_file(
                     return None;
                 }
                 FileData::Text { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.audio-text".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.audio-text".to_owned(),
                         details: None,
                     });
                     return None;
@@ -175,8 +175,8 @@ fn convert_user_file(
                 "audio/wav" => "wav",
                 "audio/mp3" | "audio/mpeg" => "mp3",
                 other => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.audio-format".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.audio-format".to_owned(),
                         details: Some(format!(
                             "audio content parts with media type {other} are not supported"
                         )),
@@ -194,8 +194,8 @@ fn convert_user_file(
         _ => {
             // OpenAI only accepts application/pdf for the `file` content part.
             if file.media_type != "application/pdf" {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "user.file".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "user.file".to_owned(),
                     details: Some(format!(
                         "file part media type {} is not supported",
                         file.media_type
@@ -206,15 +206,15 @@ fn convert_user_file(
             let data = match &file.data {
                 FileData::Data { data } => base64_of(data),
                 FileData::Url { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.pdf-url".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.pdf-url".to_owned(),
                         details: Some("PDF file parts must be inline base64, not URLs".to_owned()),
                     });
                     return None;
                 }
                 FileData::Text { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "user.file.pdf-text".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "user.file.pdf-text".to_owned(),
                         details: None,
                     });
                     return None;
@@ -291,24 +291,24 @@ fn convert_assistant(parts: &[AssistantPart], warnings: &mut Vec<Warning>) -> Wi
         match part {
             AssistantPart::Text(t) => text_buf.push_str(&t.text),
             AssistantPart::ToolCall(tc) => tool_calls.push(convert_tool_call(tc)),
-            AssistantPart::Reasoning { .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.reasoning".to_owned(),
+            AssistantPart::Reasoning { .. } => warnings.push(Warning::Unsupported {
+                feature: "assistant.reasoning".to_owned(),
                 details: Some("M3 drops reasoning content on outbound messages".to_owned()),
             }),
-            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.reasoning-file".to_owned(),
+            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::Unsupported {
+                feature: "assistant.reasoning-file".to_owned(),
                 details: None,
             }),
-            AssistantPart::File(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.file".to_owned(),
+            AssistantPart::File(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.file".to_owned(),
                 details: Some("assistant-side file parts not yet supported".to_owned()),
             }),
-            AssistantPart::Custom { kind, .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: format!("assistant.custom.{kind}"),
+            AssistantPart::Custom { kind, .. } => warnings.push(Warning::Unsupported {
+                feature: format!("assistant.custom.{kind}"),
                 details: None,
             }),
-            AssistantPart::ToolResult(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.tool-result".to_owned(),
+            AssistantPart::ToolResult(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.feature-result".to_owned(),
                 details: Some(
                     "inline tool result on assistant turn not supported (use role=tool)".to_owned(),
                 ),
@@ -349,8 +349,8 @@ fn convert_tool_part(part: &ToolMessagePart, warnings: &mut Vec<Warning>) -> Opt
             content: tool_result_to_string(r, warnings),
         }),
         ToolMessagePart::ToolApprovalResponse(_) => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool.approval-response".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "feature.approval-response".to_owned(),
                 details: Some("M3 does not relay approval responses".to_owned()),
             });
             None
@@ -370,8 +370,8 @@ fn tool_result_to_string(part: &ToolResultPart, warnings: &mut Vec<Warning>) -> 
             .clone()
             .unwrap_or_else(|| "execution denied".to_owned()),
         ToolResultOutput::Content { .. } => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool-result.content".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "feature-result.content".to_owned(),
                 details: Some("M3 flattens multi-part tool output to empty string".to_owned()),
             });
             String::new()

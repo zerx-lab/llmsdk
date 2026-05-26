@@ -81,8 +81,8 @@ pub(crate) fn prepare_tools(
                         o.insert("googleSearch".into(), args_val);
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some("Google Search requires Gemini 2.0 or newer.".into()),
                         });
                     }
@@ -103,8 +103,8 @@ pub(crate) fn prepare_tools(
                         o.insert("enterpriseWebSearch".into(), Value::Object(Map::new()));
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some(
                                 "Enterprise Web Search requires Gemini 2.0 or newer.".into(),
                             ),
@@ -117,8 +117,8 @@ pub(crate) fn prepare_tools(
                         o.insert("urlContext".into(), Value::Object(Map::new()));
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some("URL context requires Gemini 2.0 or newer.".into()),
                         });
                     }
@@ -129,8 +129,8 @@ pub(crate) fn prepare_tools(
                         o.insert("codeExecution".into(), Value::Object(Map::new()));
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some("code_execution requires Gemini 2.0 or newer.".into()),
                         });
                     }
@@ -146,8 +146,8 @@ pub(crate) fn prepare_tools(
                         o.insert("fileSearch".into(), args_val);
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some(
                                 "file_search supported only on Gemini 2.5 / 3 models.".into(),
                             ),
@@ -173,8 +173,8 @@ pub(crate) fn prepare_tools(
                         o.insert("retrieval".into(), Value::Object(retrieval));
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some("vertex_rag_store requires Gemini 2.0 or newer.".into()),
                         });
                     }
@@ -185,15 +185,15 @@ pub(crate) fn prepare_tools(
                         o.insert("googleMaps".into(), Value::Object(Map::new()));
                         google_tools.push(Value::Object(o));
                     } else {
-                        warnings.push(Warning::UnsupportedTool {
-                            tool: p.id.clone(),
+                        warnings.push(Warning::Unsupported {
+                            feature: p.id.clone(),
                             details: Some("google_maps requires Gemini 2.0 or newer.".into()),
                         });
                     }
                 }
                 other => {
-                    warnings.push(Warning::UnsupportedTool {
-                        tool: other.into(),
+                    warnings.push(Warning::Unsupported {
+                        feature: other.into(),
                         details: None,
                     });
                 }

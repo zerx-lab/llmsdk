@@ -248,26 +248,26 @@ fn build_request(
     let mut warnings = Vec::new();
 
     if options.top_k.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "topK".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "topK".to_owned(),
             details: None,
         });
     }
     if options.tools.as_ref().is_some_and(|t| !t.is_empty()) {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "tools".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "tools".to_owned(),
             details: Some("the legacy Completions endpoint does not support tools".to_owned()),
         });
     }
     if options.tool_choice.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "toolChoice".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "toolChoice".to_owned(),
             details: None,
         });
     }
     if matches!(options.response_format, Some(ResponseFormat::Json { .. })) {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "responseFormat".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "responseFormat".to_owned(),
             details: Some("JSON response format is not supported on /v1/completions".to_owned()),
         });
     }

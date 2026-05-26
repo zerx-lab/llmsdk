@@ -57,30 +57,49 @@ pub type Headers = HashMap<String, Option<String>>;
 
 /// Provider-emitted warning about a model call.
 ///
-/// Mirrors `SharedV4Warning`. Used to surface "setting was ignored / coerced"
-/// without failing the call.
+/// Mirrors `SharedV4Warning` (ai-sdk
+/// `packages/provider/src/shared/v4/shared-v4-warning.ts`). The four
+/// variants are wire-compatible with the upstream `type` tag:
+/// `unsupported` / `compatibility` / `deprecated` / `other`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Warning {
-    /// A setting was not supported by the model.
-    UnsupportedSetting {
-        /// Name of the setting that was unsupported.
-        setting: String,
+    /// A feature is not supported by the model — the request was sent
+    /// without it and the result may differ from the caller's intent.
+    /// Mirrors upstream `{ type: 'unsupported', feature, details? }`.
+    Unsupported {
+        /// Name of the feature / setting / tool that was unsupported.
+        /// Matches upstream `feature` field (`snake_case` wire name).
+        feature: String,
         /// Optional human-readable details.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<String>,
     },
 
-    /// A tool was not supported by the model.
-    UnsupportedTool {
-        /// Name of the tool that was unsupported.
-        tool: String,
+    /// A compatibility-mode feature is in use that may produce suboptimal
+    /// results (the request still went through but with a coerced or
+    /// downgraded shape). Mirrors upstream
+    /// `{ type: 'compatibility', feature, details? }`.
+    Compatibility {
+        /// Name of the feature operating in compatibility mode.
+        feature: String,
         /// Optional human-readable details.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<String>,
+    },
+
+    /// A deprecated setting / feature is being used; the message explains
+    /// the recommended replacement. Mirrors upstream
+    /// `{ type: 'deprecated', setting, message }`.
+    Deprecated {
+        /// Name of the deprecated setting / feature.
+        setting: String,
+        /// Human-readable message explaining what to use instead.
+        message: String,
     },
 
     /// Generic warning for cases that don't fit the structured variants.
+    /// Mirrors upstream `{ type: 'other', message }`.
     Other {
         /// Human-readable message.
         message: String,

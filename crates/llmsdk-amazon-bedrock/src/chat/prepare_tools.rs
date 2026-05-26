@@ -85,8 +85,8 @@ pub(crate) fn prepare_tools(
                 // Web search is not available on Bedrock — filter it out and
                 // warn, matching the upstream behavior.
                 if p.id == "anthropic.web_search_20250305" {
-                    warnings.push(Warning::UnsupportedTool {
-                        tool: p.name.clone(),
+                    warnings.push(Warning::Unsupported {
+                        feature: p.name.clone(),
                         details: Some(
                             "web_search_20250305 is not supported on Amazon Bedrock".to_owned(),
                         ),
@@ -94,10 +94,10 @@ pub(crate) fn prepare_tools(
                     continue;
                 }
                 if !is_anthropic_model {
-                    warnings.push(Warning::UnsupportedTool {
-                        tool: p.name.clone(),
+                    warnings.push(Warning::Unsupported {
+                        feature: p.name.clone(),
                         details: Some(format!(
-                            "provider-defined tool '{}' is only supported on Anthropic models on Bedrock",
+                            "provider-defined feature '{}' is only supported on Anthropic models on Bedrock",
                             p.id
                         )),
                     });
@@ -253,7 +253,7 @@ mod tests {
         let out = prepare_tools(Some(&tools), None, "anthropic.claude-3-haiku");
         assert!(out.tool_config.is_none());
         assert_eq!(out.warnings.len(), 1);
-        assert!(matches!(out.warnings[0], Warning::UnsupportedTool { .. }));
+        assert!(matches!(out.warnings[0], Warning::Unsupported { .. }));
     }
 
     #[test]

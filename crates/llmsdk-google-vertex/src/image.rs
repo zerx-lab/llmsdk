@@ -111,8 +111,8 @@ impl GoogleVertexImageModel {
     ) -> Result<ImageResult, ProviderError> {
         let mut warnings: Vec<Warning> = Vec::new();
         if options.size.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "size".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "size".into(),
                 details: Some(
                     "This model does not support the `size` option. Use `aspectRatio` instead."
                         .into(),
@@ -283,8 +283,8 @@ impl GoogleVertexImageModel {
             ));
         }
         if options.size.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "size".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "size".into(),
                 details: Some("Use `aspectRatio` instead.".into()),
             });
         }

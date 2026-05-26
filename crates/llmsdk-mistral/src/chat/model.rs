@@ -188,8 +188,8 @@ fn build_request(
         (options.presence_penalty.is_some(), "presencePenalty"),
     ] {
         if val {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: name.to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: name.to_owned(),
                 details: Some(format!("Mistral chat completions does not accept {name}")),
             });
         }
@@ -314,8 +314,8 @@ fn resolve_reasoning_effort(
 
     if !supports {
         if top_level.is_some() && !matches!(top_level, Some(ReasoningEffort::ProviderDefault)) {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "reasoning".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "reasoning".to_owned(),
                 details: Some("This model does not support reasoning configuration.".to_owned()),
             });
         }
@@ -380,11 +380,9 @@ mod tests {
         o.stop_sequences = Some(vec!["END".into()]);
         let (req, warnings) = build_request("mistral-small-latest", &o).unwrap();
         assert_eq!(req.stop, Some(vec!["END".into()]));
-        assert!(
-            warnings
-                .iter()
-                .all(|w| !matches!(w, Warning::UnsupportedSetting { setting, .. } if setting == "stopSequences"))
-        );
+        assert!(warnings.iter().all(
+            |w| !matches!(w, Warning::Unsupported { feature, .. } if feature == "stopSequences")
+        ));
     }
 
     #[test]
@@ -427,7 +425,7 @@ mod tests {
         assert!(req.reasoning_effort.is_none());
         assert!(warnings.iter().any(|w| matches!(
             w,
-            Warning::UnsupportedSetting { setting, .. } if setting == "reasoning"
+            Warning::Unsupported { feature, .. } if feature == "reasoning"
         )));
     }
 

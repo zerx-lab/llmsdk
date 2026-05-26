@@ -317,8 +317,8 @@ fn append_user_part(
             let media = file.media_type.as_str();
             match &file.data {
                 FileData::Url { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "file.url".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "file.url".to_owned(),
                         details: Some(
                             "Bedrock does not accept URL-sourced files; provide bytes inline."
                                 .to_owned(),
@@ -326,8 +326,8 @@ fn append_user_part(
                     });
                 }
                 FileData::Reference { .. } => {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "file.reference".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "file.reference".to_owned(),
                         details: Some(
                             "Bedrock does not accept provider-reference files in chat content."
                                 .to_owned(),
@@ -358,8 +358,8 @@ fn append_user_part(
                     };
                     if media.starts_with("image/") {
                         let Some(format) = image_format_for_media_type(media) else {
-                            warnings.push(Warning::UnsupportedSetting {
-                                setting: "file.image".to_owned(),
+                            warnings.push(Warning::Unsupported {
+                                feature: "file.image".to_owned(),
                                 details: Some(format!("unsupported image media type {media}")),
                             });
                             return;

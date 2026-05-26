@@ -137,7 +137,7 @@ async fn temperature_stripped_on_reasoning_model_with_warning() {
         .expect("call");
     assert!(result.warnings.iter().any(|w| matches!(
         w,
-        llmsdk_provider::shared::Warning::UnsupportedSetting { setting, .. } if setting == "temperature"
+        llmsdk_provider::shared::Warning::Unsupported { feature, .. } if feature == "temperature"
     )));
 }
 

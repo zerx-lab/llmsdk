@@ -167,20 +167,20 @@ fn convert_assistant(
             // Mistral flattens reasoning into the text content (upstream parity).
             AssistantPart::Reasoning { text, .. } => text_buf.push_str(text),
             AssistantPart::ToolCall(tc) => tool_calls.push(convert_tool_call(tc)),
-            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.reasoning-file".to_owned(),
+            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::Unsupported {
+                feature: "assistant.reasoning-file".to_owned(),
                 details: None,
             }),
-            AssistantPart::File(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.file".to_owned(),
+            AssistantPart::File(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.file".to_owned(),
                 details: Some("Mistral chat does not support assistant-side files".to_owned()),
             }),
-            AssistantPart::Custom { kind, .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: format!("assistant.custom.{kind}"),
+            AssistantPart::Custom { kind, .. } => warnings.push(Warning::Unsupported {
+                feature: format!("assistant.custom.{kind}"),
                 details: None,
             }),
-            AssistantPart::ToolResult(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.tool-result".to_owned(),
+            AssistantPart::ToolResult(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.feature-result".to_owned(),
                 details: Some(
                     "inline tool result on assistant turn not supported (use role=tool)".to_owned(),
                 ),
@@ -242,8 +242,8 @@ fn tool_result_to_string(part: &ToolResultPart, warnings: &mut Vec<Warning>) -> 
         ToolResultOutput::Content { value } => {
             // Upstream stringifies via JSON.stringify; we do the same.
             serde_json::to_string(value).unwrap_or_else(|_| {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "tool-result.content".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "feature-result.content".to_owned(),
                     details: Some(
                         "Mistral chat could not serialize multi-part tool output".to_owned(),
                     ),

@@ -153,9 +153,7 @@ async fn size_seed_mask_emit_unsupported_warnings_but_call_still_succeeds() {
         .warnings
         .iter()
         .filter_map(|w| match w {
-            llmsdk_provider::shared::Warning::UnsupportedSetting { setting, .. } => {
-                Some(setting.as_str())
-            }
+            llmsdk_provider::shared::Warning::Unsupported { feature, .. } => Some(feature.as_str()),
             _ => None,
         })
         .collect();

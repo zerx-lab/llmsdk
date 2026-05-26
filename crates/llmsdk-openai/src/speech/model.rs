@@ -86,8 +86,8 @@ impl SpeechModel for OpenAiSpeechModel {
         let provider_opts = parse_options(options.provider_options.as_ref());
 
         if options.language.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "language".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "language".to_owned(),
                 details: Some("OpenAI speech models do not support language selection".to_owned()),
             });
         }
@@ -98,8 +98,8 @@ impl SpeechModel for OpenAiSpeechModel {
             if SUPPORTED_FORMATS.contains(&fmt) {
                 response_format = fmt;
             } else {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "outputFormat".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "outputFormat".to_owned(),
                     details: Some(format!(
                         "Unsupported output format: {fmt}. Using mp3 instead."
                     )),

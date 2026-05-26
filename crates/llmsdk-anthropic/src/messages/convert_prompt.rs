@@ -148,8 +148,8 @@ fn convert_user(
                                 betas.insert("files-api-2025-04-14".to_owned());
                                 WireImageSource::File { file_id }
                             } else {
-                                warnings.push(Warning::UnsupportedSetting {
-                                    setting: "user.file.data".to_owned(),
+                                warnings.push(Warning::Unsupported {
+                                    feature: "user.file.data".to_owned(),
                                     details: Some(
                                         "image file reference missing `anthropic` provider entry"
                                             .to_owned(),
@@ -159,8 +159,8 @@ fn convert_user(
                             }
                         }
                         FileData::Text { .. } => {
-                            warnings.push(Warning::UnsupportedSetting {
-                                setting: "user.file.data".to_owned(),
+                            warnings.push(Warning::Unsupported {
+                                feature: "user.file.data".to_owned(),
                                 details: Some(
                                     "image files only accept Url or inline bytes".to_owned(),
                                 ),
@@ -182,8 +182,8 @@ fn convert_user(
                             betas.insert("files-api-2025-04-14".to_owned());
                             WireDocumentSource::File { file_id }
                         } else {
-                            warnings.push(Warning::UnsupportedSetting {
-                                setting: "user.file.data".to_owned(),
+                            warnings.push(Warning::Unsupported {
+                                feature: "user.file.data".to_owned(),
                                 details: Some(
                                     "document file reference missing `anthropic` provider entry"
                                         .to_owned(),
@@ -213,8 +213,8 @@ fn convert_user(
                         data: file_bytes_to_base64(data),
                     },
                     (mt, _) if mt.starts_with("audio/") => {
-                        warnings.push(Warning::UnsupportedSetting {
-                            setting: "user.file".to_owned(),
+                        warnings.push(Warning::Unsupported {
+                            feature: "user.file".to_owned(),
                             details: Some(format!(
                                 "Anthropic Messages API does not accept audio files ({mt})"
                             )),
@@ -222,8 +222,8 @@ fn convert_user(
                         continue;
                     }
                     (mt, _) => {
-                        warnings.push(Warning::UnsupportedSetting {
-                            setting: "user.file".to_owned(),
+                        warnings.push(Warning::Unsupported {
+                            feature: "user.file".to_owned(),
                             details: Some(format!(
                                 "media_type '{mt}' is not supported by llmsdk-anthropic"
                             )),
@@ -320,8 +320,8 @@ impl CacheControlValidator {
     ) -> Option<CacheControl> {
         let value = read_cache_control(options)?;
         if !can_cache {
-            self.warnings.push(Warning::UnsupportedSetting {
-                setting: "cache_control".to_owned(),
+            self.warnings.push(Warning::Unsupported {
+                feature: "cache_control".to_owned(),
                 details: Some(format!(
                     "cache_control cannot be set on {context_type}. It will be ignored."
                 )),
@@ -330,8 +330,8 @@ impl CacheControlValidator {
         }
         self.count += 1;
         if self.count > MAX_CACHE_BREAKPOINTS {
-            self.warnings.push(Warning::UnsupportedSetting {
-                setting: "cache_control".to_owned(),
+            self.warnings.push(Warning::Unsupported {
+                feature: "cache_control".to_owned(),
                 details: Some(format!(
                     "Maximum {MAX_CACHE_BREAKPOINTS} cache breakpoints exceeded (found {count}). This breakpoint will be ignored.",
                     count = self.count,
@@ -434,21 +434,21 @@ fn convert_assistant(
                 if !send_reasoning {
                     continue;
                 }
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "assistant.reasoning-file".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "assistant.reasoning-file".to_owned(),
                     details: Some("Anthropic does not support reasoning files".to_owned()),
                 });
             }
-            AssistantPart::File(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.file".to_owned(),
+            AssistantPart::File(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.file".to_owned(),
                 details: None,
             }),
-            AssistantPart::Custom { kind, .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: format!("assistant.custom.{kind}"),
+            AssistantPart::Custom { kind, .. } => warnings.push(Warning::Unsupported {
+                feature: format!("assistant.custom.{kind}"),
                 details: None,
             }),
-            AssistantPart::ToolResult(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.tool-result".to_owned(),
+            AssistantPart::ToolResult(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.feature-result".to_owned(),
                 details: Some(
                     "inline tool result on assistant turn not supported; use a Tool message"
                         .to_owned(),
@@ -553,8 +553,8 @@ fn convert_tool(
                 });
             }
             ToolMessagePart::ToolApprovalResponse(_) => {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "tool.approval-response".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "feature.approval-response".to_owned(),
                     details: Some("M6 does not relay approval responses".to_owned()),
                 });
             }
@@ -701,8 +701,8 @@ fn convert_nested_file(
                     betas.insert("files-api-2025-04-14".to_owned());
                     WireImageSource::File { file_id }
                 } else {
-                    warnings.push(Warning::UnsupportedSetting {
-                        setting: "tool-result.content.file.data".to_owned(),
+                    warnings.push(Warning::Unsupported {
+                        feature: "feature-result.content.file.data".to_owned(),
                         details: Some(
                             "image reference missing `anthropic` provider entry".to_owned(),
                         ),
@@ -711,8 +711,8 @@ fn convert_nested_file(
                 }
             }
             FileData::Text { .. } => {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "tool-result.content.file.data".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "feature-result.content.file.data".to_owned(),
                     details: Some(
                         "image files in tool_result accept only Url, inline bytes, or Files-API references".to_owned(),
                     ),
@@ -733,8 +733,8 @@ fn convert_nested_file(
                 betas.insert("files-api-2025-04-14".to_owned());
                 WireDocumentSource::File { file_id }
             } else {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "tool-result.content.file.data".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "feature-result.content.file.data".to_owned(),
                     details: Some(
                         "document reference missing `anthropic` provider entry".to_owned(),
                     ),
@@ -763,8 +763,8 @@ fn convert_nested_file(
             data: file_bytes_to_base64(data),
         },
         (mt, _) => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool-result.content.file".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "feature-result.content.file".to_owned(),
                 details: Some(format!(
                     "media_type '{mt}' not supported as tool_result nested content"
                 )),
@@ -801,14 +801,14 @@ fn convert_nested_custom(
                 tool_name: name.to_owned(),
             });
         }
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "tool-result.content.custom.tool-reference".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "feature-result.content.custom.tool-reference".to_owned(),
             details: Some("tool-reference requires anthropic.toolName".to_owned()),
         });
         return None;
     }
-    warnings.push(Warning::UnsupportedSetting {
-        setting: "tool-result.content.custom".to_owned(),
+    warnings.push(Warning::Unsupported {
+        feature: "feature-result.content.custom".to_owned(),
         details: None,
     });
     None

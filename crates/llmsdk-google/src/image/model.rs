@@ -107,14 +107,14 @@ impl GoogleImageModel {
             ));
         }
         if options.size.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "size".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "size".into(),
                 details: Some("Use `aspectRatio` instead.".into()),
             });
         }
         if options.seed.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "seed".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "seed".into(),
                 details: Some(
                     "This model does not support the `seed` option through this provider.".into(),
                 ),
@@ -132,8 +132,8 @@ impl GoogleImageModel {
         let aspect = options.aspect_ratio.clone().unwrap_or_else(|| "1:1".into());
         params.insert("aspectRatio".into(), Value::String(aspect));
         if google_options.google_search.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "googleSearch".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "googleSearch".into(),
                 details: Some(
                     "Google Search grounding is only supported on Gemini image models.".into(),
                 ),
@@ -223,8 +223,8 @@ impl GoogleImageModel {
             }
         }
         if options.size.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "size".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "size".into(),
                 details: Some("Use `aspectRatio` instead.".into()),
             });
         }

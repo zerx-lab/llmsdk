@@ -84,8 +84,8 @@ impl VideoModel for GoogleVideoModel {
         if let Some(image) = &options.image {
             match image {
                 VideoFile::Url { .. } => {
-                    warnings.push(llmsdk_provider::shared::Warning::UnsupportedSetting {
-                        setting: "URL-based image input".into(),
+                    warnings.push(llmsdk_provider::shared::Warning::Unsupported {
+                        feature: "URL-based image input".into(),
                         details: Some(
                             "Google Generative AI video models require base64-encoded images. URL will be ignored.".into(),
                         ),

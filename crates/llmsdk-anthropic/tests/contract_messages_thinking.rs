@@ -94,7 +94,7 @@ async fn thinking_enabled_strips_sampling_and_inflates_max_tokens() {
         .warnings
         .iter()
         .filter_map(|w| match w {
-            Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+            Warning::Unsupported { feature, .. } => Some(feature.as_str()),
             _ => None,
         })
         .collect();

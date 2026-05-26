@@ -197,8 +197,8 @@ fn build_request(
     let mut warnings: Vec<Warning> = Vec::new();
 
     if options.stop_sequences.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "stopSequences".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "stopSequences".into(),
             details: Some("xAI Responses API does not accept stopSequences".into()),
         });
     }
@@ -370,7 +370,7 @@ mod tests {
         let built = build_request("grok-4.3", &o, false).unwrap();
         assert!(built.warnings.iter().any(|w| matches!(
             w,
-            Warning::UnsupportedSetting { setting, .. } if setting == "stopSequences"
+            Warning::Unsupported { feature, .. } if feature == "stopSequences"
         )));
     }
 

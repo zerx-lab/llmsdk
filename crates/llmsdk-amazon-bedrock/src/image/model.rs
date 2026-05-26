@@ -73,8 +73,8 @@ impl ImageModel for AmazonBedrockImageModel {
         let bedrock_opts = parse_options(options.provider_options.as_ref());
 
         if options.aspect_ratio.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "aspectRatio".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "aspectRatio".into(),
                 details: Some("Bedrock image models do not accept aspect ratio; use size.".into()),
             });
         }

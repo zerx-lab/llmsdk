@@ -271,8 +271,8 @@ fn build_request(
         (options.stop_sequences.is_some(), "stopSequences"),
     ] {
         if val {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: name.to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: name.to_owned(),
                 details: Some(format!("xAI chat completions does not accept {name}")),
             });
         }

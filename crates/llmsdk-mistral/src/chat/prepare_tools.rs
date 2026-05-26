@@ -47,8 +47,8 @@ pub(crate) fn prepare(tools: &[Tool], tool_choice: Option<&ToolChoice>) -> Prepa
                 },
             }),
             Tool::Provider(p) => {
-                warnings.push(Warning::UnsupportedTool {
-                    tool: format!("provider-defined tool {}", p.id),
+                warnings.push(Warning::Unsupported {
+                    feature: format!("provider-defined feature {}", p.id),
                     details: Some(
                         "Mistral chat completions does not accept provider-defined tools"
                             .to_owned(),

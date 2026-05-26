@@ -247,32 +247,32 @@ fn build_request(
         });
 
     if options.top_k.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "topK".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "topK".into(),
             details: Some("Responses API does not accept topK".into()),
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".into(),
             details: Some("Responses API does not accept seed".into()),
         });
     }
     if options.presence_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "presencePenalty".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "presencePenalty".into(),
             details: Some("Responses API does not accept presencePenalty".into()),
         });
     }
     if options.frequency_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "frequencyPenalty".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "frequencyPenalty".into(),
             details: Some("Responses API does not accept frequencyPenalty".into()),
         });
     }
     if options.stop_sequences.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "stopSequences".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "stopSequences".into(),
             details: Some("Responses API does not accept stopSequences".into()),
         });
     }
@@ -422,15 +422,15 @@ fn build_request(
         if !effort_allows_chat_params {
             if temperature.is_some() {
                 temperature = None;
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "temperature".into(),
+                warnings.push(Warning::Unsupported {
+                    feature: "temperature".into(),
                     details: Some("temperature is not supported for reasoning models".into()),
                 });
             }
             if top_p.is_some() {
                 top_p = None;
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "topP".into(),
+                warnings.push(Warning::Unsupported {
+                    feature: "topP".into(),
                     details: Some("topP is not supported for reasoning models".into()),
                 });
             }

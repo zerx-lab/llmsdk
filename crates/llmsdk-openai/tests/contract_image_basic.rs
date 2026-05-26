@@ -144,7 +144,7 @@ async fn aspect_ratio_and_seed_emit_warnings() {
         .warnings
         .iter()
         .filter_map(|w| match w {
-            Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+            Warning::Unsupported { feature, .. } => Some(feature.as_str()),
             _ => None,
         })
         .collect();

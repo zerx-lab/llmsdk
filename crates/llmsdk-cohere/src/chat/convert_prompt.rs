@@ -221,27 +221,27 @@ fn convert_assistant(parts: &[AssistantPart], warnings: &mut Vec<Warning>) -> Wi
             AssistantPart::Text(t) => text_buf.push_str(&t.text),
             AssistantPart::ToolCall(tc) => tool_calls.push(convert_tool_call(tc)),
             AssistantPart::Reasoning { .. } => {
-                warnings.push(Warning::UnsupportedSetting {
-                    setting: "assistant.reasoning".to_owned(),
+                warnings.push(Warning::Unsupported {
+                    feature: "assistant.reasoning".to_owned(),
                     details: Some(
                         "Cohere chat does not echo reasoning back into the prompt".to_owned(),
                     ),
                 });
             }
-            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.reasoning-file".to_owned(),
+            AssistantPart::ReasoningFile { .. } => warnings.push(Warning::Unsupported {
+                feature: "assistant.reasoning-file".to_owned(),
                 details: None,
             }),
-            AssistantPart::File(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.file".to_owned(),
+            AssistantPart::File(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.file".to_owned(),
                 details: Some("Cohere chat does not accept assistant-side files".to_owned()),
             }),
-            AssistantPart::Custom { kind, .. } => warnings.push(Warning::UnsupportedSetting {
-                setting: format!("assistant.custom.{kind}"),
+            AssistantPart::Custom { kind, .. } => warnings.push(Warning::Unsupported {
+                feature: format!("assistant.custom.{kind}"),
                 details: None,
             }),
-            AssistantPart::ToolResult(_) => warnings.push(Warning::UnsupportedSetting {
-                setting: "assistant.tool-result".to_owned(),
+            AssistantPart::ToolResult(_) => warnings.push(Warning::Unsupported {
+                feature: "assistant.feature-result".to_owned(),
                 details: Some("use role=tool for tool results in Cohere chat".to_owned()),
             }),
         }
@@ -280,8 +280,8 @@ fn convert_tool_part(part: &ToolMessagePart, warnings: &mut Vec<Warning>) -> Opt
             content: tool_result_to_string(r, warnings),
         }),
         ToolMessagePart::ToolApprovalResponse(_) => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool.approval-response".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "feature.approval-response".to_owned(),
                 details: Some("Cohere chat does not relay approval responses".to_owned()),
             });
             None
@@ -301,8 +301,8 @@ fn tool_result_to_string(part: &ToolResultPart, warnings: &mut Vec<Warning>) -> 
             .clone()
             .unwrap_or_else(|| "Tool call execution denied.".to_owned()),
         ToolResultOutput::Content { .. } => {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "tool-result.content".to_owned(),
+            warnings.push(Warning::Unsupported {
+                feature: "feature-result.content".to_owned(),
                 details: Some(
                     "Cohere chat flattens multi-part tool output to empty string".to_owned(),
                 ),

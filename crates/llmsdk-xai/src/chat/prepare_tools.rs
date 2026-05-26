@@ -48,8 +48,8 @@ pub(crate) fn prepare(tools: &[Tool], tool_choice: Option<&ToolChoice>) -> Prepa
                 },
             }),
             Tool::Provider(p) => {
-                warnings.push(Warning::UnsupportedTool {
-                    tool: format!("provider-defined tool {}", p.name),
+                warnings.push(Warning::Unsupported {
+                    feature: format!("provider-defined feature {}", p.name),
                     details: Some(
                         "xAI chat completions does not accept provider-defined tools; \
                         use chat.tools.* on the responses endpoint instead"

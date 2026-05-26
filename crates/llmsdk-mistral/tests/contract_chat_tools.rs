@@ -191,7 +191,7 @@ async fn provider_tool_yields_warning_and_no_tools() {
         result
             .warnings
             .iter()
-            .any(|w| matches!(w, llmsdk_provider::shared::Warning::UnsupportedTool { .. })),
+            .any(|w| matches!(w, llmsdk_provider::shared::Warning::Unsupported { .. })),
         "expected UnsupportedTool warning"
     );
 }

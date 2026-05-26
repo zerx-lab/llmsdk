@@ -553,24 +553,24 @@ fn build_request_body(
         // Warn rather than silently drop the three unsupported knobs so
         // callers porting from `:generateContent` notice the gap.
         if options.top_k.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topK".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "topK".into(),
                 details: Some(
                     "google.interactions: topK is not supported by the Interactions API.".into(),
                 ),
             });
         }
         if options.frequency_penalty.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "frequencyPenalty".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "frequencyPenalty".into(),
                 details: Some(
                     "google.interactions: frequencyPenalty is not supported by the Interactions API.".into(),
                 ),
             });
         }
         if options.presence_penalty.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "presencePenalty".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "presencePenalty".into(),
                 details: Some(
                     "google.interactions: presencePenalty is not supported by the Interactions API.".into(),
                 ),
@@ -586,23 +586,10 @@ fn build_request_body(
     if let Some(tier) = &provider_opts.service_tier {
         body.insert("service_tier".into(), json!(tier));
     }
-    if let Some(mode) = &provider_opts.media_resolution {
-        // Upstream feeds `mediaResolution` into `convertToGoogleInteractionsInput`
-        // (see `:248`), where it influences how user-message media parts are
-        // shaped. The Rust converter does not yet consume this knob, so for
-        // now we only emit a warning when callers set it to keep the wire
-        // strictly aligned with upstream. Once the converter learns to honor
-        // `media_resolution`, this branch should pipe the value through
-        // instead of warning.
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "google.mediaResolution".into(),
-            details: Some(format!(
-                "google.interactions: mediaResolution={mode} is recognized but the input \
-                 converter does not yet honor it. The request will be sent without \
-                 per-media-resolution shaping."
-            )),
-        });
-    }
+    // media_resolution flows into the input converter directly (see the
+    // convert_prompt_to_input call below); nothing to emit at the top
+    // level beyond the converter-driven `resolution` field on image / video
+    // parts.
 
     if let Some(v) = &provider_opts.previous_interaction_id {
         body.insert("previous_interaction_id".into(), json!(v));
@@ -776,8 +763,14 @@ fn build_request_body(
         _ => &options.prompt,
     };
 
-    // Input messages (everything after the system message).
-    let input = convert_prompt_to_input(prompt_slice, &mut warnings);
+    // Input messages (everything after the system message). `mediaResolution`
+    // flows into `convertToGoogleInteractionsInput` upstream (line 248) and
+    // surfaces as a `resolution` field on image / video parts.
+    let input = convert_prompt_to_input(
+        prompt_slice,
+        provider_opts.media_resolution.as_deref(),
+        &mut warnings,
+    );
     body.insert("input".into(), JsonValue::Array(input));
 
     Ok((body, warnings))
@@ -879,7 +872,11 @@ fn part_has_interaction_id(provider_options: Option<&ProviderOptions>, expected:
 
 /// Convert llmsdk Prompt -> Interactions `input[]`. Each non-system message
 /// becomes one entry with `role` + typed `content` array.
-fn convert_prompt_to_input(prompt: &[Message], warnings: &mut Vec<Warning>) -> Vec<JsonValue> {
+fn convert_prompt_to_input(
+    prompt: &[Message],
+    media_resolution: Option<&str>,
+    warnings: &mut Vec<Warning>,
+) -> Vec<JsonValue> {
     let mut out = Vec::new();
     for msg in prompt {
         match msg {
@@ -891,7 +888,9 @@ fn convert_prompt_to_input(prompt: &[Message], warnings: &mut Vec<Warning>) -> V
                         UserPart::Text(TextPart { text, .. }) => {
                             blocks.push(json!({"type": "text", "text": text}));
                         }
-                        UserPart::File(f) => blocks.push(file_to_block(f, warnings)),
+                        UserPart::File(f) => {
+                            blocks.push(file_to_block(f, media_resolution, warnings));
+                        }
                     }
                 }
                 out.push(json!({ "role": "user", "content": blocks }));
@@ -998,7 +997,11 @@ fn convert_prompt_to_input(prompt: &[Message], warnings: &mut Vec<Warning>) -> V
     out
 }
 
-fn file_to_block(file: &FilePart, warnings: &mut Vec<Warning>) -> JsonValue {
+fn file_to_block(
+    file: &FilePart,
+    media_resolution: Option<&str>,
+    warnings: &mut Vec<Warning>,
+) -> JsonValue {
     let top_level = file
         .media_type
         .split('/')
@@ -1016,6 +1019,14 @@ fn file_to_block(file: &FilePart, warnings: &mut Vec<Warning>) -> JsonValue {
         "mime_type".into(),
         JsonValue::String(file.media_type.clone()),
     );
+    // Mirror upstream convert-to-google-interactions-input.ts:279-282:
+    // image / video parts honor `mediaResolution` via a `resolution` field;
+    // audio / document are unaffected.
+    if let Some(res) = media_resolution
+        && matches!(kind, "image" | "video")
+    {
+        entry.insert("resolution".into(), JsonValue::String(res.to_owned()));
+    }
     match &file.data {
         FileData::Url { url } => {
             entry.insert("uri".into(), JsonValue::String(url.clone()));

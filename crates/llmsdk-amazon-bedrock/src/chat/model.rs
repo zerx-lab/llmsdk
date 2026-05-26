@@ -218,36 +218,36 @@ pub(crate) fn build_request(
     } = convert_prompt(&options.prompt, is_mistral)?;
 
     if options.frequency_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "frequencyPenalty".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "frequencyPenalty".into(),
             details: None,
         });
     }
     if options.presence_penalty.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "presencePenalty".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "presencePenalty".into(),
             details: None,
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".into(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".into(),
             details: None,
         });
     }
     let mut temperature = options.temperature;
     if let Some(t) = temperature {
         if t > 1.0 {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "temperature".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".into(),
                 details: Some(format!(
                     "{t} exceeds bedrock maximum of 1.0; clamped to 1.0"
                 )),
             });
             temperature = Some(1.0);
         } else if t < 0.0 {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "temperature".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".into(),
                 details: Some(format!("{t} below bedrock minimum of 0; clamped to 0")),
             });
             temperature = Some(0.0);
@@ -256,8 +256,8 @@ pub(crate) fn build_request(
     if let Some(format) = options.response_format.as_ref() {
         let supported = matches!(format, ResponseFormat::Text | ResponseFormat::Json { .. });
         if !supported {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "responseFormat".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "responseFormat".into(),
                 details: Some("Only text and json response formats are supported.".into()),
             });
         }
@@ -318,8 +318,8 @@ pub(crate) fn build_request(
     let mut top_p = options.top_p;
     if thinking_active {
         if top_k.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topK".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "topK".into(),
                 details: Some(
                     "topK is not supported when Anthropic thinking is enabled; dropped".into(),
                 ),
@@ -327,8 +327,8 @@ pub(crate) fn build_request(
             top_k = None;
         }
         if top_p.is_some() {
-            warnings.push(Warning::UnsupportedSetting {
-                setting: "topP".into(),
+            warnings.push(Warning::Unsupported {
+                feature: "topP".into(),
                 details: Some(
                     "topP is not supported when Anthropic thinking is enabled; dropped".into(),
                 ),
@@ -464,9 +464,9 @@ mod tests {
         let warn = prepared
             .warnings
             .iter()
-            .find(|w| matches!(w, Warning::UnsupportedSetting { setting, .. } if setting == "temperature"))
+            .find(|w| matches!(w, Warning::Unsupported { feature, .. } if feature == "temperature"))
             .expect("expected temperature warning");
-        let Warning::UnsupportedSetting { details, .. } = warn else {
+        let Warning::Unsupported { details, .. } = warn else {
             unreachable!()
         };
         assert!(details.as_deref().unwrap().contains("1.0"));

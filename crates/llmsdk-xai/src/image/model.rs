@@ -146,8 +146,8 @@ fn build_request(
     let mut warnings = Vec::new();
 
     if options.size.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "size".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "size".to_owned(),
             details: Some(
                 "This model does not support the `size` option. Use `aspectRatio` instead."
                     .to_owned(),
@@ -155,14 +155,14 @@ fn build_request(
         });
     }
     if options.seed.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "seed".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "seed".to_owned(),
             details: None,
         });
     }
     if options.mask.is_some() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "mask".to_owned(),
+        warnings.push(Warning::Unsupported {
+            feature: "mask".to_owned(),
             details: None,
         });
     }
@@ -445,7 +445,7 @@ mod tests {
         let names: Vec<&str> = warnings
             .iter()
             .filter_map(|w| match w {
-                Warning::UnsupportedSetting { setting, .. } => Some(setting.as_str()),
+                Warning::Unsupported { feature, .. } => Some(feature.as_str()),
                 _ => None,
             })
             .collect();
