@@ -515,6 +515,14 @@ fn build_request_body(
             });
         }
     } else {
+        // Mirror upstream `google-interactions-language-model.ts:300-312`:
+        // `GoogleInteractionsGenerationConfig` carries only 8 fields. `top_k`,
+        // `frequency_penalty`, `presence_penalty`, `media_resolution`,
+        // `response_modalities`, `service_tier` are *not* in this object —
+        // they either belong at the top level (response_modalities /
+        // service_tier), flow through the input converter (media_resolution),
+        // or are simply unsupported by the Interactions API
+        // (top_k / frequency_penalty / presence_penalty).
         let mut gen_config = JsonMap::new();
         if let Some(v) = options.max_output_tokens {
             gen_config.insert("max_output_tokens".into(), json!(v));
@@ -524,15 +532,6 @@ fn build_request_body(
         }
         if let Some(v) = options.top_p {
             gen_config.insert("top_p".into(), json!(v));
-        }
-        if let Some(v) = options.top_k {
-            gen_config.insert("top_k".into(), json!(v));
-        }
-        if let Some(v) = options.frequency_penalty {
-            gen_config.insert("frequency_penalty".into(), json!(v));
-        }
-        if let Some(v) = options.presence_penalty {
-            gen_config.insert("presence_penalty".into(), json!(v));
         }
         if let Some(seq) = &options.stop_sequences {
             if !seq.is_empty() {
@@ -548,18 +547,61 @@ fn build_request_body(
         if let Some(summaries) = &provider_opts.thinking_summaries {
             gen_config.insert("thinking_summaries".into(), json!(summaries));
         }
-        if let Some(mode) = &provider_opts.media_resolution {
-            gen_config.insert("media_resolution".into(), json!(mode));
-        }
-        if let Some(modalities) = &provider_opts.response_modalities {
-            gen_config.insert("response_modalities".into(), json!(modalities));
-        }
-        if let Some(tier) = &provider_opts.service_tier {
-            gen_config.insert("service_tier".into(), json!(tier));
-        }
         if !gen_config.is_empty() {
             body.insert("generation_config".into(), JsonValue::Object(gen_config));
         }
+        // Warn rather than silently drop the three unsupported knobs so
+        // callers porting from `:generateContent` notice the gap.
+        if options.top_k.is_some() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "topK".into(),
+                details: Some(
+                    "google.interactions: topK is not supported by the Interactions API.".into(),
+                ),
+            });
+        }
+        if options.frequency_penalty.is_some() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "frequencyPenalty".into(),
+                details: Some(
+                    "google.interactions: frequencyPenalty is not supported by the Interactions API.".into(),
+                ),
+            });
+        }
+        if options.presence_penalty.is_some() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "presencePenalty".into(),
+                details: Some(
+                    "google.interactions: presencePenalty is not supported by the Interactions API.".into(),
+                ),
+            });
+        }
+    }
+
+    // Top-level fields — upstream `:422-429` writes these in `args`, not in
+    // generation_config. Emit regardless of whether an agent is set.
+    if let Some(modalities) = &provider_opts.response_modalities {
+        body.insert("response_modalities".into(), json!(modalities));
+    }
+    if let Some(tier) = &provider_opts.service_tier {
+        body.insert("service_tier".into(), json!(tier));
+    }
+    if let Some(mode) = &provider_opts.media_resolution {
+        // Upstream feeds `mediaResolution` into `convertToGoogleInteractionsInput`
+        // (see `:248`), where it influences how user-message media parts are
+        // shaped. The Rust converter does not yet consume this knob, so for
+        // now we only emit a warning when callers set it to keep the wire
+        // strictly aligned with upstream. Once the converter learns to honor
+        // `media_resolution`, this branch should pipe the value through
+        // instead of warning.
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "google.mediaResolution".into(),
+            details: Some(format!(
+                "google.interactions: mediaResolution={mode} is recognized but the input \
+                 converter does not yet honor it. The request will be sent without \
+                 per-media-resolution shaping."
+            )),
+        });
     }
 
     if let Some(v) = &provider_opts.previous_interaction_id {
