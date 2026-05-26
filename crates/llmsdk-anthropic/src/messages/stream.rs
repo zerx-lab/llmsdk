@@ -28,8 +28,8 @@ use std::sync::Arc;
 use llmsdk_provider::language_model::{
     FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart,
 };
-use llmsdk_provider::shared::{ProviderMetadata, Warning};
-use serde_json::Map;
+use llmsdk_provider::shared::{ProviderMetadata, ProviderOptions, Warning};
+use serde_json::{Map, Value as JsonValue};
 
 use crate::config::GenerateIdFn;
 
@@ -49,6 +49,11 @@ enum BlockKind {
         id: String,
         name: String,
         arguments: String,
+        /// Normalized `caller` (`snake_case` `tool_id` → `camelCase` `toolId`)
+        /// pre-staged at `content_block_start` so the closing `tool-call`
+        /// frame can attach it via `provider_metadata.anthropic.caller`,
+        /// mirroring upstream `anthropic-language-model.ts:1659`.
+        caller: Option<JsonValue>,
     },
     /// Extended-thinking block; tracks the latest signature observed via
     /// `signature_delta`.
@@ -195,12 +200,15 @@ impl StreamState {
                     id,
                     name,
                     arguments,
+                    caller,
                 } => {
                     out.push(StreamPart::ToolInputEnd {
                         id: id.clone(),
                         provider_metadata: None,
                     });
-                    out.push(StreamPart::ToolCall(build_tool_call(id, name, arguments)));
+                    out.push(StreamPart::ToolCall(build_tool_call(
+                        id, name, arguments, caller,
+                    )));
                 }
                 BlockKind::Reasoning { id } => out.push(StreamPart::ReasoningEnd {
                     id,
@@ -250,17 +258,24 @@ impl StreamState {
                 }
                 out
             }
-            BlockStart::ToolUse { id, name, input } => {
+            BlockStart::ToolUse {
+                id,
+                name,
+                input,
+                caller,
+            } => {
                 let arguments = match input {
                     Some(v) if !v.is_null() => serde_json::to_string(&v).unwrap_or_default(),
                     _ => String::new(),
                 };
+                let normalized_caller = normalize_caller(caller.as_ref());
                 self.blocks.insert(
                     index,
                     BlockKind::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: arguments.clone(),
+                        caller: normalized_caller,
                     },
                 );
                 // Mark code_execution invocations as dynamic when the request
@@ -438,12 +453,13 @@ impl StreamState {
                 id,
                 name,
                 arguments,
+                caller,
             } => vec![
                 StreamPart::ToolInputEnd {
                     id: id.clone(),
                     provider_metadata: None,
                 },
-                StreamPart::ToolCall(build_tool_call(id, name, arguments)),
+                StreamPart::ToolCall(build_tool_call(id, name, arguments, caller)),
             ],
             BlockKind::Reasoning { id } => vec![StreamPart::ReasoningEnd {
                 id,
@@ -573,21 +589,57 @@ fn build_citation_source(citation: &serde_json::Value, id: String) -> Option<Sou
     }
 }
 
-fn build_tool_call(id: String, name: String, arguments: String) -> ToolCallPart {
+fn build_tool_call(
+    id: String,
+    name: String,
+    arguments: String,
+    caller: Option<JsonValue>,
+) -> ToolCallPart {
     let input = if arguments.is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
         serde_json::from_str::<serde_json::Value>(&arguments)
             .unwrap_or(serde_json::Value::String(arguments))
     };
+    // Mirror upstream anthropic-language-model.ts:2139-2145 — when a caller
+    // is present, attach it under provider_metadata.anthropic.caller so
+    // downstream multi-language consumers see the same providerMetadata
+    // shape as the non-streaming path (parse_response normalizes the same
+    // way).
+    let provider_options = caller.map(|c| {
+        let mut anthropic = Map::new();
+        anthropic.insert("caller".into(), c);
+        let mut po = ProviderOptions::new();
+        po.insert("anthropic".into(), anthropic);
+        po
+    });
     ToolCallPart {
         tool_call_id: id,
         tool_name: name,
         input,
         provider_executed: None,
         dynamic: None,
-        provider_options: None,
+        provider_options,
     }
+}
+
+/// Normalize an Anthropic `caller` payload from wire `snake_case`
+/// (`tool_id`) into the provider-metadata camelCase contract (`toolId`).
+///
+/// Mirrors `parse_response.rs`'s `tool_use` caller normalization and the
+/// upstream `callerInfo` helper in `anthropic-language-model.ts:984-990`
+/// (non-streaming) and `:1635-1642` (streaming). `direct` variants have
+/// no `tool_id`; the resulting object omits `toolId` per upstream
+/// `toolId: undefined` → JSON.stringify drop behavior.
+fn normalize_caller(caller: Option<&JsonValue>) -> Option<JsonValue> {
+    let obj = caller?.as_object()?;
+    let caller_type = obj.get("type")?.as_str()?.to_owned();
+    let mut normalized = Map::new();
+    normalized.insert("type".into(), JsonValue::String(caller_type));
+    if let Some(tool_id) = obj.get("tool_id").and_then(|v| v.as_str()) {
+        normalized.insert("toolId".into(), JsonValue::String(tool_id.to_owned()));
+    }
+    Some(JsonValue::Object(normalized))
 }
 
 #[cfg(test)]
@@ -684,6 +736,7 @@ mod tests {
                 id: "tu_a".into(),
                 name: "weather".into(),
                 input: None,
+                caller: None,
             },
         });
         assert!(matches!(f1[0], StreamPart::ToolInputStart { .. }));
@@ -721,6 +774,53 @@ mod tests {
         if let StreamPart::Finish { finish_reason, .. } = &tail[0] {
             assert_eq!(finish_reason.unified, FinishReasonKind::ToolCalls);
         }
+    }
+
+    #[test]
+    fn tool_use_stream_attaches_caller_to_provider_metadata() {
+        // Stream-path parity with parse_response: when
+        // content_block_start.tool_use ships `caller.tool_id`, the closing
+        // `tool-call` frame must carry it through `provider_metadata.anthropic.caller`
+        // with the snake_case → camelCase normalization that upstream
+        // anthropic-language-model.ts:1635-1642 + :2139-2145 perform.
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: None,
+                model: None,
+                usage: empty_usage(),
+            },
+        });
+
+        let _ = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::ToolUse {
+                id: "tu_caller".into(),
+                name: "query_db".into(),
+                input: Some(serde_json::json!({"sql": "SELECT 1"})),
+                caller: Some(serde_json::json!({
+                    "type": "code_execution_20250825",
+                    "tool_id": "srvtoolu_01CodeExec",
+                })),
+            },
+        });
+
+        let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
+        let StreamPart::ToolCall(tc) = &stop[1] else {
+            panic!("expected ToolCall at index 1");
+        };
+        let po = tc
+            .provider_options
+            .as_ref()
+            .expect("stream tool-call must carry caller in provider_options");
+        let caller = po.get("anthropic").unwrap().get("caller").unwrap();
+        assert_eq!(caller["type"], "code_execution_20250825");
+        assert_eq!(caller["toolId"], "srvtoolu_01CodeExec");
+        assert!(
+            caller.get("tool_id").is_none(),
+            "wire `snake_case` must be normalized"
+        );
     }
 
     #[test]

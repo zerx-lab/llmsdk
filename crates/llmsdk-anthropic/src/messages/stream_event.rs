@@ -77,6 +77,15 @@ pub(crate) enum BlockStart {
         name: String,
         #[serde(default)]
         input: Option<JsonValue>,
+        /// Programmatic-tool-call caller info — present when a tool is
+        /// invoked from inside code execution. Wire shape:
+        /// `{ type: "code_execution_20250825", tool_id: "srvtoolu_..." }`
+        /// or `{ type: "direct" }`. Forwarded into the tool-call's
+        /// `provider_metadata.anthropic.caller` after `snake_case` →
+        /// camelCase normalization, matching ai-sdk's
+        /// `anthropic-language-model.ts:1635-1642`.
+        #[serde(default)]
+        caller: Option<JsonValue>,
     },
     /// Extended-thinking block opened by the server.
     Thinking {
