@@ -57,9 +57,27 @@ pub(crate) fn parse_response(
                 caller,
                 dynamic,
             } => {
-                let provider_options = if caller.is_some() || dynamic.is_some() {
+                // Mirror upstream anthropic-language-model.ts:984-1003 —
+                // wire ships `caller.tool_id` (snake_case) but the
+                // provider-metadata API is documented and tested as
+                // `caller.toolId` (camelCase). Normalize on the way out so
+                // ai-sdk consumers reading `providerMetadata.anthropic.caller.toolId`
+                // see the same shape across language SDKs. `direct` variants
+                // omit `toolId` entirely (upstream `tool_id` is absent →
+                // JSON.stringify drops the undefined field).
+                let normalized_caller = caller.as_ref().and_then(|c| {
+                    let obj = c.as_object()?;
+                    let caller_type = obj.get("type")?.as_str()?.to_owned();
+                    let mut normalized = Map::new();
+                    normalized.insert("type".into(), JsonValue::String(caller_type));
+                    if let Some(tool_id) = obj.get("tool_id").and_then(|v| v.as_str()) {
+                        normalized.insert("toolId".into(), JsonValue::String(tool_id.to_owned()));
+                    }
+                    Some(JsonValue::Object(normalized))
+                });
+                let provider_options = if normalized_caller.is_some() || dynamic.is_some() {
                     let mut m = Map::new();
-                    if let Some(c) = caller {
+                    if let Some(c) = normalized_caller {
                         m.insert("caller".into(), c);
                     }
                     if let Some(d) = dynamic {
@@ -450,6 +468,92 @@ mod tests {
             panic!("expected tool call");
         }
         assert_eq!(r.finish_reason.unified, FinishReasonKind::ToolCalls);
+    }
+
+    #[test]
+    fn tool_use_normalizes_caller_snake_case_to_camel_case() {
+        // Mirrors upstream anthropic-language-model.test.ts assertion
+        // `expect(toolCall.providerMetadata).toEqual({ anthropic: { caller: {
+        //   type: 'code_execution_20250825', toolId: 'srvtoolu_01CodeExec' } } })`
+        // — wire ships `tool_id` (snake_case) which the provider-metadata
+        // contract exposes as `toolId` (camelCase) so multi-language SDKs
+        // see the same key.
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ToolUse {
+                id: "tu_1".into(),
+                name: "query_db".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+                caller: Some(serde_json::json!({
+                    "type": "code_execution_20250825",
+                    "tool_id": "srvtoolu_01CodeExec",
+                })),
+                dynamic: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let Content::ToolCall(tc) = &r.content[0] else {
+            panic!("expected tool call");
+        };
+        let po = tc.provider_options.as_ref().expect("caller drives po");
+        let caller = po.get("anthropic").unwrap().get("caller").unwrap();
+        assert_eq!(caller["type"], "code_execution_20250825");
+        assert_eq!(caller["toolId"], "srvtoolu_01CodeExec");
+        assert!(
+            caller.get("tool_id").is_none(),
+            "wire-shaped snake_case key must be normalized away"
+        );
+    }
+
+    #[test]
+    fn tool_use_direct_caller_omits_tool_id() {
+        // Mirrors upstream: `caller: { type: 'direct' }` (no `tool_id`)
+        // becomes `{ type: 'direct', toolId: undefined }` which JSON.stringify
+        // drops — i.e., the resulting providerMetadata.caller has no toolId
+        // key at all.
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ToolUse {
+                id: "tu_2".into(),
+                name: "get_weather".into(),
+                input: serde_json::json!({"city": "Tokyo"}),
+                caller: Some(serde_json::json!({ "type": "direct" })),
+                dynamic: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let Content::ToolCall(tc) = &r.content[0] else {
+            panic!("expected tool call");
+        };
+        let po = tc.provider_options.as_ref().expect("caller drives po");
+        let caller = po.get("anthropic").unwrap().get("caller").unwrap();
+        assert_eq!(caller["type"], "direct");
+        assert!(
+            caller.get("toolId").is_none(),
+            "direct variant omits toolId"
+        );
     }
 
     #[test]

@@ -452,8 +452,36 @@ fn push_assistant_tool_call(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
-    // Plain client-side function call.
-    if tc.provider_executed != Some(true) && provider_tool_id.is_none() {
+    // Mirror upstream `convert-to-openai-responses-input.ts:304-317`.
+    // In `store` mode the Responses API retains prior tool calls server-side,
+    // so re-emitting the full payload duplicates state. When `id` is known we
+    // collapse to an `item_reference`; if the conversation also chains via
+    // `previous_response_id`, the prior call is already linked and we drop the
+    // emission entirely. Provider-executed calls follow the same shape with no
+    // `previous_response_id` skip (upstream lines 304-309).
+    if tc.provider_executed == Some(true) {
+        if ctx.store {
+            if let Some(ref_id) = id {
+                items.push(InputItem::Typed(TypedInputItem::ItemReference {
+                    id: ref_id,
+                }));
+            }
+        }
+        return;
+    }
+
+    if let (true, Some(ref_id)) = (ctx.store, id.as_deref()) {
+        if ctx.has_previous_response_id {
+            return;
+        }
+        items.push(InputItem::Typed(TypedInputItem::ItemReference {
+            id: ref_id.to_owned(),
+        }));
+        return;
+    }
+
+    // Plain client-side function call (no store, or store with no itemId).
+    if provider_tool_id.is_none() {
         items.push(InputItem::Typed(TypedInputItem::FunctionCall {
             call_id: tc.tool_call_id.clone(),
             name: tc.tool_name.clone(),
@@ -500,23 +528,6 @@ fn push_assistant_tool_call(
                 warnings.push(Warning::Other {
                     message: format!(
                         "assistant tool-call {} carried unparsable local_shell input",
-                        tc.tool_call_id
-                    ),
-                });
-            }
-        }
-        // Provider-executed tools whose history is reconstructed via item_reference
-        // (web_search / file_search / etc.) — emit an `item_reference` that points
-        // back to the original output id.
-        _ if tc.provider_executed == Some(true) => {
-            if let Some(ref_id) = id {
-                items.push(InputItem::Typed(TypedInputItem::ItemReference {
-                    id: ref_id,
-                }));
-            } else {
-                warnings.push(Warning::Other {
-                    message: format!(
-                        "provider-executed tool call {} missing itemId — cannot reconstruct history",
                         tc.tool_call_id
                     ),
                 });
@@ -1093,6 +1104,90 @@ mod tests {
             },
         );
         assert!(out.is_empty(), "tool-call with itemId must be skipped");
+    }
+
+    #[test]
+    fn tool_call_with_store_and_item_id_becomes_item_reference() {
+        // Mirrors upstream convert-to-openai-responses-input.test.ts:1280-1303
+        // ("should convert multiple tool-call parts with store: true to item_reference"):
+        // when `store: true` and the tool call carries an itemId, the Responses
+        // API already has the call server-side — emit an `item_reference` rather
+        // than re-shipping the full function_call envelope.
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                input: json!({"city": "NYC"}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: Some(po_with_item_id("fc_existing")),
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        assert_eq!(out.len(), 1, "expected exactly one item_reference");
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["type"], "item_reference");
+        assert_eq!(v["id"], "fc_existing");
+    }
+
+    #[test]
+    fn tool_call_with_store_and_previous_response_id_is_skipped() {
+        // Mirrors upstream convert-to-openai-responses-input.ts:311-314 — when
+        // `previous_response_id` chains the call, the prior tool_call lives in
+        // the linked response and must not be re-emitted, not even as an
+        // item_reference.
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                input: json!({"city": "NYC"}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: Some(po_with_item_id("fc_existing")),
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_previous_response_id: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.is_empty(),
+            "tool-call with store + previous_response_id + itemId must be skipped"
+        );
+    }
+
+    #[test]
+    fn tool_call_without_store_keeps_function_call() {
+        // Negative control: when `store: false`, the conversation does not live
+        // on the server, so the full function_call envelope must still ship.
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                input: json!({"city": "NYC"}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: Some(po_with_item_id("fc_existing")),
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                store: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["type"], "function_call");
+        assert_eq!(v["call_id"], "call_1");
+        assert_eq!(v["name"], "weather");
     }
 
     #[test]
