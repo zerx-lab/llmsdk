@@ -185,6 +185,40 @@ fn build_request(
 
     let (image, images) = build_image_references(&image_urls);
 
+    // Mirror upstream zod enums in xai-image-model-options.ts:6-7:
+    // `quality: z.enum(['low','medium','high'])` and
+    // `resolution: z.enum(['1k','2k'])`. Reject invalid values with an
+    // `Unsupported` warning rather than forwarding them to the server
+    // (which would 4xx with an opaque error). Mirrors zod's strict-enum
+    // behavior; we degrade gracefully (warn + drop) instead of panicking
+    // because llmsdk's parse path is forgiving by design.
+    let quality = match xai.quality.as_deref() {
+        None => None,
+        Some(v @ ("low" | "medium" | "high")) => Some(v.to_owned()),
+        Some(other) => {
+            warnings.push(Warning::Unsupported {
+                feature: "xai.quality".into(),
+                details: Some(format!(
+                    "xai quality \"{other}\" is not a recognized preset (\"low\" / \"medium\" / \"high\"); ignored."
+                )),
+            });
+            None
+        }
+    };
+    let resolution = match xai.resolution.as_deref() {
+        None => None,
+        Some(v @ ("1k" | "2k")) => Some(v.to_owned()),
+        Some(other) => {
+            warnings.push(Warning::Unsupported {
+                feature: "xai.resolution".into(),
+                details: Some(format!(
+                    "xai resolution \"{other}\" is not a recognized preset (\"1k\" / \"2k\"); ignored."
+                )),
+            });
+            None
+        }
+    };
+
     let request = ImageRequest {
         model: model_id.to_owned(),
         prompt: options.prompt.clone(),
@@ -193,8 +227,8 @@ fn build_request(
         aspect_ratio,
         output_format: xai.output_format.clone(),
         sync_mode: xai.sync_mode,
-        resolution: xai.resolution.clone(),
-        quality: xai.quality.clone(),
+        resolution,
+        quality,
         user: xai.user.clone(),
         image,
         images,

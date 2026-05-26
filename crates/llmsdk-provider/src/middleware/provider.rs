@@ -12,17 +12,22 @@
 
 use std::sync::Arc;
 
-use crate::embedding_model::EmbeddingModel;
 use crate::error::Result;
 use crate::image_model::ImageModel;
 use crate::language_model::LanguageModel;
 use crate::provider::{DynEmbeddingModel, DynImageModel, DynLanguageModel, Provider};
 
-use super::embedding_model::{EmbeddingModelMiddleware, wrap_embedding_model};
 use super::image_model::{ImageModelMiddleware, wrap_image_model};
 use super::language_model::{LanguageModelMiddleware, wrap_language_model};
 
-/// Three middleware chains, one per model surface.
+/// Two middleware chains: one for language models, one for image models.
+///
+/// Mirrors the upstream `wrapProvider({ languageModelMiddleware,
+/// imageModelMiddleware })` surface in
+/// `packages/ai/src/middleware/wrap-provider.ts:20-50`. Upstream
+/// **deliberately** does not expose embedding / reranking / video / speech /
+/// transcription middleware here — those model surfaces are forwarded
+/// verbatim and any wrapping happens via the per-model `wrap_*` helpers.
 ///
 /// Passing an empty `Vec` for a surface leaves that surface untouched.
 #[derive(Default, Clone)]
@@ -30,9 +35,6 @@ pub struct ProviderMiddlewareSet {
     /// Middleware applied to every [`LanguageModel`] returned by
     /// [`Provider::language_model`].
     pub language: Vec<Arc<dyn LanguageModelMiddleware>>,
-    /// Middleware applied to every [`EmbeddingModel`] returned by
-    /// [`Provider::embedding_model`].
-    pub embedding: Vec<Arc<dyn EmbeddingModelMiddleware>>,
     /// Middleware applied to every [`ImageModel`] returned by
     /// [`Provider::image_model`].
     pub image: Vec<Arc<dyn ImageModelMiddleware>>,
@@ -42,7 +44,6 @@ impl std::fmt::Debug for ProviderMiddlewareSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderMiddlewareSet")
             .field("language", &self.language.len())
-            .field("embedding", &self.embedding.len())
             .field("image", &self.image.len())
             .finish()
     }
@@ -88,13 +89,11 @@ impl Provider for WrappedProvider {
     }
 
     fn embedding_model(&self, model_id: &str) -> Result<DynEmbeddingModel> {
-        let dyn_model = self.inner.embedding_model(model_id)?;
-        if self.set.embedding.is_empty() {
-            return Ok(dyn_model);
-        }
-        let arc: Arc<dyn EmbeddingModel> = dyn_model.into_inner();
-        let wrapped = wrap_embedding_model(arc, self.set.embedding.iter().cloned());
-        Ok(DynEmbeddingModel::from_arc(wrapped))
+        // Mirror upstream `wrap-provider.ts:37` —
+        // `embeddingModel: providerV4.embeddingModel` (verbatim forward,
+        // no middleware). Callers needing per-call embedding middleware use
+        // `wrap_embedding_model` directly on a specific model handle.
+        self.inner.embedding_model(model_id)
     }
 
     fn image_model(&self, model_id: &str) -> Result<DynImageModel> {
@@ -116,7 +115,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::embedding_model::{EmbedOptions, EmbedResult};
+    use crate::embedding_model::{EmbedOptions, EmbedResult, EmbeddingModel};
     use crate::language_model::{
         CallOptions, FinishReason, FinishReasonKind, GenerateResult, StreamResult, Usage,
     };
@@ -212,27 +211,14 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct CountingEmbed(Arc<Counter>);
-
-    #[async_trait]
-    impl EmbeddingModelMiddleware for CountingEmbed {
-        async fn transform_params(
-            &self,
-            params: EmbedOptions,
-            _inner: &dyn EmbeddingModel,
-        ) -> Result<EmbedOptions> {
-            self.0.embed_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(params)
-        }
-    }
-
     #[tokio::test]
-    async fn wraps_language_and_embedding_surfaces() {
+    async fn wraps_language_surface_only_embedding_passes_through() {
+        // Mirrors upstream wrap-provider.ts:32-37 — language goes through
+        // wrap_language_model, embedding is forwarded verbatim (no
+        // wrapping). The middleware never observes the embedding call.
         let counter = Arc::new(Counter::default());
         let set = ProviderMiddlewareSet {
             language: vec![Arc::new(CountingLang(Arc::clone(&counter)))],
-            embedding: vec![Arc::new(CountingEmbed(Arc::clone(&counter)))],
             image: vec![],
         };
         let wrapped = wrap_provider(Arc::new(StubProvider), set);
@@ -244,9 +230,12 @@ mod tests {
         assert_eq!(counter.lang_calls.load(Ordering::SeqCst), 1);
         assert_eq!(*counter.last_temp.lock().expect("mutex"), Some(0.5));
 
+        // Embedding model is reachable but never routed through the
+        // middleware (which is *not* configured at the provider level).
         let em = wrapped.embedding_model("anything").expect("embed");
         em.do_embed(EmbedOptions::default()).await.expect("embed");
-        assert_eq!(counter.embed_calls.load(Ordering::SeqCst), 1);
+        // CountingEmbed was never installed → counter stays at 0.
+        assert_eq!(counter.embed_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
