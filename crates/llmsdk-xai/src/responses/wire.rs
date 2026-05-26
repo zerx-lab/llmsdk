@@ -398,6 +398,218 @@ pub(crate) enum ResponsesChunk {
         #[serde(default)]
         input: Option<String>,
     },
+    #[serde(rename = "response.content_part.added")]
+    ContentPartAdded {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+        #[serde(default)]
+        content_index: Option<u32>,
+    },
+    #[serde(rename = "response.content_part.done")]
+    ContentPartDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+        #[serde(default)]
+        content_index: Option<u32>,
+    },
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ReasoningSummaryPartDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        summary_index: Option<u32>,
+    },
+    // ----- Tool-call lifecycle events ---------------------------------
+    //
+    // ai-sdk's xai-responses-language-model.ts does not consume these
+    // status frames directly (they are surfaced via the matching
+    // `response.output_item.added` / `.done` envelope). They are listed
+    // explicitly so the wire schema is 1:1 with `xai-responses-api.ts`
+    // and future status events can be migrated without re-parsing the
+    // catch-all variant.
+    #[serde(rename = "response.web_search_call.in_progress")]
+    WebSearchCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.web_search_call.searching")]
+    WebSearchCallSearching {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.web_search_call.completed")]
+    WebSearchCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.x_search_call.in_progress")]
+    XSearchCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.x_search_call.searching")]
+    XSearchCallSearching {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.x_search_call.completed")]
+    XSearchCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.file_search_call.in_progress")]
+    FileSearchCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.file_search_call.searching")]
+    FileSearchCallSearching {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.file_search_call.completed")]
+    FileSearchCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_execution_call.in_progress")]
+    CodeExecutionCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_execution_call.executing")]
+    CodeExecutionCallExecuting {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_execution_call.completed")]
+    CodeExecutionCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_interpreter_call.in_progress")]
+    CodeInterpreterCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_interpreter_call.executing")]
+    CodeInterpreterCallExecuting {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_interpreter_call.interpreting")]
+    CodeInterpreterCallInterpreting {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_interpreter_call.completed")]
+    CodeInterpreterCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.code_interpreter_call_code.delta")]
+    CodeInterpreterCallCodeDelta {
+        #[serde(default)]
+        item_id: Option<String>,
+        delta: String,
+    },
+    #[serde(rename = "response.code_interpreter_call_code.done")]
+    CodeInterpreterCallCodeDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    },
+    #[serde(rename = "response.mcp_call.in_progress")]
+    McpCallInProgress {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.mcp_call.executing")]
+    McpCallExecuting {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.mcp_call.completed")]
+    McpCallCompleted {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.mcp_call.failed")]
+    McpCallFailed {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output_index: Option<u32>,
+    },
+    #[serde(rename = "response.mcp_call_arguments.delta")]
+    McpCallArgumentsDelta {
+        #[serde(default)]
+        item_id: Option<String>,
+        delta: String,
+    },
+    #[serde(rename = "response.mcp_call_arguments.done")]
+    McpCallArgumentsDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        arguments: Option<String>,
+    },
+    #[serde(rename = "response.mcp_call_output.delta")]
+    McpCallOutputDelta {
+        #[serde(default)]
+        item_id: Option<String>,
+        delta: String,
+    },
+    #[serde(rename = "response.mcp_call_output.done")]
+    McpCallOutputDone {
+        #[serde(default)]
+        item_id: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+    },
     #[serde(rename = "response.done")]
     ResponseDone { response: ResponsesResponse },
     #[serde(rename = "response.completed")]

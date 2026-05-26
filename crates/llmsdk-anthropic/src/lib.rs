@@ -74,7 +74,7 @@ pub use skills::AnthropicSkills;
 /// [`EndpointFn`]: crate::config::EndpointFn
 /// [`BodyTransformFn`]: crate::config::BodyTransformFn
 pub mod internal {
-    pub use crate::config::{BodyTransformFn, EndpointFn, Inner, InnerBuilder};
+    pub use crate::config::{BodyTransformFn, EndpointFn, GenerateIdFn, Inner, InnerBuilder};
     pub use crate::messages::AnthropicMessagesModel;
 }
 

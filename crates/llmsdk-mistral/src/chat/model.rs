@@ -198,8 +198,19 @@ fn build_request(
     let reasoning_effort =
         resolve_reasoning_effort(model_id, &mistral_opts, options.reasoning, &mut warnings);
 
-    let (messages, msg_warnings) = convert_prompt(&options.prompt)?;
+    let (mut messages, msg_warnings) = convert_prompt(&options.prompt)?;
     warnings.extend(msg_warnings);
+
+    // Mistral needs an explicit instruction when caller asks for a generic
+    // JSON response (json mode without a schema) — mirrors ai-sdk's
+    // `injectJsonInstructionIntoMessages`. See:
+    //   https://docs.mistral.ai/capabilities/structured-output/structured_output_overview/
+    if matches!(
+        options.response_format.as_ref(),
+        Some(ResponseFormat::Json { schema: None, .. })
+    ) {
+        inject_json_instruction(&mut messages);
+    }
 
     let prepared = prepare_tools(
         options.tools.as_deref().unwrap_or(&[]),
@@ -238,6 +249,31 @@ fn build_request(
     };
 
     Ok((request, warnings))
+}
+
+/// Append a JSON instruction to the leading system message, creating one if
+/// absent. Mirrors `injectJsonInstructionIntoMessages` in
+/// `@ai-sdk/provider-utils`.
+fn inject_json_instruction(messages: &mut Vec<super::wire::WireMessage>) {
+    const SUFFIX: &str = "You MUST answer with JSON.";
+    match messages.first_mut() {
+        Some(super::wire::WireMessage::System { content }) => {
+            if content.is_empty() {
+                SUFFIX.clone_into(content);
+            } else {
+                content.push('\n');
+                content.push_str(SUFFIX);
+            }
+        }
+        _ => {
+            messages.insert(
+                0,
+                super::wire::WireMessage::System {
+                    content: SUFFIX.to_owned(),
+                },
+            );
+        }
+    }
 }
 
 fn convert_response_format(

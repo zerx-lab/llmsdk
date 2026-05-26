@@ -76,13 +76,22 @@ impl AzureOpenAi {
 
     /// Construct a Responses API model handle (Azure `azure.responses`).
     ///
-    /// This is the default surface returned by [`languageModel`] on the
-    /// upstream JS provider; in Rust we expose only this explicit factory.
+    /// This is the default surface returned by [`language_model`] on the
+    /// upstream JS provider; both factories are equivalent.
     ///
-    /// [`languageModel`]: https://sdk.vercel.ai/docs/reference/ai-sdk-providers/azure
+    /// [`language_model`]: Self::language_model
     #[must_use]
     pub fn responses(&self, deployment_id: impl Into<String>) -> OpenAiResponsesLanguageModel {
         OpenAiResponsesLanguageModel::new(Arc::clone(&self.responses_inner), deployment_id.into())
+    }
+
+    /// Default language-model factory — alias for [`responses`](Self::responses).
+    ///
+    /// Mirrors the upstream `azure.languageModel(id)` accessor that returns
+    /// the Responses API by default.
+    #[must_use]
+    pub fn language_model(&self, deployment_id: impl Into<String>) -> OpenAiResponsesLanguageModel {
+        self.responses(deployment_id)
     }
 
     /// Construct a text Embeddings model handle (Azure `azure.embeddings`).

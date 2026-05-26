@@ -420,6 +420,27 @@ struct InteractionsProviderOptions {
     environment: Option<JsonValue>,
 }
 
+/// Rewrite agent_config field names from `camelCase` (ai-sdk wire-format
+/// from JS callers) to `snake_case` (Interactions API on-wire). Mirrors
+/// the explicit mapping in
+/// `google-interactions-language-model.ts:345-358`.
+fn normalize_agent_config(value: JsonValue) -> JsonValue {
+    let JsonValue::Object(map) = value else {
+        return value;
+    };
+    let mut out = JsonMap::new();
+    for (key, value) in map {
+        let renamed = match key.as_str() {
+            "thinkingSummaries" => "thinking_summaries".to_owned(),
+            "collaborativePlanning" => "collaborative_planning".to_owned(),
+            // `type`, `visualization`, and any other snake_case key pass through.
+            _ => key,
+        };
+        out.insert(renamed, value);
+    }
+    JsonValue::Object(out)
+}
+
 fn parse_provider_options(po: Option<&ProviderOptions>) -> InteractionsProviderOptions {
     let Some(map) = po else {
         return InteractionsProviderOptions::default();
@@ -447,52 +468,98 @@ fn build_request_body(
         body.insert("stream".into(), JsonValue::Bool(true));
     }
 
+    let is_agent = agent.is_agent();
+
     // Generation config (max_output_tokens / temperature / top_p / top_k /
     // stop_sequences / seed / frequency_penalty / presence_penalty).
-    let mut gen_config = JsonMap::new();
-    if let Some(v) = options.max_output_tokens {
-        gen_config.insert("max_output_tokens".into(), json!(v));
-    }
-    if let Some(v) = options.temperature {
-        gen_config.insert("temperature".into(), json!(v));
-    }
-    if let Some(v) = options.top_p {
-        gen_config.insert("top_p".into(), json!(v));
-    }
-    if let Some(v) = options.top_k {
-        gen_config.insert("top_k".into(), json!(v));
-    }
-    if let Some(v) = options.frequency_penalty {
-        gen_config.insert("frequency_penalty".into(), json!(v));
-    }
-    if let Some(v) = options.presence_penalty {
-        gen_config.insert("presence_penalty".into(), json!(v));
-    }
-    if let Some(seq) = &options.stop_sequences {
-        if !seq.is_empty() {
-            gen_config.insert("stop_sequences".into(), json!(seq));
+    // When an agent is set, the API rejects these fields — drop them and
+    // emit a single warning naming each dropped field, matching ai-sdk's
+    // `google-interactions-language-model.ts:277-298`.
+    if is_agent {
+        let mut dropped: Vec<&str> = Vec::new();
+        if options.temperature.is_some() {
+            dropped.push("temperature");
         }
-    }
-    if let Some(seed) = options.seed {
-        gen_config.insert("seed".into(), json!(seed));
-    }
-    if let Some(level) = &provider_opts.thinking_level {
-        gen_config.insert("thinking_level".into(), json!(level));
-    }
-    if let Some(summaries) = &provider_opts.thinking_summaries {
-        gen_config.insert("thinking_summaries".into(), json!(summaries));
-    }
-    if let Some(mode) = &provider_opts.media_resolution {
-        gen_config.insert("media_resolution".into(), json!(mode));
-    }
-    if let Some(modalities) = &provider_opts.response_modalities {
-        gen_config.insert("response_modalities".into(), json!(modalities));
-    }
-    if let Some(tier) = &provider_opts.service_tier {
-        gen_config.insert("service_tier".into(), json!(tier));
-    }
-    if !gen_config.is_empty() {
-        body.insert("generation_config".into(), JsonValue::Object(gen_config));
+        if options.top_p.is_some() {
+            dropped.push("topP");
+        }
+        if options.seed.is_some() {
+            dropped.push("seed");
+        }
+        if options
+            .stop_sequences
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+        {
+            dropped.push("stopSequences");
+        }
+        if options.max_output_tokens.is_some() {
+            dropped.push("maxOutputTokens");
+        }
+        if provider_opts.thinking_level.is_some() {
+            dropped.push("thinkingLevel");
+        }
+        if provider_opts.thinking_summaries.is_some() {
+            dropped.push("thinkingSummaries");
+        }
+        if provider_opts.image_config.is_some() {
+            dropped.push("imageConfig");
+        }
+        if !dropped.is_empty() {
+            let verb = if dropped.len() == 1 { "is" } else { "are" };
+            warnings.push(Warning::Other {
+                message: format!(
+                    "google.interactions: {} {verb} not supported when an agent is set; use providerOptions.google.agentConfig instead. Dropped from the request body.",
+                    dropped.join(", ")
+                ),
+            });
+        }
+    } else {
+        let mut gen_config = JsonMap::new();
+        if let Some(v) = options.max_output_tokens {
+            gen_config.insert("max_output_tokens".into(), json!(v));
+        }
+        if let Some(v) = options.temperature {
+            gen_config.insert("temperature".into(), json!(v));
+        }
+        if let Some(v) = options.top_p {
+            gen_config.insert("top_p".into(), json!(v));
+        }
+        if let Some(v) = options.top_k {
+            gen_config.insert("top_k".into(), json!(v));
+        }
+        if let Some(v) = options.frequency_penalty {
+            gen_config.insert("frequency_penalty".into(), json!(v));
+        }
+        if let Some(v) = options.presence_penalty {
+            gen_config.insert("presence_penalty".into(), json!(v));
+        }
+        if let Some(seq) = &options.stop_sequences {
+            if !seq.is_empty() {
+                gen_config.insert("stop_sequences".into(), json!(seq));
+            }
+        }
+        if let Some(seed) = options.seed {
+            gen_config.insert("seed".into(), json!(seed));
+        }
+        if let Some(level) = &provider_opts.thinking_level {
+            gen_config.insert("thinking_level".into(), json!(level));
+        }
+        if let Some(summaries) = &provider_opts.thinking_summaries {
+            gen_config.insert("thinking_summaries".into(), json!(summaries));
+        }
+        if let Some(mode) = &provider_opts.media_resolution {
+            gen_config.insert("media_resolution".into(), json!(mode));
+        }
+        if let Some(modalities) = &provider_opts.response_modalities {
+            gen_config.insert("response_modalities".into(), json!(modalities));
+        }
+        if let Some(tier) = &provider_opts.service_tier {
+            gen_config.insert("service_tier".into(), json!(tier));
+        }
+        if !gen_config.is_empty() {
+            body.insert("generation_config".into(), JsonValue::Object(gen_config));
+        }
     }
 
     if let Some(v) = &provider_opts.previous_interaction_id {
@@ -504,8 +571,16 @@ fn build_request_body(
     if let Some(v) = provider_opts.background {
         body.insert("background".into(), json!(v));
     }
-    if let Some(v) = &provider_opts.agent_config {
-        body.insert("agent_config".into(), v.clone());
+    if is_agent {
+        if let Some(v) = &provider_opts.agent_config {
+            body.insert("agent_config".into(), normalize_agent_config(v.clone()));
+        }
+    } else if provider_opts.agent_config.is_some() {
+        warnings.push(Warning::Other {
+            message:
+                "google.interactions: agentConfig is only supported when an agent is set; ignored."
+                    .to_owned(),
+        });
     }
     if let Some(v) = &provider_opts.environment {
         body.insert("environment".into(), v.clone());

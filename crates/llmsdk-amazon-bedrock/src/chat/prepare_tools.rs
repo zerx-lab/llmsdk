@@ -7,6 +7,8 @@
 //! does not host it) and surfaces an `UnsupportedTool` warning.
 // Rust guideline compliant 2026-05-25
 
+use std::collections::BTreeSet;
+
 use llmsdk_provider::language_model::{Tool, ToolChoice};
 use llmsdk_provider::shared::Warning;
 use serde_json::{Map, Value};
@@ -21,6 +23,13 @@ pub(crate) struct PreparedTools {
     pub tool_config: Option<ToolConfig>,
     /// Warnings emitted for unsupported / filtered tools.
     pub warnings: Vec<Warning>,
+    /// Extra fields merged into `additionalModelRequestFields` — currently
+    /// only used to forward Anthropic `tool_choice` on Anthropic-on-Bedrock,
+    /// matching ai-sdk's `additionalTools` return value.
+    pub additional_tools: Option<Map<String, Value>>,
+    /// Beta tokens collected from Anthropic provider-defined tools; the
+    /// caller merges these into `additionalModelRequestFields.anthropic_beta`.
+    pub betas: BTreeSet<String>,
 }
 
 /// Convert tool definitions + tool-choice into Bedrock's `toolConfig`.
@@ -30,21 +39,27 @@ pub(crate) fn prepare_tools(
     model_id: &str,
 ) -> PreparedTools {
     let mut warnings: Vec<Warning> = Vec::new();
+    let mut betas: BTreeSet<String> = BTreeSet::new();
     let Some(tools) = tools else {
         return PreparedTools {
             tool_config: None,
             warnings,
+            additional_tools: None,
+            betas,
         };
     };
     if tools.is_empty() {
         return PreparedTools {
             tool_config: None,
             warnings,
+            additional_tools: None,
+            betas,
         };
     }
 
     let is_anthropic_model = model_id.contains("anthropic.");
     let mut specs: Vec<ToolConfigEntry> = Vec::with_capacity(tools.len());
+    let mut has_anthropic_provider_tool = false;
 
     for tool in tools {
         match tool {
@@ -88,6 +103,10 @@ pub(crate) fn prepare_tools(
                     });
                     continue;
                 }
+                has_anthropic_provider_tool = true;
+                for token in anthropic_provider_tool_betas(&p.id) {
+                    betas.insert((*token).to_owned());
+                }
                 let schema = p
                     .args
                     .clone()
@@ -108,19 +127,48 @@ pub(crate) fn prepare_tools(
         return PreparedTools {
             tool_config: None,
             warnings,
+            additional_tools: None,
+            betas,
         };
     }
 
-    let tool_choice_wire = tool_choice.and_then(|choice| match choice {
-        ToolChoice::Auto => Some(ToolChoiceWire::Auto { auto: Map::new() }),
-        ToolChoice::Required => Some(ToolChoiceWire::Any { any: Map::new() }),
-        ToolChoice::None => None, // upstream drops both tools + choice in this case
-        ToolChoice::Tool { tool_name } => Some(ToolChoiceWire::Tool {
-            tool: ToolChoiceTool {
-                name: tool_name.clone(),
-            },
-        }),
-    });
+    // For Anthropic-on-Bedrock when at least one anthropic.* provider tool is
+    // present, the tool_choice MUST be sent via additionalModelRequestFields
+    // (Anthropic wire shape) rather than toolConfig.toolChoice (Bedrock shape).
+    // Mirrors ai-sdk's amazon-bedrock-prepare-tools.ts behavior.
+    let uses_anthropic_routing = has_anthropic_provider_tool && is_anthropic_model;
+    let mut additional_tools: Option<Map<String, Value>> = None;
+    let mut tool_choice_wire: Option<ToolChoiceWire> = None;
+
+    if uses_anthropic_routing {
+        if let Some(choice) = tool_choice {
+            let anthropic_choice = match choice {
+                ToolChoice::Auto => Some(serde_json::json!({ "type": "auto" })),
+                ToolChoice::Required => Some(serde_json::json!({ "type": "any" })),
+                ToolChoice::None => None,
+                ToolChoice::Tool { tool_name } => Some(serde_json::json!({
+                    "type": "tool",
+                    "name": tool_name,
+                })),
+            };
+            if let Some(value) = anthropic_choice {
+                let mut map = Map::new();
+                map.insert("tool_choice".to_owned(), value);
+                additional_tools = Some(map);
+            }
+        }
+    } else {
+        tool_choice_wire = tool_choice.and_then(|choice| match choice {
+            ToolChoice::Auto => Some(ToolChoiceWire::Auto { auto: Map::new() }),
+            ToolChoice::Required => Some(ToolChoiceWire::Any { any: Map::new() }),
+            ToolChoice::None => None,
+            ToolChoice::Tool { tool_name } => Some(ToolChoiceWire::Tool {
+                tool: ToolChoiceTool {
+                    name: tool_name.clone(),
+                },
+            }),
+        });
+    }
 
     let tool_config = ToolConfig {
         tools: Some(specs),
@@ -130,6 +178,33 @@ pub(crate) fn prepare_tools(
     PreparedTools {
         tool_config: Some(tool_config),
         warnings,
+        additional_tools,
+        betas,
+    }
+}
+
+/// Map an `anthropic.*` provider-tool id to the beta header tokens it
+/// requires. Mirrors the `betas.add(...)` table in ai-sdk's
+/// `anthropic-prepare-tools.ts`.
+fn anthropic_provider_tool_betas(id: &str) -> &'static [&'static str] {
+    match id {
+        "anthropic.code_execution_20250522" => &["code-execution-2025-05-22"],
+        "anthropic.code_execution_20250825" => &["code-execution-2025-08-25"],
+        "anthropic.computer_20241022"
+        | "anthropic.text_editor_20241022"
+        | "anthropic.bash_20241022" => &["computer-use-2024-10-22"],
+        "anthropic.computer_20250124"
+        | "anthropic.text_editor_20250124"
+        | "anthropic.text_editor_20250429"
+        | "anthropic.bash_20250124" => &["computer-use-2025-01-24"],
+        "anthropic.computer_20251124" => &["computer-use-2025-11-24"],
+        "anthropic.memory_20250818" => &["context-management-2025-06-27"],
+        "anthropic.web_fetch_20250910" => &["web-fetch-2025-09-10"],
+        "anthropic.web_fetch_20260209" | "anthropic.web_search_20260209" => {
+            &["code-execution-web-tools-2026-02-09"]
+        }
+        "anthropic.advisor_20260301" => &["advisor-tool-2026-03-01"],
+        _ => &[],
     }
 }
 

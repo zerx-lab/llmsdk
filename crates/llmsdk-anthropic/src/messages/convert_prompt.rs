@@ -30,6 +30,10 @@ pub(crate) struct Converted {
     pub system: Option<String>,
     pub messages: Vec<WireMessage>,
     pub warnings: Vec<Warning>,
+    /// Beta tokens collected from message conversion (e.g. Files-API
+    /// references require `files-api-2025-04-14`). Caller merges these
+    /// into the request-level beta header.
+    pub betas: std::collections::BTreeSet<String>,
 }
 
 /// Convert a prompt; collect warnings about dropped parts.
@@ -42,12 +46,13 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
     let mut systems: Vec<&str> = Vec::new();
     let mut messages: Vec<WireMessage> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
+    let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for message in prompt {
         match message {
             Message::System { content, .. } => systems.push(content.as_str()),
             Message::User { content, .. } => {
-                let parts = convert_user(content, &mut warnings);
+                let parts = convert_user(content, &mut warnings, &mut betas);
                 push_user(&mut messages, parts);
             }
             Message::Assistant { content, .. } => {
@@ -55,7 +60,7 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
                 messages.push(WireMessage::Assistant { content: parts });
             }
             Message::Tool { content, .. } => {
-                let parts = convert_tool(content, &mut warnings);
+                let parts = convert_tool(content, &mut warnings, &mut betas);
                 push_user(&mut messages, parts);
             }
         }
@@ -71,6 +76,7 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
         system,
         messages,
         warnings,
+        betas,
     }
 }
 
@@ -87,7 +93,15 @@ fn push_user(messages: &mut Vec<WireMessage>, mut parts: Vec<WireUserPart>) {
     }
 }
 
-fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> Vec<WireUserPart> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "single dispatcher over all UserPart variants; splitting would scatter the wire-mapping logic"
+)]
+fn convert_user(
+    parts: &[UserPart],
+    warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
+) -> Vec<WireUserPart> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
@@ -111,7 +125,22 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> Vec<WireUser
                             media_type: f.media_type.clone(),
                             data: file_bytes_to_base64(data),
                         },
-                        FileData::Reference { .. } | FileData::Text { .. } => {
+                        FileData::Reference { reference } => {
+                            if let Some(file_id) = resolve_anthropic_file_id(reference) {
+                                betas.insert("files-api-2025-04-14".to_owned());
+                                WireImageSource::File { file_id }
+                            } else {
+                                warnings.push(Warning::UnsupportedSetting {
+                                    setting: "user.file.data".to_owned(),
+                                    details: Some(
+                                        "image file reference missing `anthropic` provider entry"
+                                            .to_owned(),
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
+                        FileData::Text { .. } => {
                             warnings.push(Warning::UnsupportedSetting {
                                 setting: "user.file.data".to_owned(),
                                 details: Some(
@@ -129,6 +158,22 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> Vec<WireUser
                 }
                 // Non-image: try document.
                 let source = match (f.media_type.as_str(), &f.data) {
+                    // Files-API reference works for any non-image document type.
+                    (_, FileData::Reference { reference }) => {
+                        if let Some(file_id) = resolve_anthropic_file_id(reference) {
+                            betas.insert("files-api-2025-04-14".to_owned());
+                            WireDocumentSource::File { file_id }
+                        } else {
+                            warnings.push(Warning::UnsupportedSetting {
+                                setting: "user.file.data".to_owned(),
+                                details: Some(
+                                    "document file reference missing `anthropic` provider entry"
+                                        .to_owned(),
+                                ),
+                            });
+                            continue;
+                        }
+                    }
                     ("application/pdf", FileData::Url { url }) => WireDocumentSource::Url {
                         url: url.clone(),
                         media_type: "application/pdf".to_owned(),
@@ -181,8 +226,22 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> Vec<WireUser
     out
 }
 
+/// Pluck the Anthropic file id from a `FileData::Reference` map.
+///
+/// Mirrors `resolveProviderReference({ reference, provider: 'anthropic' })`
+/// in `convert-to-anthropic-prompt.ts`.
+fn resolve_anthropic_file_id(
+    reference: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    reference
+        .get("anthropic")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 /// Pluck a `cache_control` block from `provider_options["anthropic"]`.
-fn read_cache_control(
+pub(super) fn read_cache_control(
     options: Option<&llmsdk_provider::shared::ProviderOptions>,
 ) -> Option<CacheControl> {
     let map = options?;
@@ -332,12 +391,16 @@ fn convert_tool_call(tc: &ToolCallPart) -> WireAssistantPart {
     }
 }
 
-fn convert_tool(parts: &[ToolMessagePart], warnings: &mut Vec<Warning>) -> Vec<WireUserPart> {
+fn convert_tool(
+    parts: &[ToolMessagePart],
+    warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
+) -> Vec<WireUserPart> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
             ToolMessagePart::ToolResult(r) => {
-                let (content, is_error) = tool_result_to_content(r, warnings);
+                let (content, is_error) = tool_result_to_content(r, warnings, betas);
                 out.push(WireUserPart::ToolResult {
                     tool_use_id: r.tool_call_id.clone(),
                     content,
@@ -359,6 +422,7 @@ fn convert_tool(parts: &[ToolMessagePart], warnings: &mut Vec<Warning>) -> Vec<W
 fn tool_result_to_content(
     part: &ToolResultPart,
     warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
 ) -> (WireToolResultContent, Option<bool>) {
     match &part.output {
         ToolResultOutput::Text { value, .. } => (WireToolResultContent::Text(value.clone()), None),
@@ -388,7 +452,7 @@ fn tool_result_to_content(
         ToolResultOutput::Content { value } => {
             let parts: Vec<WireNestedToolResultContent> = value
                 .iter()
-                .filter_map(|p| convert_nested_tool_output(p, warnings))
+                .filter_map(|p| convert_nested_tool_output(p, warnings, betas))
                 .collect();
             (WireToolResultContent::Parts(parts), None)
         }
@@ -402,6 +466,7 @@ fn tool_result_to_content(
 fn convert_nested_tool_output(
     part: &ToolOutputPart,
     warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
 ) -> Option<WireNestedToolResultContent> {
     match part {
         ToolOutputPart::Text {
@@ -416,7 +481,7 @@ fn convert_nested_tool_output(
             media_type,
             provider_options,
             ..
-        } => convert_nested_file(data, media_type, provider_options.as_ref(), warnings),
+        } => convert_nested_file(data, media_type, provider_options.as_ref(), warnings, betas),
         ToolOutputPart::Custom { provider_options } => {
             convert_nested_custom(provider_options.as_ref(), warnings)
         }
@@ -429,6 +494,7 @@ fn convert_nested_file(
     media_type: &str,
     provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
     warnings: &mut Vec<Warning>,
+    betas: &mut std::collections::BTreeSet<String>,
 ) -> Option<WireNestedToolResultContent> {
     let cache_control = read_cache_control(provider_options);
     let top = media_type.split('/').next().unwrap_or(media_type);
@@ -439,11 +505,25 @@ fn convert_nested_file(
                 media_type: media_type.to_owned(),
                 data: file_bytes_to_base64(data),
             },
-            FileData::Reference { .. } | FileData::Text { .. } => {
+            FileData::Reference { reference } => {
+                if let Some(file_id) = resolve_anthropic_file_id(reference) {
+                    betas.insert("files-api-2025-04-14".to_owned());
+                    WireImageSource::File { file_id }
+                } else {
+                    warnings.push(Warning::UnsupportedSetting {
+                        setting: "tool-result.content.file.data".to_owned(),
+                        details: Some(
+                            "image reference missing `anthropic` provider entry".to_owned(),
+                        ),
+                    });
+                    return None;
+                }
+            }
+            FileData::Text { .. } => {
                 warnings.push(Warning::UnsupportedSetting {
                     setting: "tool-result.content.file.data".to_owned(),
                     details: Some(
-                        "image files in tool_result accept only Url or inline bytes".to_owned(),
+                        "image files in tool_result accept only Url, inline bytes, or Files-API references".to_owned(),
                     ),
                 });
                 return None;
@@ -457,6 +537,20 @@ fn convert_nested_file(
     let (title, context) = read_document_meta(provider_options);
     let citations = read_citations_config(provider_options);
     let source = match (media_type, data) {
+        (_, FileData::Reference { reference }) => {
+            if let Some(file_id) = resolve_anthropic_file_id(reference) {
+                betas.insert("files-api-2025-04-14".to_owned());
+                WireDocumentSource::File { file_id }
+            } else {
+                warnings.push(Warning::UnsupportedSetting {
+                    setting: "tool-result.content.file.data".to_owned(),
+                    details: Some(
+                        "document reference missing `anthropic` provider entry".to_owned(),
+                    ),
+                });
+                return None;
+            }
+        }
         ("application/pdf", FileData::Url { url }) => WireDocumentSource::Url {
             url: url.clone(),
             media_type: "application/pdf".to_owned(),

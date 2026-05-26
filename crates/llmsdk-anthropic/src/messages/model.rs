@@ -17,7 +17,7 @@ use crate::auth::apply_request_auth;
 use crate::config::Inner;
 use crate::error::rewrite_anthropic_error;
 
-use super::convert_prompt::{Converted, convert_prompt};
+use super::convert_prompt::{Converted, convert_prompt, read_cache_control};
 use super::options::{AnthropicChatOptions, ThinkingConfig, parse as parse_provider_options};
 use super::parse_response::parse_response;
 use super::sanitize_json_schema::sanitize_json_schema;
@@ -26,6 +26,7 @@ use super::stream_event::StreamEvent;
 use super::wire::{
     MessagesRequest, MessagesResponse, WireMessage, WireThinking, WireTool, WireToolChoice,
 };
+use crate::model_capabilities::model_capabilities;
 
 /// Fallback `max_tokens` when the caller did not set one.
 ///
@@ -153,7 +154,7 @@ impl LanguageModel for AnthropicMessagesModel {
         let byte_stream = response_byte_stream(stream_response.response);
         let event_stream = sse_json_stream::<StreamEvent>(byte_stream);
 
-        let state = StreamState::new(warnings);
+        let state = StreamState::with_generate_id(warnings, self.inner.generate_id.clone());
         let include_raw = options.include_raw_chunks.unwrap_or(false);
         let parts = build_part_stream(state, event_stream, include_raw);
 
@@ -193,6 +194,7 @@ fn build_request(
         system,
         messages,
         mut warnings,
+        betas: prompt_betas,
     } = convert_prompt(&options.prompt, send_reasoning);
 
     if options.frequency_penalty.is_some() {
@@ -243,8 +245,9 @@ fn build_request(
         });
     }
 
-    let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut betas: std::collections::BTreeSet<String> = prompt_betas;
     let tool_streaming_default = provider_opts.tool_streaming.unwrap_or(true);
+    let caps = model_capabilities(model_id);
     let (tools, tool_choice) = convert_tools(
         options.tools.as_deref(),
         options.tool_choice.as_ref(),
@@ -252,6 +255,8 @@ fn build_request(
         &mut betas,
         provider_opts.disable_parallel_tool_use,
         tool_streaming_default,
+        caps.supports_structured_output,
+        caps.supports_structured_output, // supports_strict_tools mirrors structured_output per ai-sdk
     );
 
     // anthropicBeta extra tokens.
@@ -261,6 +266,20 @@ fn build_request(
         }
     }
 
+    // Warn when adaptive thinking is requested on a model that does not
+    // support it; ai-sdk silently strips on Vertex/Bedrock, here we surface.
+    if matches!(
+        provider_opts.thinking,
+        Some(ThinkingConfig::Adaptive { .. })
+    ) && !caps.supports_adaptive_thinking
+    {
+        warnings.push(Warning::UnsupportedSetting {
+            setting: "thinking.adaptive".to_owned(),
+            details: Some(format!(
+                "Adaptive thinking is not supported by {model_id}; the server may ignore it"
+            )),
+        });
+    }
     let (thinking, thinking_budget, thinking_enabled) =
         resolve_thinking(provider_opts.thinking.as_ref());
 
@@ -684,6 +703,10 @@ fn ensure_user_first(messages: Vec<WireMessage>, warnings: &mut Vec<Warning>) ->
     clippy::too_many_lines,
     reason = "single match-statement dispatcher over Anthropic's tool wire surface; splitting obscures flow"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "tool-conversion is a single dispatch point; bundling args into a config struct would hide flow"
+)]
 fn convert_tools(
     tools: Option<&[Tool]>,
     choice: Option<&ToolChoice>,
@@ -691,6 +714,8 @@ fn convert_tools(
     betas: &mut std::collections::BTreeSet<String>,
     disable_parallel_tool_use: Option<bool>,
     tool_streaming_default: bool,
+    supports_structured_output: bool,
+    supports_strict_tools: bool,
 ) -> (Option<Vec<WireTool>>, Option<WireToolChoice>) {
     let Some(tools) = tools else {
         // No tools but disable_parallel_tool_use was still requested — ai-sdk
@@ -739,6 +764,28 @@ fn convert_tools(
                         .map(|ex| ex.input.clone())
                         .collect::<Vec<_>>()
                 });
+                let cache_control = read_cache_control(f.provider_options.as_ref());
+                let strict = if supports_strict_tools {
+                    f.strict
+                } else {
+                    if let Some(s) = f.strict {
+                        warnings.push(Warning::UnsupportedSetting {
+                            setting: "strict".to_owned(),
+                            details: Some(format!(
+                                "Tool '{}' has strict: {s}, but strict mode is not supported by this model; ignored",
+                                f.name
+                            )),
+                        });
+                    }
+                    None
+                };
+                // Auto-enable beta tokens to match ai-sdk's anthropic-prepare-tools.ts.
+                if supports_structured_output {
+                    betas.insert("structured-outputs-2025-11-13".to_owned());
+                }
+                if input_examples.is_some() || allowed_callers.is_some() {
+                    betas.insert("advanced-tool-use-2025-11-20".to_owned());
+                }
                 Some(WireTool::Function(super::wire::WireFunctionTool {
                     name: f.name.clone(),
                     description: f.description.clone(),
@@ -747,6 +794,8 @@ fn convert_tools(
                     defer_loading,
                     allowed_callers,
                     input_examples,
+                    strict,
+                    cache_control,
                 }))
             }
             Tool::Provider(p) => {

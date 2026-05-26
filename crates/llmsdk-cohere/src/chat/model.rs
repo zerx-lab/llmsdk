@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    CallOptions, GenerateResult, LanguageModel, ResponseFormat, StreamResult,
+    CallOptions, GenerateResult, LanguageModel, ReasoningEffort, ResponseFormat, StreamResult,
 };
 use llmsdk_provider::shared::Warning;
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
@@ -183,10 +183,7 @@ fn build_request(
         .as_ref()
         .and_then(convert_response_format);
 
-    let thinking = cohere_opts.thinking.as_ref().map(|t| WireThinking {
-        kind: t.kind.clone().unwrap_or_else(|| "enabled".to_owned()),
-        token_budget: t.token_budget,
-    });
+    let thinking = resolve_cohere_thinking(cohere_opts.thinking.as_ref(), options.reasoning);
 
     let documents = if converted.documents.is_empty() {
         None
@@ -214,6 +211,48 @@ fn build_request(
     };
 
     Ok((request, warnings))
+}
+
+/// Resolve the wire `thinking` block by combining the explicit
+/// `provider_options.cohere.thinking` override with the top-level
+/// `reasoning` enum. Mirrors `resolveCohereThinking` in
+/// `cohere-chat-language-model.ts`.
+fn resolve_cohere_thinking(
+    cohere_thinking: Option<&super::options::ThinkingConfig>,
+    reasoning: Option<ReasoningEffort>,
+) -> Option<WireThinking> {
+    if let Some(t) = cohere_thinking {
+        return Some(WireThinking {
+            kind: t.kind.clone().unwrap_or_else(|| "enabled".to_owned()),
+            token_budget: t.token_budget,
+        });
+    }
+    let level = match reasoning {
+        Some(ReasoningEffort::None) => {
+            return Some(WireThinking {
+                kind: "disabled".to_owned(),
+                token_budget: None,
+            });
+        }
+        Some(ReasoningEffort::Minimal) => 0.02_f64,
+        Some(ReasoningEffort::Low) => 0.1,
+        Some(ReasoningEffort::Medium) => 0.3,
+        Some(ReasoningEffort::High) => 0.6,
+        Some(ReasoningEffort::Xhigh) => 0.9,
+        Some(ReasoningEffort::ProviderDefault) | None => return None,
+    };
+    // Mirror ai-sdk: maxOutputTokens=32768, max=32768, min=1024.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is bounded by 32768 max which fits in u32"
+    )]
+    let budget = (32_768.0_f64 * level).round() as u32;
+    let clamped = budget.clamp(1024, 32_768);
+    Some(WireThinking {
+        kind: "enabled".to_owned(),
+        token_budget: Some(clamped),
+    })
 }
 
 fn convert_response_format(fmt: &ResponseFormat) -> Option<WireResponseFormat> {

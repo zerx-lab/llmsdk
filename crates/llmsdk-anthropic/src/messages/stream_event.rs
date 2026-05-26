@@ -111,6 +111,11 @@ pub(crate) enum BlockDelta {
     SignatureDelta {
         signature: String,
     },
+    /// Citation attached to a text block (`web_search_result_location` /
+    /// `page_location` / `char_location`). Raw JSON kept for fidelity.
+    CitationsDelta {
+        citation: JsonValue,
+    },
     #[serde(other)]
     Other,
 }

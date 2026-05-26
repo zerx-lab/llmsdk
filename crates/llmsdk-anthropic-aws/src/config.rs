@@ -11,6 +11,7 @@
 //!   request with `SigV4` or an `x-api-key` header (see [`crate::auth`]).
 // Rust guideline compliant 2026-02-21
 
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 
@@ -21,6 +22,7 @@ use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::aws_sigv4::{
     AwsCredentials, AwsCredentialsProvider, EnvCredentialsProvider, StaticCredentialsProvider,
 };
+use llmsdk_provider_utils::http::HttpClient;
 
 use crate::auth::{ApiKeyAuth, SigV4Auth};
 use crate::{
@@ -113,6 +115,8 @@ pub struct AnthropicAwsBuilder {
     base_url: Option<String>,
     credentials_provider: Option<Arc<dyn AwsCredentialsProvider>>,
     extra_headers: Vec<(String, Option<String>)>,
+    http_client: Option<HttpClient>,
+    generate_id: Option<Arc<dyn Fn() -> String + Send + Sync>>,
 }
 
 impl std::fmt::Debug for AnthropicAwsBuilder {
@@ -137,6 +141,8 @@ impl std::fmt::Debug for AnthropicAwsBuilder {
             .field("base_url", &self.base_url)
             .field("credentials_provider_set", credentials_provider)
             .field("extra_headers", &self.extra_headers)
+            .field("http_client", &self.http_client)
+            .field("generate_id_set", &self.generate_id.is_some())
             .finish()
     }
 }
@@ -224,6 +230,55 @@ impl AnthropicAwsBuilder {
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: Option<String>) -> Self {
         self.extra_headers.push((name.into(), value));
+        self
+    }
+
+    /// Bulk-set extra request headers.
+    ///
+    /// Mirrors ai-sdk's `headers?: Record<string, string | undefined>`.
+    /// Headers are appended in iteration order; later entries with the
+    /// same name override earlier ones in the underlying provider.
+    #[must_use]
+    pub fn headers<I, K, V>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Option<String>>,
+    {
+        for (name, value) in entries {
+            self.extra_headers.push((name.into(), value.into()));
+        }
+        self
+    }
+
+    /// Convenience for the common case of a [`HashMap`] of `Some` values.
+    #[must_use]
+    pub fn headers_map(self, map: HashMap<String, String>) -> Self {
+        self.headers(map.into_iter().map(|(k, v)| (k, Some(v))))
+    }
+
+    /// Inject a pre-configured HTTP client.
+    ///
+    /// Mirrors ai-sdk's `fetch?: FetchFunction` middleware hook. Useful for
+    /// proxies, retry layers, telemetry, and tests with custom transport.
+    #[must_use]
+    pub fn http_client(mut self, client: HttpClient) -> Self {
+        self.http_client = Some(client);
+        self
+    }
+
+    /// Install a citation source id generator forwarded to
+    /// [`AnthropicBuilder::generate_id`].
+    ///
+    /// Mirrors ai-sdk's `generateId?: () => string` option.
+    ///
+    /// [`AnthropicBuilder::generate_id`]: llmsdk_anthropic::AnthropicBuilder::generate_id
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
         self
     }
 
@@ -323,6 +378,12 @@ impl AnthropicAwsBuilder {
             .header("anthropic-workspace-id", Some(workspace_id));
         for (name, value) in self.extra_headers {
             builder = builder.header(name, value);
+        }
+        if let Some(client) = self.http_client {
+            builder = builder.http_client(client);
+        }
+        if let Some(gen_fn) = self.generate_id {
+            builder = builder.generate_id(move || gen_fn());
         }
         let inner = builder.build()?;
 

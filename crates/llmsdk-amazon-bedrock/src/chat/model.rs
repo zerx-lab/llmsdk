@@ -298,6 +298,8 @@ pub(crate) fn build_request(
     let PreparedTools {
         tool_config,
         warnings: tool_warnings,
+        additional_tools,
+        betas,
     } = prepare_tools(
         effective_tools.as_deref(),
         effective_choice.as_ref(),
@@ -305,11 +307,41 @@ pub(crate) fn build_request(
     );
     warnings.extend(tool_warnings);
 
+    // Anthropic thinking ('enabled' | 'adaptive') is incompatible with both
+    // topK and topP on Anthropic-on-Bedrock — strip both with a warning.
+    // Mirrors amazon-bedrock-chat-language-model.ts:363-372.
+    let thinking_active = bedrock_opts
+        .reasoning_config
+        .as_ref()
+        .is_some_and(|rc| matches!(rc.kind.as_deref(), Some("enabled" | "adaptive")));
+    let mut top_k = options.top_k;
+    let mut top_p = options.top_p;
+    if thinking_active {
+        if top_k.is_some() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "topK".into(),
+                details: Some(
+                    "topK is not supported when Anthropic thinking is enabled; dropped".into(),
+                ),
+            });
+            top_k = None;
+        }
+        if top_p.is_some() {
+            warnings.push(Warning::UnsupportedSetting {
+                setting: "topP".into(),
+                details: Some(
+                    "topP is not supported when Anthropic thinking is enabled; dropped".into(),
+                ),
+            });
+            top_p = None;
+        }
+    }
+
     let mut inference_config = super::wire::InferenceConfig {
         max_tokens: options.max_output_tokens,
         temperature,
-        top_p: options.top_p,
-        top_k: options.top_k,
+        top_p,
+        top_k,
         stop_sequences: options.stop_sequences.clone(),
     };
     let inference_emit = if inference_config.is_empty() {
@@ -323,12 +355,53 @@ pub(crate) fn build_request(
         .take()
         .map(|kind| ServiceTier { kind });
 
+    // Merge collected extras into additionalModelRequestFields:
+    //   - prepare_tools `additional_tools` (anthropic tool_choice)
+    //   - prepare_tools `betas` + provider option `anthropic_beta`
+    //     → `anthropic_beta` array
+    let user_extra = bedrock_opts.additional_model_request_fields.take();
+    let mut merged: Option<serde_json::Map<String, serde_json::Value>> = match user_extra {
+        Some(serde_json::Value::Object(m)) => Some(m),
+        Some(other) => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "additionalModelRequestFields must be an object; got {other}. Dropped."
+                ),
+            });
+            None
+        }
+        None => None,
+    };
+    let mut all_betas = betas;
+    if let Some(extra) = bedrock_opts.anthropic_beta.take() {
+        for t in extra {
+            all_betas.insert(t);
+        }
+    }
+    if let Some(extras) = additional_tools {
+        let m = merged.get_or_insert_with(serde_json::Map::new);
+        for (k, v) in extras {
+            m.insert(k, v);
+        }
+    }
+    if !all_betas.is_empty() {
+        let m = merged.get_or_insert_with(serde_json::Map::new);
+        let list = serde_json::Value::Array(
+            all_betas
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        m.insert("anthropic_beta".to_owned(), list);
+    }
+    let merged_extras = merged.map(serde_json::Value::Object);
+
     let request = ConverseRequest {
         system,
         messages,
         tool_config,
         inference_config: inference_emit,
-        additional_model_request_fields: bedrock_opts.additional_model_request_fields.take(),
+        additional_model_request_fields: merged_extras,
         additional_model_response_field_paths: model_id
             .contains("anthropic.")
             .then(|| vec!["/delta/stop_sequence".to_owned()]),

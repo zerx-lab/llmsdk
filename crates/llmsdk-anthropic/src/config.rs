@@ -39,6 +39,11 @@ pub type EndpointFn = dyn Fn(&str, &str, bool) -> String + Send + Sync;
 /// URL) and inject `anthropic_version`.
 pub type BodyTransformFn = dyn Fn(&mut Value) + Send + Sync;
 
+/// Callback used to generate ids for `Source` parts produced from
+/// `citations_delta` blocks. Mirrors `config.generateId` in the upstream
+/// `AnthropicLanguageModel`.
+pub type GenerateIdFn = dyn Fn() -> String + Send + Sync;
+
 /// `Anthropic` provider handle.
 ///
 /// Cheap to clone; HTTP client and headers are shared.
@@ -67,6 +72,9 @@ pub struct Inner {
     /// Optional request body transformer. When `None`, the JSON body is
     /// sent verbatim.
     pub(crate) body_transformer: Option<Arc<BodyTransformFn>>,
+    /// Optional generator for citation source ids. When `None`, an
+    /// in-stream counter is used (`anthropic-cite-{n}`).
+    pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
 }
 
 impl fmt::Debug for Inner {
@@ -79,6 +87,7 @@ impl fmt::Debug for Inner {
             .field("request_auth", &self.request_auth.is_some())
             .field("endpoint_override", &self.endpoint_override.is_some())
             .field("body_transformer", &self.body_transformer.is_some())
+            .field("generate_id", &self.generate_id.is_some())
             .finish()
     }
 }
@@ -129,6 +138,7 @@ pub struct InnerBuilder {
     request_auth: Option<Arc<dyn RequestAuth>>,
     endpoint_override: Option<Arc<EndpointFn>>,
     body_transformer: Option<Arc<BodyTransformFn>>,
+    generate_id: Option<Arc<GenerateIdFn>>,
 }
 
 impl fmt::Debug for InnerBuilder {
@@ -141,6 +151,7 @@ impl fmt::Debug for InnerBuilder {
             .field("request_auth", &self.request_auth.is_some())
             .field("endpoint_override", &self.endpoint_override.is_some())
             .field("body_transformer", &self.body_transformer.is_some())
+            .field("generate_id", &self.generate_id.is_some())
             .finish()
     }
 }
@@ -212,6 +223,19 @@ impl InnerBuilder {
         self
     }
 
+    /// Install a citation source id generator.
+    ///
+    /// Mirrors `config.generateId` on the upstream `AnthropicLanguageModel`.
+    /// When `None`, an in-stream counter is used.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
+        self
+    }
+
     /// Finalize the [`Inner`].
     ///
     /// # Errors
@@ -233,6 +257,7 @@ impl InnerBuilder {
             request_auth: self.request_auth,
             endpoint_override: self.endpoint_override,
             body_transformer: self.body_transformer,
+            generate_id: self.generate_id,
         })
     }
 }
@@ -312,7 +337,7 @@ impl Anthropic {
 }
 
 /// Builder for [`Anthropic`].
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct AnthropicBuilder {
     api_key: Option<String>,
     auth_token: Option<String>,
@@ -323,6 +348,27 @@ pub struct AnthropicBuilder {
     http: Option<HttpClient>,
     request_auth: Option<Arc<dyn RequestAuth>>,
     skip_default_auth_headers: bool,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl fmt::Debug for AnthropicBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("base_url", &self.base_url)
+            .field("version", &self.version)
+            .field("provider_name", &self.provider_name)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http)
+            .field("request_auth", &self.request_auth.is_some())
+            .field("skip_default_auth_headers", &self.skip_default_auth_headers)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl AnthropicBuilder {
@@ -408,6 +454,20 @@ impl AnthropicBuilder {
         self
     }
 
+    /// Install a citation source id generator.
+    ///
+    /// Mirrors `config.generateId` on the upstream `AnthropicLanguageModel`.
+    /// When unset, citation sources use an in-stream counter (
+    /// `anthropic-cite-{n}`).
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
+        self
+    }
+
     /// Finalize the provider.
     ///
     /// # Errors
@@ -476,6 +536,7 @@ impl AnthropicBuilder {
                 request_auth: self.request_auth,
                 endpoint_override: None,
                 body_transformer: None,
+                generate_id: self.generate_id,
             }),
         })
     }

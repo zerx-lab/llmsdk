@@ -19,6 +19,10 @@ pub(crate) struct OpenAiErrorBody {
 }
 
 /// Inner `error` object on the `OpenAI` envelope.
+///
+/// Schema mirrors `openai-error.ts` upstream: `message` is required; `type`,
+/// `code`, and `param` are loosely typed so OpenAI-compatible providers
+/// that omit or rename them still parse.
 #[derive(Debug, Deserialize)]
 pub(crate) struct OpenAiErrorInner {
     pub(crate) message: String,
@@ -26,6 +30,10 @@ pub(crate) struct OpenAiErrorInner {
     pub(crate) _kind: Option<String>,
     #[serde(default)]
     pub(crate) _code: Option<serde_json::Value>,
+    /// `error.param` — the field that triggered the error (e.g. `"model"`
+    /// for an invalid model id). Optional / forward-compatible.
+    #[serde(default)]
+    pub(crate) param: Option<serde_json::Value>,
 }
 
 /// Extract a one-line error message from a raw response body.
@@ -35,7 +43,18 @@ pub(crate) struct OpenAiErrorInner {
 /// different shapes.
 pub(crate) fn extract_error_message(body: &str) -> String {
     match serde_json::from_str::<OpenAiErrorBody>(body) {
-        Ok(parsed) => parsed.error.message,
+        Ok(parsed) => {
+            // Annotate with the offending parameter when present so callers
+            // can see which input field triggered the rejection — matches the
+            // `param` field on the upstream error schema.
+            match parsed.error.param.as_ref().and_then(|v| match v {
+                serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+                _ => None,
+            }) {
+                Some(param) => format!("{} (param: {param})", parsed.error.message),
+                None => parsed.error.message,
+            }
+        }
         Err(_) => body.trim().to_owned(),
     }
 }

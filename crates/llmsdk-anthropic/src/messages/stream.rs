@@ -23,10 +23,15 @@
 // Rust guideline compliant 2026-02-21
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use llmsdk_provider::language_model::{FinishReason, FinishReasonKind, StreamPart, ToolCallPart};
+use llmsdk_provider::language_model::{
+    FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart,
+};
 use llmsdk_provider::shared::{ProviderMetadata, Warning};
 use serde_json::Map;
+
+use crate::config::GenerateIdFn;
 
 use super::finish_reason::map as map_finish_reason;
 use super::stream_event::{BlockDelta, BlockStart, StreamEvent};
@@ -50,7 +55,6 @@ enum BlockKind {
     Reasoning { id: String },
 }
 
-#[derive(Debug)]
 pub(crate) struct StreamState {
     initial_warnings: Option<Vec<Warning>>,
     finish_reason: FinishReason,
@@ -61,10 +65,39 @@ pub(crate) struct StreamState {
     metadata_emitted: bool,
     /// Open blocks keyed by `Anthropic`'s `index`.
     blocks: BTreeMap<u32, BlockKind>,
+    /// Monotonic source id counter used as a fallback when no
+    /// `generate_id` callback is configured. Bumped for each
+    /// `citations_delta` block.
+    source_seq: u64,
+    /// Optional id generator (mirrors `config.generateId` upstream).
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for StreamState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamState")
+            .field("initial_warnings", &self.initial_warnings)
+            .field("finish_reason", &self.finish_reason)
+            .field("usage", &self.usage)
+            .field("metadata", &self.metadata)
+            .field("metadata_emitted", &self.metadata_emitted)
+            .field("blocks", &self.blocks)
+            .field("source_seq", &self.source_seq)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl StreamState {
+    #[cfg(test)]
     pub(crate) fn new(warnings: Vec<Warning>) -> Self {
+        Self::with_generate_id(warnings, None)
+    }
+
+    pub(crate) fn with_generate_id(
+        warnings: Vec<Warning>,
+        generate_id: Option<Arc<GenerateIdFn>>,
+    ) -> Self {
         Self {
             initial_warnings: Some(warnings),
             finish_reason: FinishReason::new(FinishReasonKind::Other),
@@ -78,6 +111,8 @@ impl StreamState {
             metadata: None,
             metadata_emitted: false,
             blocks: BTreeMap::new(),
+            source_seq: 0,
+            generate_id,
         }
     }
 
@@ -317,6 +352,18 @@ impl StreamState {
                     provider_metadata: Some(signature_metadata(&signature)),
                 }]
             }
+            (BlockKind::Text { .. }, BlockDelta::CitationsDelta { citation }) => {
+                let id = if let Some(gen_fn) = &self.generate_id {
+                    gen_fn()
+                } else {
+                    self.source_seq = self.source_seq.saturating_add(1);
+                    format!("anthropic-cite-{}", self.source_seq)
+                };
+                match build_citation_source(&citation, id) {
+                    Some(source) => vec![StreamPart::Source(source)],
+                    None => Vec::new(),
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -369,6 +416,93 @@ fn redacted_metadata(data: &str) -> ProviderMetadata {
     let mut pm = ProviderMetadata::new();
     pm.insert("anthropic".to_owned(), anthropic);
     pm
+}
+
+/// Mirrors `createCitationSource` in `anthropic-language-model.ts`.
+///
+/// `citation` is the raw `citations_delta.citation` payload. Returns
+/// `None` for unknown citation shapes (matches ai-sdk's silent drop).
+fn build_citation_source(citation: &serde_json::Value, id: String) -> Option<Source> {
+    let kind = citation.get("type").and_then(|v| v.as_str())?;
+    let cited_text = citation
+        .get("cited_text")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let mut anthropic = Map::new();
+    if let Some(ct) = &cited_text {
+        anthropic.insert(
+            "citedText".to_owned(),
+            serde_json::Value::String(ct.clone()),
+        );
+    }
+    match kind {
+        "web_search_result_location" => {
+            let url = citation.get("url").and_then(|v| v.as_str())?.to_owned();
+            let title = citation
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if let Some(idx) = citation.get("encrypted_index").and_then(|v| v.as_str()) {
+                anthropic.insert(
+                    "encryptedIndex".to_owned(),
+                    serde_json::Value::String(idx.to_owned()),
+                );
+            }
+            let mut pm = ProviderMetadata::new();
+            pm.insert("anthropic".to_owned(), anthropic);
+            Some(Source::Url {
+                id,
+                url,
+                title,
+                provider_metadata: Some(pm),
+            })
+        }
+        "page_location" => {
+            if let Some(n) = citation.get("start_page_number") {
+                anthropic.insert("startPageNumber".to_owned(), n.clone());
+            }
+            if let Some(n) = citation.get("end_page_number") {
+                anthropic.insert("endPageNumber".to_owned(), n.clone());
+            }
+            let mut pm = ProviderMetadata::new();
+            pm.insert("anthropic".to_owned(), anthropic);
+            let title = citation
+                .get("document_title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            Some(Source::Document {
+                id,
+                media_type: String::new(),
+                title,
+                filename: None,
+                provider_metadata: Some(pm),
+            })
+        }
+        "char_location" => {
+            if let Some(n) = citation.get("start_char_index") {
+                anthropic.insert("startCharIndex".to_owned(), n.clone());
+            }
+            if let Some(n) = citation.get("end_char_index") {
+                anthropic.insert("endCharIndex".to_owned(), n.clone());
+            }
+            let mut pm = ProviderMetadata::new();
+            pm.insert("anthropic".to_owned(), anthropic);
+            let title = citation
+                .get("document_title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            Some(Source::Document {
+                id,
+                media_type: String::new(),
+                title,
+                filename: None,
+                provider_metadata: Some(pm),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn build_tool_call(id: String, name: String, arguments: String) -> ToolCallPart {

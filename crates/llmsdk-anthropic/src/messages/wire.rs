@@ -167,21 +167,45 @@ pub(crate) enum WireNestedToolResultContent {
     },
 }
 
-/// Image source: URL or base64.
+/// Image source: URL, base64, or Files-API reference.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WireImageSource {
-    Url { url: String },
-    Base64 { media_type: String, data: String },
+    Url {
+        url: String,
+    },
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    /// Reference to an asset uploaded via the Files API
+    /// (requires `files-api-2025-04-14` beta header).
+    File {
+        file_id: String,
+    },
 }
 
-/// Document source: URL, base64, or inline text.
+/// Document source: URL, base64, inline text, or Files-API reference.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WireDocumentSource {
-    Url { url: String, media_type: String },
-    Base64 { media_type: String, data: String },
-    Text { media_type: String, data: String },
+    Url {
+        url: String,
+        media_type: String,
+    },
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    Text {
+        media_type: String,
+        data: String,
+    },
+    /// Reference to an asset uploaded via the Files API
+    /// (requires `files-api-2025-04-14` beta header).
+    File {
+        file_id: String,
+    },
 }
 
 /// `cache_control` standard block.
@@ -261,6 +285,13 @@ pub(crate) struct WireFunctionTool {
     /// Example inputs forwarded from `FunctionTool::input_examples`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_examples: Option<Vec<serde_json::Map<String, JsonValue>>>,
+    /// Strict schema enforcement (only emitted when the model declares
+    /// `supports_strict_tools`; otherwise a warning is recorded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    /// `cache_control` from `provider_options.anthropic.cacheControl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// Server-tool wire entry: `{type, name?, ...args}`.

@@ -288,6 +288,39 @@ impl StreamState {
             }
 
             ResponsesChunk::Other => {}
+
+            // Status-only frames for the tool-call lifecycle. ai-sdk's
+            // xai-responses-language-model.ts ignores these — surface state
+            // exclusively via `response.output_item.added` / `.done`.
+            ResponsesChunk::ContentPartAdded { .. }
+            | ResponsesChunk::ContentPartDone { .. }
+            | ResponsesChunk::ReasoningSummaryPartDone { .. }
+            | ResponsesChunk::WebSearchCallInProgress { .. }
+            | ResponsesChunk::WebSearchCallSearching { .. }
+            | ResponsesChunk::WebSearchCallCompleted { .. }
+            | ResponsesChunk::XSearchCallInProgress { .. }
+            | ResponsesChunk::XSearchCallSearching { .. }
+            | ResponsesChunk::XSearchCallCompleted { .. }
+            | ResponsesChunk::FileSearchCallInProgress { .. }
+            | ResponsesChunk::FileSearchCallSearching { .. }
+            | ResponsesChunk::FileSearchCallCompleted { .. }
+            | ResponsesChunk::CodeExecutionCallInProgress { .. }
+            | ResponsesChunk::CodeExecutionCallExecuting { .. }
+            | ResponsesChunk::CodeExecutionCallCompleted { .. }
+            | ResponsesChunk::CodeInterpreterCallInProgress { .. }
+            | ResponsesChunk::CodeInterpreterCallExecuting { .. }
+            | ResponsesChunk::CodeInterpreterCallInterpreting { .. }
+            | ResponsesChunk::CodeInterpreterCallCompleted { .. }
+            | ResponsesChunk::CodeInterpreterCallCodeDelta { .. }
+            | ResponsesChunk::CodeInterpreterCallCodeDone { .. }
+            | ResponsesChunk::McpCallInProgress { .. }
+            | ResponsesChunk::McpCallExecuting { .. }
+            | ResponsesChunk::McpCallCompleted { .. }
+            | ResponsesChunk::McpCallFailed { .. }
+            | ResponsesChunk::McpCallArgumentsDelta { .. }
+            | ResponsesChunk::McpCallArgumentsDone { .. }
+            | ResponsesChunk::McpCallOutputDelta { .. }
+            | ResponsesChunk::McpCallOutputDone { .. } => {}
         }
 
         out

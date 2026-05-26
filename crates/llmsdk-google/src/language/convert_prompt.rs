@@ -389,6 +389,20 @@ fn convert_tool_parts(
     Ok(out)
 }
 
+/// Parse a `data:<media-type>;base64,<payload>` URL into its parts.
+///
+/// Mirrors `parseBase64DataUrl` in ai-sdk's
+/// `convert-to-google-messages.ts`. Returns `None` for non-base64 / non-data
+/// URLs so the caller can fall back to text serialization.
+fn parse_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (mime, payload) = rest.split_once(";base64,")?;
+    if mime.is_empty() || payload.is_empty() {
+        return None;
+    }
+    Some((mime.to_owned(), payload.to_owned()))
+}
+
 fn append_tool_result_multipart(
     out: &mut Vec<Value>,
     tool_name: &str,
@@ -411,6 +425,21 @@ fn append_tool_result_multipart(
                     inline.insert("data".into(), Value::String(bytes_to_base64_string(data)));
                     o.insert("inlineData".into(), Value::Object(inline));
                     response_parts.push(Value::Object(o));
+                }
+                FileData::Url { url } => {
+                    // ai-sdk's convertUrlToolResultPart: only base64 `data:` URLs
+                    // are convertible to inlineData; arbitrary https URLs fall
+                    // back to text serialization.
+                    if let Some((mime, b64)) = parse_data_url(url) {
+                        let mut o = Map::new();
+                        let mut inline = Map::new();
+                        inline.insert("mimeType".into(), Value::String(mime));
+                        inline.insert("data".into(), Value::String(b64));
+                        o.insert("inlineData".into(), Value::Object(inline));
+                        response_parts.push(Value::Object(o));
+                    } else {
+                        response_text_parts.push(serde_json::to_string(part).unwrap_or_default());
+                    }
                 }
                 _ => {
                     response_text_parts.push(serde_json::to_string(part).unwrap_or_default());

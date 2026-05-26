@@ -85,6 +85,34 @@ impl AccessTokenProvider for GcpAuthTokenProvider {
     }
 }
 
+/// Static [`AccessTokenProvider`] holding a pre-minted bearer token.
+///
+/// Mirrors the upstream Edge Runtime entry — the caller obtains the token
+/// out-of-band (a fronted IAM service, a JWT signer, etc.) and feeds the
+/// already-minted string to the provider. No `gcp_auth` dependency is
+/// required when this is used.
+#[derive(Debug, Clone)]
+pub struct StaticAccessTokenProvider {
+    token: String,
+}
+
+impl StaticAccessTokenProvider {
+    /// Build a provider that returns `token` for every scope.
+    #[must_use]
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AccessTokenProvider for StaticAccessTokenProvider {
+    async fn token(&self, _scope: &str) -> Result<String, ProviderError> {
+        Ok(self.token.clone())
+    }
+}
+
 /// Convenience: mint a token using the default scope
 /// ([`CLOUD_PLATFORM_SCOPE`]).
 ///

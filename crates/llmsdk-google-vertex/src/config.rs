@@ -334,6 +334,20 @@ impl GoogleVertexBuilder {
         self
     }
 
+    /// Use a pre-minted OAuth access token instead of binding `gcp_auth`.
+    ///
+    /// Mirrors the upstream Edge Runtime entry point: the caller obtains
+    /// the bearer token out-of-band (e.g. via a fronted IAM service,
+    /// a custom JWT signer, or a workflow that already holds the token)
+    /// and passes it straight through. No `google-auth-library` /
+    /// `gcp_auth` invocation is performed.
+    ///
+    /// Project + location must still be provided (explicit or env vars).
+    #[must_use]
+    pub fn access_token(self, token: impl Into<String>) -> Self {
+        self.token_provider(Arc::new(crate::auth::StaticAccessTokenProvider::new(token)))
+    }
+
     /// Append or override a per-request header. `None` removes it.
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: Option<String>) -> Self {
