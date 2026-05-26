@@ -37,6 +37,10 @@ pub(crate) fn parse_response(
 ) -> Result<GenerateResult, ProviderError> {
     let mut content = Vec::new();
     let mut is_json_response_from_tool = false;
+    // Cache of in-flight MCP `tool-call` entries so the matching
+    // `mcp_tool_result` can inherit the toolName + providerMetadata.
+    // Mirrors `mcpToolCalls` in upstream `anthropic-language-model.ts:1086`.
+    let mut mcp_tool_calls: HashMap<String, (String, Option<ProviderMetadata>)> = HashMap::new();
     for part in response.content {
         match part {
             ResponseContent::Text { text, citations } if !text.is_empty() => {
@@ -163,13 +167,72 @@ pub(crate) fn parse_response(
                     provider_options: None,
                 }));
             }
+            ResponseContent::McpToolUse(v) => {
+                // Upstream `anthropic-language-model.ts:1086-1102`: an MCP
+                // server invocation is a *tool-call* (not a tool-result),
+                // tagged with the server name so a later `mcp_tool_result`
+                // can inherit it.
+                let (id, name, server_name) = extract_mcp_call_meta(&v);
+                let input = v
+                    .as_object()
+                    .and_then(|m| m.get("input").cloned())
+                    .unwrap_or(JsonValue::Null);
+                let provider_metadata = mcp_tool_use_metadata(server_name.as_deref());
+                mcp_tool_calls.insert(id.clone(), (name.clone(), Some(provider_metadata.clone())));
+                content.push(Content::ToolCall(ToolCallPart {
+                    tool_call_id: id,
+                    tool_name: name,
+                    input,
+                    provider_executed: Some(true),
+                    dynamic: Some(true),
+                    provider_options: Some(provider_metadata_to_options(&provider_metadata)),
+                }));
+            }
+            ResponseContent::McpToolResult(v) => {
+                // Upstream `anthropic-language-model.ts:1104-1115`: the
+                // result inherits toolName + providerMetadata from the
+                // cached `mcp_tool_use` entry keyed by `tool_use_id`.
+                let tool_use_id = v
+                    .as_object()
+                    .and_then(|m| m.get("tool_use_id").and_then(JsonValue::as_str))
+                    .unwrap_or_default()
+                    .to_owned();
+                let is_error = v
+                    .as_object()
+                    .and_then(|m| m.get("is_error").and_then(JsonValue::as_bool))
+                    .unwrap_or(false);
+                let result_value = v
+                    .as_object()
+                    .and_then(|m| m.get("content").cloned())
+                    .unwrap_or(JsonValue::Null);
+                let (tool_name, provider_metadata) = mcp_tool_calls
+                    .get(&tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), None));
+                let output = if is_error {
+                    ToolResultOutput::ErrorJson {
+                        value: result_value,
+                        provider_options: None,
+                    }
+                } else {
+                    ToolResultOutput::Json {
+                        value: result_value,
+                        provider_options: None,
+                    }
+                };
+                content.push(Content::ToolResult(ToolResult {
+                    tool_call_id: tool_use_id,
+                    tool_name,
+                    output,
+                    preliminary: None,
+                    provider_metadata,
+                }));
+            }
             ResponseContent::WebSearchToolResult(v)
             | ResponseContent::WebFetchToolResult(v)
             | ResponseContent::CodeExecutionToolResult(v)
             | ResponseContent::BashCodeExecutionToolResult(v)
             | ResponseContent::TextEditorCodeExecutionToolResult(v)
-            | ResponseContent::McpToolUse(v)
-            | ResponseContent::McpToolResult(v)
             | ResponseContent::ToolSearchToolResult(v)
             | ResponseContent::AdvisorToolResult(v) => {
                 let (tool_call_id, tool_name) = extract_tool_call_id_and_name(&v);
@@ -205,6 +268,7 @@ pub(crate) fn parse_response(
                     tool_call_id,
                     tool_name,
                     output,
+                    preliminary: None,
                     provider_metadata,
                 }));
             }
@@ -398,6 +462,54 @@ pub(crate) fn is_tool_result_error(v: &JsonValue) -> bool {
         });
     }
     false
+}
+
+/// Extract `id`, `name`, and optional `server_name` from a raw
+/// `mcp_tool_use` block. Defaults to the empty string when a field is
+/// missing so the rest of the pipeline does not have to handle `Option`.
+fn extract_mcp_call_meta(v: &JsonValue) -> (String, String, Option<String>) {
+    let Some(map) = v.as_object() else {
+        return (String::new(), String::new(), None);
+    };
+    let id = map
+        .get("id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let name = map
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let server_name = map
+        .get("server_name")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    (id, name, server_name)
+}
+
+/// Build the `anthropic` slot of an MCP tool-call's provider metadata.
+///
+/// Mirrors upstream `providerMetadata.anthropic.{type, serverName}`.
+fn mcp_tool_use_metadata(server_name: Option<&str>) -> ProviderMetadata {
+    let mut anthropic = Map::new();
+    anthropic.insert("type".into(), JsonValue::String("mcp-tool-use".into()));
+    if let Some(sn) = server_name {
+        anthropic.insert("serverName".into(), JsonValue::String(sn.to_owned()));
+    }
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".into(), anthropic);
+    pm
+}
+
+/// Echo the provider metadata into a [`ProviderOptions`] map so the
+/// tool-call carries the same hints when consumers serialize it back.
+fn provider_metadata_to_options(pm: &ProviderMetadata) -> ProviderOptions {
+    let mut opts = ProviderOptions::new();
+    for (key, value) in pm {
+        opts.insert(key.clone(), value.clone());
+    }
+    opts
 }
 
 /// Build a `provider_options` map for a [`ReasoningPart`] that carries the

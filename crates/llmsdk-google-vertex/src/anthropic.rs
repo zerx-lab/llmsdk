@@ -132,7 +132,10 @@ async fn build_anthropic_inner(state: &VertexInner) -> Result<AnthropicInner, Pr
             };
             format!("{base}/models/{model_id}:{suffix}")
         })
-        .body_transform(|body| {
+        .body_transform(|body, _betas| {
+            // Vertex puts model in the URL and fixes the API version; betas
+            // ride along on the `anthropic-beta` header (default path), so
+            // this transformer leaves them alone.
             if let Value::Object(map) = body {
                 map.remove("model");
                 map.insert(
@@ -213,7 +216,8 @@ mod tests {
         let p = GoogleVertex::builder().api_key("k").build().await.unwrap();
         let inner = build_anthropic_inner(p.inner.as_ref()).await.unwrap();
         let mut body = serde_json::json!({"model": "claude-sonnet-4-5", "messages": []});
-        inner.transform_body(&mut body);
+        let betas = std::collections::BTreeSet::new();
+        inner.transform_body(&mut body, &betas);
         let obj = body.as_object().unwrap();
         assert!(obj.get("model").is_none());
         assert_eq!(

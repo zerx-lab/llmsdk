@@ -23,11 +23,13 @@ use serde::Deserialize;
 use crate::config::Inner;
 use crate::error::rewrite_openai_error;
 
-const GPT_4O_TRANSCRIBE_MODELS: &[&str] = &[
-    "gpt-4o-transcribe",
-    "gpt-4o-mini-transcribe",
-    "gpt-4o-transcribe-diarize",
-];
+/// Models that prefer the lighter `json` response format over `verbose_json`.
+///
+/// Mirrors upstream `openai-transcription-model.ts:162-165`. Note that
+/// `gpt-4o-transcribe-diarize` is intentionally **not** listed — upstream
+/// treats it like every other non-whisper model and routes it through
+/// `verbose_json` so segment timings survive.
+const GPT_4O_TRANSCRIBE_MODELS: &[&str] = &["gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
 
 /// `OpenAI` speech-to-text model handle.
 #[derive(Debug, Clone)]
@@ -112,10 +114,15 @@ impl TranscriptionModel for OpenAiTranscriptionModel {
         );
         mp.text("model", &self.model_id);
 
+        // Mirror upstream `openai-transcription-model.ts:156-178`: whisper-1
+        // always pins `verbose_json`, but every other model only emits
+        // `response_format` when the caller actually supplied
+        // `provider_options.openai.*` — without that gate the server-side
+        // default would never be reachable.
         let is_gpt_4o = GPT_4O_TRANSCRIBE_MODELS.contains(&self.model_id.as_str());
         if self.model_id == "whisper-1" {
             mp.text("response_format", "verbose_json");
-        } else {
+        } else if provider_opts.is_some() {
             mp.text(
                 "response_format",
                 if is_gpt_4o { "json" } else { "verbose_json" },
@@ -380,5 +387,16 @@ mod tests {
         let po = ProviderOptions::new();
         assert!(parse_options(Some(&po)).is_none());
         assert!(parse_options(None).is_none());
+    }
+
+    #[test]
+    fn gpt4o_transcribe_list_excludes_diarize() {
+        // `gpt-4o-transcribe-diarize` is NOT a member of the upstream
+        // `isGpt4oTranscribeModel` array (upstream lines 162-165). It must
+        // therefore route through `verbose_json` like every other non-whisper
+        // model, otherwise segment timings are lost.
+        assert!(GPT_4O_TRANSCRIBE_MODELS.contains(&"gpt-4o-transcribe"));
+        assert!(GPT_4O_TRANSCRIBE_MODELS.contains(&"gpt-4o-mini-transcribe"));
+        assert!(!GPT_4O_TRANSCRIBE_MODELS.contains(&"gpt-4o-transcribe-diarize"));
     }
 }

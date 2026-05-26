@@ -138,6 +138,7 @@ pub(crate) fn make_stream(
                                         value: Value::Object(out),
                                         provider_options: None,
                                     },
+                                    preliminary: None,
                                     provider_metadata: None,
                                 }));
                             }
@@ -276,6 +277,7 @@ pub(crate) fn make_stream(
                                         .unwrap_or_else(|| Value::Object(Map::new())),
                                     provider_options: None,
                                 },
+                                preliminary: None,
                                 provider_metadata: Some(server_meta),
                             }));
                         }

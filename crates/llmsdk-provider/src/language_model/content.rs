@@ -147,6 +147,14 @@ pub struct ToolResult {
     pub tool_name: String,
     /// Tool output.
     pub output: ToolResultOutput,
+    /// Whether the tool result is preliminary.
+    ///
+    /// Preliminary tool results replace each other (e.g., image previews
+    /// during `image_generation_call.partial_image` events). A non-preliminary
+    /// result is always emitted before the model treats the tool call as
+    /// final. Mirrors upstream `LanguageModelV4ToolResult.preliminary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preliminary: Option<bool>,
     /// Provider-specific metadata.
     #[serde(
         default,

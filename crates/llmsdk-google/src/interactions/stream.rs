@@ -820,6 +820,7 @@ fn close_open_block(
                         value: result.clone(),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
                 let mut id_gen = block_id_gen(&call_id);

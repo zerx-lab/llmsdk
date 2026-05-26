@@ -188,10 +188,25 @@ pub(crate) struct MessageDeltaInner {
     pub stop_reason: Option<String>,
 }
 
+/// `message_delta.usage` envelope.
+///
+/// Mirrors `anthropic-api.ts:1380-1384` — every field is optional because
+/// the server only sends the deltas it has and may omit the rest. We use
+/// these on each delta to update the running aggregate (see
+/// `stream.rs::on_event`). Iterations are forwarded verbatim because their
+/// shape mirrors the non-stream `ResponseUsage::iterations`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct MessageDeltaUsage {
     #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub iterations: Option<Vec<super::wire::WireUsageIteration>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

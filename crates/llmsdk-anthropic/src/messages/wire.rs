@@ -241,6 +241,27 @@ pub(crate) enum WireAssistantPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Provider-executed server tool reflected back to the model in a later
+    /// turn. Mirrors `server_tool_use` blocks in upstream
+    /// `convert-to-anthropic-prompt.ts:715-746`.
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Provider-executed MCP tool invocation reflected back. Mirrors
+    /// `mcp_tool_use` block in upstream
+    /// `convert-to-anthropic-prompt.ts:669-676`.
+    McpToolUse {
+        id: String,
+        name: String,
+        input: JsonValue,
+        server_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     /// Visible thinking block (signature required for cache replay).
     ///
     /// Thinking blocks cannot carry `cache_control` directly — they are

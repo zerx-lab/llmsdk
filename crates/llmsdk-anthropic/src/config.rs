@@ -34,10 +34,13 @@ pub type EndpointFn = dyn Fn(&str, &str, bool) -> String + Send + Sync;
 
 /// Per-request body transformer used by [`Inner::body_transformer`].
 ///
-/// Called on the JSON wire body just before serialization. Wrapping
-/// providers use this to strip `model` (Bedrock / Vertex put it in the
-/// URL) and inject `anthropic_version`.
-pub type BodyTransformFn = dyn Fn(&mut Value) + Send + Sync;
+/// Called on the JSON wire body just before serialization, with the full
+/// set of collected `anthropic-beta` tokens. Wrapping providers use this
+/// to strip `model` (Bedrock / Vertex put it in the URL), inject
+/// `anthropic_version`, and — for Bedrock — fold all collected `betas`
+/// into the body's `anthropic_beta` field (Bedrock's Anthropic surface
+/// reads the beta list from the body, not from headers).
+pub type BodyTransformFn = dyn Fn(&mut Value, &std::collections::BTreeSet<String>) + Send + Sync;
 
 /// Callback used to generate ids for `Source` parts produced from
 /// `citations_delta` blocks. Mirrors `config.generateId` in the upstream
@@ -128,9 +131,13 @@ impl Inner {
     }
 
     /// Apply the registered body transformer (no-op when none set).
-    pub fn transform_body(&self, body: &mut Value) {
+    ///
+    /// `betas` carries every `anthropic-beta` token the language-model
+    /// collected for this call so wrapping backends (Bedrock) can copy them
+    /// into the request body.
+    pub fn transform_body(&self, body: &mut Value, betas: &std::collections::BTreeSet<String>) {
         if let Some(f) = &self.body_transformer {
-            f(body);
+            f(body, betas);
         }
     }
 
@@ -264,7 +271,7 @@ impl InnerBuilder {
     #[must_use]
     pub fn body_transform<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mut Value) + Send + Sync + 'static,
+        F: Fn(&mut Value, &std::collections::BTreeSet<String>) + Send + Sync + 'static,
     {
         self.body_transformer = Some(Arc::new(f));
         self

@@ -255,6 +255,7 @@ fn collect_file_search(
             value: output_value,
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }

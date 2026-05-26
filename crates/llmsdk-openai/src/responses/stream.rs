@@ -255,9 +255,8 @@ impl StreamState {
                 partial_image_b64,
                 ..
             } => {
-                // ai-sdk marks these with `preliminary: true`. llmsdk trait
-                // has no field for that yet — surface it on provider_metadata.
-                let pm = self.make_pm(json!({"preliminary": true}));
+                // Upstream `openai-responses-language-model.ts:1920-1928`
+                // emits `preliminary: true` on the partial-image tool-result.
                 out.push(StreamPart::ToolResult(ToolResult {
                     tool_call_id: item_id,
                     tool_name: ids::IMAGE_GENERATION.into(),
@@ -265,7 +264,8 @@ impl StreamState {
                         value: json!({"result": partial_image_b64}),
                         provider_options: None,
                     },
-                    provider_metadata: Some(pm),
+                    preliminary: Some(true),
+                    provider_metadata: None,
                 }));
             }
             ResponsesChunk::CodeInterpreterCodeDelta {
@@ -945,6 +945,7 @@ impl StreamState {
                         value,
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -972,6 +973,7 @@ impl StreamState {
                         }),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -987,6 +989,7 @@ impl StreamState {
                         }),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -999,6 +1002,7 @@ impl StreamState {
                         value: json!({ "outputs": c.outputs }),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -1010,6 +1014,7 @@ impl StreamState {
                         value: json!({"result": i.result}),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -1051,6 +1056,7 @@ impl StreamState {
                         value: serde_json::to_value(&o.output).unwrap_or(JsonValue::Null),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -1093,6 +1099,7 @@ impl StreamState {
                         value: JsonValue::Object(payload),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: Some(pm),
                 }));
             }
@@ -1265,6 +1272,7 @@ impl StreamState {
                         value: json!({"tools": t.tools}),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: Some(pm),
                 }));
             }

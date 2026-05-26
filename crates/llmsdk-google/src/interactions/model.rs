@@ -16,7 +16,7 @@ use llmsdk_provider::language_model::{
     AssistantPart, CallOptions, Content, FilePart, FinishReason, FinishReasonKind,
     GenerateResponse, GenerateResult, InputTokenUsage, LanguageModel, Message, OutputTokenUsage,
     ReasoningPart, ResponseFormat, ResponseMetadata, StreamResponse, StreamResult, TextPart,
-    ToolCallPart, ToolMessagePart, ToolResultOutput, Usage, UserPart,
+    ToolCallPart, ToolMessagePart, ToolResult, ToolResultOutput, Usage, UserPart,
 };
 use llmsdk_provider::shared::{
     FileBytes, FileData, ProviderMetadata, ProviderOptions, RequestInfo, Warning,
@@ -1233,13 +1233,83 @@ fn translate_step_with<F: FnMut() -> String>(
     let Some(step_type) = step.get("type").and_then(JsonValue::as_str) else {
         return;
     };
-    // Built-in tool steps surface a Source list (mirroring upstream's
-    // `builtinToolResultToSources`); they don't translate to a content
-    // block on their own. Handled before the user-facing branches below.
+    // Built-in tool *call* steps (6 upstream types in `BUILTIN_TOOL_CALL_TYPES`)
+    // emit a provider-executed `Content::ToolCall`. Mirrors
+    // `parse-google-interactions-outputs.ts:200-219`.
     if matches!(
         step_type,
-        "url_context_result" | "google_search_result" | "google_maps_result" | "file_search_result"
+        "google_search_call"
+            | "code_execution_call"
+            | "url_context_call"
+            | "file_search_call"
+            | "google_maps_call"
+            | "mcp_server_tool_call"
     ) {
+        let id = step
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(&mut *id_gen);
+        let tool_name = if step_type == "mcp_server_tool_call" {
+            step.get("name")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("mcp_server_tool")
+                .to_owned()
+        } else {
+            // strip trailing `_call`
+            step_type.trim_end_matches("_call").to_owned()
+        };
+        let input = step
+            .get("arguments")
+            .cloned()
+            .unwrap_or(JsonValue::Object(JsonMap::new()));
+        out.push(Content::ToolCall(ToolCallPart {
+            tool_call_id: id,
+            tool_name,
+            input,
+            provider_executed: Some(true),
+            dynamic: None,
+            provider_options: None,
+        }));
+        return;
+    }
+    // Built-in tool *result* steps (6 upstream types in `BUILTIN_TOOL_RESULT_TYPES`)
+    // emit both a `Content::ToolResult` and any derivable citation sources.
+    // Mirrors `parse-google-interactions-outputs.ts:220-244`.
+    if matches!(
+        step_type,
+        "google_search_result"
+            | "code_execution_result"
+            | "url_context_result"
+            | "file_search_result"
+            | "google_maps_result"
+            | "mcp_server_tool_result"
+    ) {
+        let call_id = step
+            .get("call_id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(&mut *id_gen);
+        let tool_name = if step_type == "mcp_server_tool_result" {
+            step.get("name")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("mcp_server_tool")
+                .to_owned()
+        } else {
+            // strip trailing `_result`
+            step_type.trim_end_matches("_result").to_owned()
+        };
+        let result = step.get("result").cloned().unwrap_or(JsonValue::Null);
+        out.push(Content::ToolResult(ToolResult {
+            tool_call_id: call_id,
+            tool_name,
+            output: ToolResultOutput::Json {
+                value: result,
+                provider_options: None,
+            },
+            preliminary: None,
+            provider_metadata: None,
+        }));
         let sources = super::extract_sources::builtin_tool_result_to_sources(
             step_type,
             step.get("result"),

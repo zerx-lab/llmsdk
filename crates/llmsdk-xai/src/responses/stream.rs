@@ -538,6 +538,7 @@ fn handle_output_item(
                         value: output_value,
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }

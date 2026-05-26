@@ -67,7 +67,7 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
                 };
                 format!("{base}/model/{}/{suffix}", encode_path_segment(model_id))
             })
-            .body_transform(move |body: &mut Value| {
+            .body_transform(move |body: &mut Value, betas| {
                 let Some(obj) = body.as_object_mut() else {
                     return;
                 };
@@ -78,7 +78,7 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
                     "anthropic_version".to_owned(),
                     Value::String("bedrock-2023-05-31".to_owned()),
                 );
-                apply_bedrock_tool_upgrades(obj);
+                apply_bedrock_tool_upgrades(obj, betas);
             })
             .build()?;
 
@@ -97,46 +97,52 @@ fn encode_path_segment(input: &str) -> String {
 /// `str_replace_based_edit_tool`), and collect the required
 /// `anthropic_beta` tokens into the request body.
 ///
-/// Mirrors `BEDROCK_TOOL_VERSION_MAP` / `BEDROCK_TOOL_NAME_MAP` /
-/// `BEDROCK_TOOL_BETA_MAP` from
-/// `amazon-bedrock-anthropic-provider.ts`.
-fn apply_bedrock_tool_upgrades(obj: &mut serde_json::Map<String, Value>) {
-    let Some(Value::Array(tools)) = obj.get_mut("tools") else {
-        return;
-    };
-    let mut required_betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+/// `inherited_betas` carries every `anthropic-beta` token the
+/// language-model already collected for this call (per-tool betas surfaced
+/// by `convert_prompt`, `context_management` betas, caller-supplied header
+/// tokens, etc.). Bedrock's Anthropic surface reads the beta list from the
+/// request body — not from headers — so we have to mirror upstream
+/// `amazon-bedrock-anthropic-provider.ts:282-327`'s seeding of
+/// `requiredBetas` with `betas`.
+fn apply_bedrock_tool_upgrades(
+    obj: &mut serde_json::Map<String, Value>,
+    inherited_betas: &std::collections::BTreeSet<String>,
+) {
+    let mut required_betas: std::collections::BTreeSet<String> = inherited_betas.clone();
 
-    for tool in tools.iter_mut() {
-        let Some(tool_obj) = tool.as_object_mut() else {
-            continue;
-        };
-        let original_type = tool_obj
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        let Some(original_type) = original_type else {
-            continue;
-        };
+    if let Some(Value::Array(tools)) = obj.get_mut("tools") {
+        for tool in tools.iter_mut() {
+            let Some(tool_obj) = tool.as_object_mut() else {
+                continue;
+            };
+            let original_type = tool_obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let Some(original_type) = original_type else {
+                continue;
+            };
 
-        let upgraded_type = bedrock_tool_version_map(&original_type);
-        if let Some(new_type) = upgraded_type {
-            tool_obj.insert("type".to_owned(), Value::String(new_type.to_owned()));
-            if let Some(new_name) = bedrock_tool_name_map(new_type) {
-                tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+            let upgraded_type = bedrock_tool_version_map(&original_type);
+            if let Some(new_type) = upgraded_type {
+                tool_obj.insert("type".to_owned(), Value::String(new_type.to_owned()));
+                if let Some(new_name) = bedrock_tool_name_map(new_type) {
+                    tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+                }
+                if let Some(beta) = bedrock_tool_beta_map(new_type) {
+                    required_betas.insert(beta.to_owned());
+                }
+                continue;
             }
-            if let Some(beta) = bedrock_tool_beta_map(new_type) {
+
+            // Even when no version upgrade is needed, surface the required beta
+            // and apply any name override (parity with upstream's else branch).
+            if let Some(beta) = bedrock_tool_beta_map(&original_type) {
                 required_betas.insert(beta.to_owned());
             }
-            continue;
-        }
-
-        // Even when no version upgrade is needed, surface the required beta
-        // and apply any name override (parity with upstream's else branch).
-        if let Some(beta) = bedrock_tool_beta_map(&original_type) {
-            required_betas.insert(beta.to_owned());
-        }
-        if let Some(new_name) = bedrock_tool_name_map(&original_type) {
-            tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+            if let Some(new_name) = bedrock_tool_name_map(&original_type) {
+                tool_obj.insert("name".to_owned(), Value::String(new_name.to_owned()));
+            }
         }
     }
 
@@ -145,15 +151,14 @@ fn apply_bedrock_tool_upgrades(obj: &mut serde_json::Map<String, Value>) {
     }
 
     // Merge with any existing `anthropic_beta` array a caller may have set.
-    let mut merged: std::collections::BTreeSet<String> = required_betas;
     if let Some(Value::Array(existing)) = obj.get("anthropic_beta") {
         for v in existing {
             if let Some(s) = v.as_str() {
-                merged.insert(s.to_owned());
+                required_betas.insert(s.to_owned());
             }
         }
     }
-    let array: Vec<Value> = merged.into_iter().map(Value::String).collect();
+    let array: Vec<Value> = required_betas.into_iter().map(Value::String).collect();
     obj.insert("anthropic_beta".to_owned(), Value::Array(array));
 }
 
@@ -196,11 +201,28 @@ mod tests {
     use serde_json::json;
 
     fn run(input: Value) -> Value {
+        run_with_betas(input, &std::collections::BTreeSet::new())
+    }
+
+    fn run_with_betas(input: Value, betas: &std::collections::BTreeSet<String>) -> Value {
         let Value::Object(mut obj) = input else {
             panic!("test input must be object");
         };
-        apply_bedrock_tool_upgrades(&mut obj);
+        apply_bedrock_tool_upgrades(&mut obj, betas);
         Value::Object(obj)
+    }
+
+    #[test]
+    fn inherits_betas_from_language_model() {
+        // Mirrors upstream `requiredBetas = new Set<string>(betas)` —
+        // betas the language model collected (e.g. prompt-driven or from
+        // `context_management`) must surface on the body even when no
+        // tool-level upgrade fires.
+        let mut betas = std::collections::BTreeSet::new();
+        betas.insert("context-management-2026-01-12".to_owned());
+        let out = run_with_betas(json!({}), &betas);
+        let arr = out["anthropic_beta"].as_array().unwrap();
+        assert!(arr.iter().any(|v| v == "context-management-2026-01-12"));
     }
 
     #[test]

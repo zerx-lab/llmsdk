@@ -22,7 +22,7 @@
 //! `Finish` frame at the end.
 // Rust guideline compliant 2026-02-21
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use llmsdk_provider::language_model::{
@@ -100,6 +100,10 @@ pub(crate) struct StreamState {
     /// Set to true once a `name='json'` `tool_use` block is encountered so
     /// the final `Finish` frame can collapse `tool_use → stop`.
     is_json_response_from_tool: bool,
+    /// Cache of MCP tool-call entries so the matching `mcp_tool_result`
+    /// can inherit `toolName` + `providerMetadata`. Mirrors `mcpToolCalls`
+    /// in upstream `anthropic-language-model.ts:2026-2057`.
+    mcp_tool_calls: HashMap<String, (String, Option<ProviderMetadata>)>,
 }
 
 impl std::fmt::Debug for StreamState {
@@ -122,6 +126,7 @@ impl std::fmt::Debug for StreamState {
                 "is_json_response_from_tool",
                 &self.is_json_response_from_tool,
             )
+            .field("mcp_tool_calls", &self.mcp_tool_calls.keys())
             .finish()
     }
 }
@@ -156,6 +161,7 @@ impl StreamState {
             mark_code_execution_dynamic,
             uses_json_response_tool,
             is_json_response_from_tool: false,
+            mcp_tool_calls: HashMap::new(),
         }
     }
 
@@ -190,10 +196,27 @@ impl StreamState {
                 {
                     self.finish_reason = map_finish_reason(Some(reason));
                 }
-                if let Some(u) = usage
-                    && let Some(out_tokens) = u.output_tokens
-                {
-                    self.usage.output_tokens = out_tokens;
+                // Mirror upstream `anthropic-language-model.ts:2382-2401`:
+                // accept the delta's input_tokens/output_tokens (overwrite
+                // when newer) and propagate cache + iterations updates.
+                if let Some(u) = usage {
+                    if let Some(in_tokens) = u.input_tokens
+                        && self.usage.input_tokens != in_tokens
+                    {
+                        self.usage.input_tokens = in_tokens;
+                    }
+                    if let Some(out_tokens) = u.output_tokens {
+                        self.usage.output_tokens = out_tokens;
+                    }
+                    if let Some(cache_read) = u.cache_read_input_tokens {
+                        self.usage.cache_read_input_tokens = Some(cache_read);
+                    }
+                    if let Some(cache_creation) = u.cache_creation_input_tokens {
+                        self.usage.cache_creation_input_tokens = Some(cache_creation);
+                    }
+                    if let Some(iterations) = u.iterations {
+                        self.usage.iterations = Some(iterations);
+                    }
                 }
                 Vec::new()
             }
@@ -475,13 +498,91 @@ impl StreamState {
                 }
                 out
             }
+            BlockStart::McpToolUse(v) => {
+                // Mirror non-stream `parse_response.rs:McpToolUse` arm:
+                // emit a `ToolCall` tagged with `serverName` and cache the
+                // metadata for the trailing `mcp_tool_result` event.
+                let (id, name, server_name) = mcp_call_meta_from_value(&v);
+                let input = v
+                    .as_object()
+                    .and_then(|m| m.get("input").cloned())
+                    .unwrap_or(JsonValue::Null);
+                let provider_metadata = mcp_tool_use_metadata(server_name.as_deref());
+                self.mcp_tool_calls
+                    .insert(id.clone(), (name.clone(), Some(provider_metadata.clone())));
+                let input_json = serde_json::to_string(&input).unwrap_or_default();
+                let mut out = vec![
+                    StreamPart::ToolInputStart {
+                        id: id.clone(),
+                        tool_name: name.clone(),
+                        dynamic: Some(true),
+                        provider_executed: Some(true),
+                        title: None,
+                        provider_metadata: Some(provider_metadata.clone()),
+                    },
+                    StreamPart::ToolCall(ToolCallPart {
+                        tool_call_id: id.clone(),
+                        tool_name: name,
+                        input,
+                        provider_executed: Some(true),
+                        dynamic: Some(true),
+                        provider_options: Some(provider_metadata_to_options(&provider_metadata)),
+                    }),
+                ];
+                if !input_json.is_empty() && input_json != "{}" {
+                    out.push(StreamPart::ToolInputDelta {
+                        id,
+                        delta: input_json,
+                        provider_metadata: None,
+                    });
+                }
+                out
+            }
+            BlockStart::McpToolResult(v) => {
+                // Look up the cached tool-call entry to inherit toolName +
+                // providerMetadata. Mirrors upstream `2045-2057`.
+                let tool_use_id = v
+                    .as_object()
+                    .and_then(|m| m.get("tool_use_id").and_then(JsonValue::as_str))
+                    .unwrap_or_default()
+                    .to_owned();
+                let is_error = v
+                    .as_object()
+                    .and_then(|m| m.get("is_error").and_then(JsonValue::as_bool))
+                    .unwrap_or(false);
+                let result_value = v
+                    .as_object()
+                    .and_then(|m| m.get("content").cloned())
+                    .unwrap_or(JsonValue::Null);
+                let (tool_name, provider_metadata) = self
+                    .mcp_tool_calls
+                    .get(&tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), None));
+                let output = if is_error {
+                    ToolResultOutput::ErrorJson {
+                        value: result_value,
+                        provider_options: None,
+                    }
+                } else {
+                    ToolResultOutput::Json {
+                        value: result_value,
+                        provider_options: None,
+                    }
+                };
+                vec![StreamPart::ToolResult(ToolResult {
+                    tool_call_id: tool_use_id,
+                    tool_name,
+                    output,
+                    preliminary: None,
+                    provider_metadata,
+                })]
+            }
             BlockStart::WebSearchToolResult(v)
             | BlockStart::WebFetchToolResult(v)
             | BlockStart::CodeExecutionToolResult(v)
             | BlockStart::BashCodeExecutionToolResult(v)
             | BlockStart::TextEditorCodeExecutionToolResult(v)
-            | BlockStart::McpToolUse(v)
-            | BlockStart::McpToolResult(v)
             | BlockStart::ToolSearchToolResult(v)
             | BlockStart::AdvisorToolResult(v) => {
                 // Streaming variant of the 9 server-tool result content blocks
@@ -519,6 +620,7 @@ impl StreamState {
                     tool_call_id,
                     tool_name,
                     output,
+                    preliminary: None,
                     provider_metadata,
                 })]
             }
@@ -677,6 +779,50 @@ fn compaction_metadata() -> ProviderMetadata {
     let mut pm = ProviderMetadata::new();
     pm.insert("anthropic".to_owned(), anthropic);
     pm
+}
+
+/// Extract `id`, `name`, `server_name` from a raw `mcp_tool_use` block.
+fn mcp_call_meta_from_value(v: &JsonValue) -> (String, String, Option<String>) {
+    let Some(map) = v.as_object() else {
+        return (String::new(), String::new(), None);
+    };
+    let id = map
+        .get("id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let name = map
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let server_name = map
+        .get("server_name")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
+    (id, name, server_name)
+}
+
+/// Build the `anthropic` slot of an MCP tool-call's provider metadata.
+fn mcp_tool_use_metadata(server_name: Option<&str>) -> ProviderMetadata {
+    let mut anthropic = Map::new();
+    anthropic.insert("type".into(), JsonValue::String("mcp-tool-use".into()));
+    if let Some(sn) = server_name {
+        anthropic.insert("serverName".into(), JsonValue::String(sn.to_owned()));
+    }
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".into(), anthropic);
+    pm
+}
+
+/// Echo the provider metadata into a [`ProviderOptions`] map so the
+/// streaming tool-call carries the same hints when consumers serialize it.
+fn provider_metadata_to_options(pm: &ProviderMetadata) -> ProviderOptions {
+    let mut opts = ProviderOptions::new();
+    for (key, value) in pm {
+        opts.insert(key.clone(), value.clone());
+    }
+    opts
 }
 
 /// Mirrors `createCitationSource` in `anthropic-language-model.ts`.
@@ -873,7 +1019,11 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
             },
             usage: Some(MessageDeltaUsage {
+                input_tokens: None,
                 output_tokens: Some(2),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
             }),
         });
         assert!(f5.is_empty());

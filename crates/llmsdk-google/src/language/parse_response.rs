@@ -59,6 +59,7 @@ pub(crate) fn build_content(
                         value: Value::Object(out),
                         provider_options: None,
                     },
+                    preliminary: None,
                     provider_metadata: None,
                 }));
             }
@@ -180,6 +181,7 @@ pub(crate) fn build_content(
                     value: tr.response.clone().unwrap_or(Value::Object(Map::new())),
                     provider_options: None,
                 },
+                preliminary: None,
                 provider_metadata: Some(wrap_provider_metadata(provider_keys, server_meta)),
             }));
             continue;

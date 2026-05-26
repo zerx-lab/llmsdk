@@ -408,7 +408,11 @@ fn convert_assistant(
                 text: t.text.clone(),
                 cache_control,
             }),
-            AssistantPart::ToolCall(tc) => out.push(convert_tool_call(tc, cache_control)),
+            AssistantPart::ToolCall(tc) => {
+                if let Some(part) = convert_tool_call(tc, cache_control, warnings) {
+                    out.push(part);
+                }
+            }
             AssistantPart::Reasoning {
                 text,
                 provider_options,
@@ -483,18 +487,113 @@ fn extract_thinking_meta(
     (signature, redacted_data)
 }
 
-fn convert_tool_call(tc: &ToolCallPart, cache_control: Option<CacheControl>) -> WireAssistantPart {
+fn convert_tool_call(
+    tc: &ToolCallPart,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<llmsdk_provider::shared::Warning>,
+) -> Option<WireAssistantPart> {
     // Ensure input is always an object (Anthropic requires JSON-typed input).
     let input = if tc.input.is_null() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
         tc.input.clone()
     };
-    WireAssistantPart::ToolUse {
-        id: tc.tool_call_id.clone(),
-        name: tc.tool_name.clone(),
-        input,
-        cache_control,
+    if tc.provider_executed != Some(true) {
+        return Some(WireAssistantPart::ToolUse {
+            id: tc.tool_call_id.clone(),
+            name: tc.tool_name.clone(),
+            input,
+            cache_control,
+        });
+    }
+
+    // Mirror upstream `convert-to-anthropic-prompt.ts:647-756` provider-executed
+    // tool-call routing. `provider_tool_name` defaults to the tool's name —
+    // unlike upstream we don't apply a custom→provider rename map (callers
+    // who renamed a typed Anthropic tool will have to set the original name
+    // back when echoing the tool-call into a follow-up prompt).
+    let provider_tool_name = tc.tool_name.as_str();
+    let anthropic_opts = tc
+        .provider_options
+        .as_ref()
+        .and_then(|opts| opts.get("anthropic"));
+    let is_mcp = anthropic_opts
+        .and_then(|m| m.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("mcp-tool-use");
+
+    if is_mcp {
+        let server_name = anthropic_opts
+            .and_then(|m| m.get("serverName"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let Some(server_name) = server_name else {
+            warnings.push(llmsdk_provider::shared::Warning::Other {
+                message: "mcp tool use server name is required and must be a string".to_owned(),
+            });
+            return None;
+        };
+        return Some(WireAssistantPart::McpToolUse {
+            id: tc.tool_call_id.clone(),
+            name: tc.tool_name.clone(),
+            input,
+            server_name,
+            cache_control,
+        });
+    }
+
+    // `code_execution_20250825` introduces an envelope with an inner `type`
+    // tag that determines the wire `name` (mirrors upstream 677-713).
+    if provider_tool_name == "code_execution"
+        && let Some(input_obj) = input.as_object()
+        && let Some(inner_type) = input_obj.get("type").and_then(serde_json::Value::as_str)
+    {
+        match inner_type {
+            "bash_code_execution" | "text_editor_code_execution" => {
+                return Some(WireAssistantPart::ServerToolUse {
+                    id: tc.tool_call_id.clone(),
+                    name: inner_type.to_owned(),
+                    input: input.clone(),
+                    cache_control,
+                });
+            }
+            "programmatic-tool-call" => {
+                let mut sanitized = input_obj.clone();
+                sanitized.remove("type");
+                return Some(WireAssistantPart::ServerToolUse {
+                    id: tc.tool_call_id.clone(),
+                    name: "code_execution".to_owned(),
+                    input: serde_json::Value::Object(sanitized),
+                    cache_control,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    match provider_tool_name {
+        "code_execution"
+        | "web_fetch"
+        | "web_search"
+        | "tool_search_tool_regex"
+        | "tool_search_tool_bm25" => Some(WireAssistantPart::ServerToolUse {
+            id: tc.tool_call_id.clone(),
+            name: provider_tool_name.to_owned(),
+            input,
+            cache_control,
+        }),
+        "advisor" => Some(WireAssistantPart::ServerToolUse {
+            id: tc.tool_call_id.clone(),
+            name: "advisor".to_owned(),
+            input: serde_json::Value::Object(serde_json::Map::new()),
+            cache_control,
+        }),
+        other => {
+            warnings.push(llmsdk_provider::shared::Warning::Other {
+                message: format!("provider executed tool call for tool {other} is not supported"),
+            });
+            None
+        }
     }
 }
 

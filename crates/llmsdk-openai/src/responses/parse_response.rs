@@ -418,6 +418,7 @@ fn emit_web_search_call(
             value: JsonValue::Object(action_value),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -444,6 +445,7 @@ fn emit_file_search_call(item: &FileSearchCallItem, out: &mut Vec<Content>) {
             value: JsonValue::Object(output),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -472,6 +474,7 @@ fn emit_code_interpreter_call(item: &CodeInterpreterCallItem, out: &mut Vec<Cont
             value: JsonValue::Object(output),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -492,6 +495,7 @@ fn emit_image_generation_call(item: &ImageGenerationCallItem, out: &mut Vec<Cont
             value: json!({"result": item.result}),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -528,6 +532,7 @@ fn emit_computer_call(item: &ComputerCallItem, out: &mut Vec<Content>) {
             }),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -566,6 +571,7 @@ fn emit_mcp_call(item: &McpCallItem, provider_name: &str, out: &mut Vec<Content>
             value: JsonValue::Object(payload),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: Some(make_openai_pm(provider_name, body)),
     }));
 }
@@ -612,6 +618,7 @@ fn emit_shell_call_output(item: &ShellCallOutputItem, out: &mut Vec<Content>) {
             value: serde_json::to_value(&item.output).unwrap_or(JsonValue::Null),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: None,
     }));
 }
@@ -670,6 +677,7 @@ fn emit_tool_search_output(
             value: json!({"tools": item.tools}),
             provider_options: None,
         },
+        preliminary: None,
         provider_metadata: Some(make_openai_pm(provider_name, body)),
     }));
 }

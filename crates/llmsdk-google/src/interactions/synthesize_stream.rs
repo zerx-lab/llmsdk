@@ -194,6 +194,7 @@ fn unfold_content_part<F: FnMut() -> String>(
                 tool_call_id: tr.tool_call_id,
                 tool_name: tr.tool_name,
                 output: tr.output,
+                preliminary: None,
                 provider_metadata: tr.provider_metadata,
             }));
         }

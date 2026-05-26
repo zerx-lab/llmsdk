@@ -58,11 +58,17 @@ impl AnthropicMessagesModel {
 
     /// Serialize the typed request to JSON, then apply the optional
     /// body-transformer hook (Vertex / Bedrock strip `model` and inject
-    /// `anthropic_version`).
-    fn prepare_body(&self, request: &MessagesRequest) -> Result<serde_json::Value, ProviderError> {
+    /// `anthropic_version`). `betas` is forwarded so Bedrock can fold the
+    /// full beta list into the request body — Bedrock's Anthropic surface
+    /// reads it from the body, not headers.
+    fn prepare_body(
+        &self,
+        request: &MessagesRequest,
+        betas: &std::collections::BTreeSet<String>,
+    ) -> Result<serde_json::Value, ProviderError> {
         let mut value = serde_json::to_value(request)
             .map_err(|e| ProviderError::json_parse("<request body>", e.to_string()))?;
-        self.inner.transform_body(&mut value);
+        self.inner.transform_body(&mut value, betas);
         Ok(value)
     }
 
@@ -99,7 +105,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 self.inner.supports_native_structured_output(),
             );
 
-        let body_value = self.prepare_body(&request)?;
+        let body_value = self.prepare_body(&request, &betas)?;
         let request_body_value = Some(body_value.clone());
         let mut http_request = JsonRequest::new(self.endpoint(false), body_value);
         http_request.headers = self.merged_headers(options.headers.as_ref());
@@ -142,7 +148,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 self.inner.supports_native_structured_output(),
             );
 
-        let body_value = self.prepare_body(&request)?;
+        let body_value = self.prepare_body(&request, &betas)?;
         let request_body_value = Some(body_value.clone());
         let mut http_request = JsonRequest::new(self.endpoint(true), body_value);
         http_request.headers = self.merged_headers(options.headers.as_ref());
@@ -452,10 +458,20 @@ fn build_request(
         serde_json::Value::Array(arr)
     });
 
+    let messages = ensure_user_first(messages, &mut warnings);
+    let context_management = provider_opts
+        .context_management
+        .as_ref()
+        .map(|v| normalize_context_management(v, &mut warnings));
+    let container = provider_opts
+        .container
+        .as_ref()
+        .map(|v| normalize_container(v, &mut warnings));
+
     let request = MessagesRequest {
         model: model_id.to_owned(),
         max_tokens,
-        messages: ensure_user_first(messages, &mut warnings),
+        messages,
         system,
         temperature,
         top_p,
@@ -465,11 +481,8 @@ fn build_request(
         tools,
         tool_choice,
         thinking,
-        context_management: provider_opts
-            .context_management
-            .as_ref()
-            .map(normalize_context_management),
-        container: provider_opts.container.clone(),
+        context_management,
+        container,
         output_config,
         speed: provider_opts.speed.clone(),
         inference_geo: provider_opts.inference_geo.clone(),
@@ -501,14 +514,30 @@ fn build_request(
     )
 }
 
+/// Known `context_management.edits[].type` strategies.
+///
+/// Mirrors the switch arms in upstream `anthropic-language-model.ts:540-591`.
+/// Unknown strategies are dropped at normalize time with a warning so the
+/// wire payload does not get rejected wholesale by the Messages API.
+const KNOWN_CONTEXT_EDIT_STRATEGIES: &[&str] = &[
+    "clear_tool_uses_20250919",
+    "clear_thinking_20251015",
+    "compact_20260112",
+];
+
 /// Normalize the `context_management` provider-option value into the
 /// wire shape Anthropic expects (`snake_case` edit fields).
 ///
 /// Users may pass camelCase (matching ai-sdk option keys); this transform
 /// renames the known per-edit fields without altering structure for keys
-/// that pass-through unchanged. Mirrors the inline renames in upstream
-/// `anthropic-language-model.ts` `context_management.edits[]` builder.
-fn normalize_context_management(value: &serde_json::Value) -> serde_json::Value {
+/// that pass-through unchanged. Edits with an unrecognised `type` are
+/// filtered out and reported via `warnings` so callers can react without
+/// the request being rejected. Mirrors the inline renames + the unknown
+/// strategy filter in upstream `anthropic-language-model.ts:540-591`.
+fn normalize_context_management(
+    value: &serde_json::Value,
+    warnings: &mut Vec<Warning>,
+) -> serde_json::Value {
     let serde_json::Value::Object(map) = value else {
         return value.clone();
     };
@@ -517,7 +546,10 @@ fn normalize_context_management(value: &serde_json::Value) -> serde_json::Value 
         if key == "edits"
             && let serde_json::Value::Array(items) = val
         {
-            let edits = items.iter().map(normalize_edit).collect();
+            let edits: Vec<serde_json::Value> = items
+                .iter()
+                .filter_map(|edit| normalize_edit(edit, warnings))
+                .collect();
             out.insert("edits".into(), serde_json::Value::Array(edits));
             continue;
         }
@@ -527,10 +559,24 @@ fn normalize_context_management(value: &serde_json::Value) -> serde_json::Value 
 }
 
 /// Rename known `camelCase` keys inside one edit entry to `snake_case`.
-fn normalize_edit(edit: &serde_json::Value) -> serde_json::Value {
+///
+/// Returns `None` (with a warning) when the edit's `type` is not one of
+/// the strategies in [`KNOWN_CONTEXT_EDIT_STRATEGIES`].
+fn normalize_edit(
+    edit: &serde_json::Value,
+    warnings: &mut Vec<Warning>,
+) -> Option<serde_json::Value> {
     let serde_json::Value::Object(map) = edit else {
-        return edit.clone();
+        return Some(edit.clone());
     };
+    if let Some(serde_json::Value::String(strategy)) = map.get("type")
+        && !KNOWN_CONTEXT_EDIT_STRATEGIES.contains(&strategy.as_str())
+    {
+        warnings.push(Warning::Other {
+            message: format!("Unknown context management strategy: {strategy}"),
+        });
+        return None;
+    }
     let mut out = serde_json::Map::with_capacity(map.len());
     for (key, val) in map {
         let renamed = match key.as_str() {
@@ -542,7 +588,89 @@ fn normalize_edit(edit: &serde_json::Value) -> serde_json::Value {
         };
         out.insert(renamed.to_owned(), val.clone());
     }
+    Some(serde_json::Value::Object(out))
+}
+
+/// Normalize the `container` provider-option value into the wire shape
+/// Anthropic expects.
+///
+/// String containers (id-only programmatic tool calling) pass through
+/// unchanged. Object containers carry an optional `skills` array whose
+/// entries are converted to the wire form `{type, skill_id, version?}`:
+///
+/// - `type = "anthropic"`: `skill_id` taken from `skillId`.
+/// - `type = "custom"`:    `skill_id` resolved from
+///   `providerReference["anthropic"]` (mirrors `resolveProviderReference`).
+///
+/// Entries with an unknown skill `type` or a missing identifier are
+/// dropped with a warning. Mirrors upstream
+/// `anthropic-language-model.ts:511-533`.
+fn normalize_container(
+    value: &serde_json::Value,
+    warnings: &mut Vec<Warning>,
+) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value.clone();
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (key, val) in map {
+        if key == "skills"
+            && let serde_json::Value::Array(items) = val
+        {
+            let skills: Vec<serde_json::Value> = items
+                .iter()
+                .filter_map(|skill| normalize_skill(skill, warnings))
+                .collect();
+            out.insert("skills".into(), serde_json::Value::Array(skills));
+            continue;
+        }
+        out.insert(key.clone(), val.clone());
+    }
     serde_json::Value::Object(out)
+}
+
+/// Convert one `skills[]` entry to its wire shape.
+///
+/// Returns `None` (with a warning) for unknown skill types or missing
+/// identifiers so the resulting wire payload contains only valid entries.
+fn normalize_skill(
+    skill: &serde_json::Value,
+    warnings: &mut Vec<Warning>,
+) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(map) = skill else {
+        return Some(skill.clone());
+    };
+    let kind = map.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let version = map.get("version").cloned();
+    let skill_id = match kind {
+        "anthropic" => map.get("skillId").cloned(),
+        "custom" => map
+            .get("providerReference")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|r| r.get("anthropic"))
+            .cloned(),
+        other => {
+            warnings.push(Warning::Other {
+                message: format!("Unknown container skill type: {other}"),
+            });
+            return None;
+        }
+    };
+    let Some(skill_id) = skill_id else {
+        warnings.push(Warning::Other {
+            message: format!(
+                "container skill of type '{kind}' is missing its identifier (skillId or providerReference['anthropic'])"
+            ),
+        });
+        return None;
+    };
+    let mut out = serde_json::Map::with_capacity(3);
+    out.insert("type".into(), serde_json::Value::String(kind.to_owned()));
+    out.insert("skill_id".into(), skill_id);
+    if let Some(v) = version {
+        out.insert("version".into(), v);
+    }
+    Some(serde_json::Value::Object(out))
 }
 
 /// Merge collected beta tokens into the `anthropic-beta` header.
@@ -1043,5 +1171,131 @@ where
         for part in state.flush() {
             yield Ok(part);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_container, normalize_context_management};
+    use llmsdk_provider::shared::Warning;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_container_renames_anthropic_skill_to_snake_case() {
+        let mut warnings = Vec::new();
+        let input = json!({
+            "id": "ctr-1",
+            "skills": [{"type": "anthropic", "skillId": "doc-processor", "version": "1.0"}],
+        });
+        let out = normalize_container(&input, &mut warnings);
+        assert_eq!(
+            out,
+            json!({
+                "id": "ctr-1",
+                "skills": [{"type": "anthropic", "skill_id": "doc-processor", "version": "1.0"}],
+            }),
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn normalize_container_resolves_custom_provider_reference() {
+        let mut warnings = Vec::new();
+        let input = json!({
+            "skills": [{
+                "type": "custom",
+                "providerReference": {"anthropic": "skill-abc", "openai": "ignored"},
+                "version": "2",
+            }],
+        });
+        let out = normalize_container(&input, &mut warnings);
+        assert_eq!(
+            out,
+            json!({
+                "skills": [{"type": "custom", "skill_id": "skill-abc", "version": "2"}],
+            }),
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn normalize_container_drops_skill_missing_identifier_with_warning() {
+        let mut warnings = Vec::new();
+        let input = json!({
+            "skills": [
+                {"type": "custom", "providerReference": {"openai": "x"}},
+                {"type": "anthropic", "skillId": "ok"},
+            ],
+        });
+        let out = normalize_container(&input, &mut warnings);
+        assert_eq!(
+            out,
+            json!({
+                "skills": [{"type": "anthropic", "skill_id": "ok"}],
+            }),
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(&warnings[0], Warning::Other { message } if message.contains("custom")));
+    }
+
+    #[test]
+    fn normalize_container_string_id_passes_through_unchanged() {
+        let mut warnings = Vec::new();
+        let input = json!("ctr-id-only");
+        let out = normalize_container(&input, &mut warnings);
+        assert_eq!(out, json!("ctr-id-only"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn normalize_context_management_filters_unknown_strategy_with_warning() {
+        let mut warnings = Vec::new();
+        let input = json!({
+            "edits": [
+                {"type": "clear_tool_uses_20250919", "clearAtLeast": {"type": "input_tokens", "value": 1000}},
+                {"type": "unknown_strategy", "foo": "bar"},
+                {"type": "compact_20260112", "pauseAfterCompaction": true},
+            ],
+        });
+        let out = normalize_context_management(&input, &mut warnings);
+        assert_eq!(
+            out,
+            json!({
+                "edits": [
+                    {"type": "clear_tool_uses_20250919", "clear_at_least": {"type": "input_tokens", "value": 1000}},
+                    {"type": "compact_20260112", "pause_after_compaction": true},
+                ],
+            }),
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            matches!(&warnings[0], Warning::Other { message } if message.contains("unknown_strategy"))
+        );
+    }
+
+    #[test]
+    fn normalize_context_management_renames_all_camel_case_fields() {
+        let mut warnings = Vec::new();
+        let input = json!({
+            "edits": [{
+                "type": "clear_tool_uses_20250919",
+                "clearAtLeast": {"type": "input_tokens", "value": 100},
+                "clearToolInputs": true,
+                "excludeTools": ["foo", "bar"],
+            }],
+        });
+        let out = normalize_context_management(&input, &mut warnings);
+        assert_eq!(
+            out,
+            json!({
+                "edits": [{
+                    "type": "clear_tool_uses_20250919",
+                    "clear_at_least": {"type": "input_tokens", "value": 100},
+                    "clear_tool_inputs": true,
+                    "exclude_tools": ["foo", "bar"],
+                }],
+            }),
+        );
+        assert!(warnings.is_empty());
     }
 }

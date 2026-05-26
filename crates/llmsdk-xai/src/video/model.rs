@@ -149,6 +149,17 @@ impl VideoModel for XaiVideoModel {
                         .build());
                     }
 
+                    // Upstream `xai-video-model.ts:324-330` rejects an empty
+                    // URL after the moderation check (zod allows `""`).
+                    if video.url.is_empty() {
+                        return Err(ProviderError::api_call_builder(
+                            &poll_url,
+                            "video generation completed but no video URL was returned",
+                        )
+                        .response_body("empty `video.url`")
+                        .build());
+                    }
+
                     return Ok(VideoResult {
                         videos: vec![VideoData::Url {
                             url: video.url.clone(),
