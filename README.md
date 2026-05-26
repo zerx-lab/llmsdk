@@ -23,25 +23,37 @@ let result = model.do_generate(opts).await?;
 | --- | --- |
 | [`llmsdk`](crates/llmsdk) | Umbrella facade — re-exports `llmsdk-provider` at the root plus one feature-gated module per concrete provider |
 | [`llmsdk-provider`](crates/llmsdk-provider) | Core traits, error types, shared types, middleware layer |
-| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API-key loading |
-| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat, Responses, Embeddings, Images |
-| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages, Files, Skills, typed server tools |
-| [`llmsdk-xai`](crates/llmsdk-xai) | xAI Chat, Responses, Image, Video, Files, typed server tools |
+| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API-key loading (+ optional AWS SigV4 / EventStream helpers) |
+| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat / Completion / Responses / Embedding / Image / Files / Skills / Speech / Transcription |
+| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages + Files + Skills + 20 typed server tools |
+| [`llmsdk-xai`](crates/llmsdk-xai) | xAI Chat / Responses / Image / Video / Files + 7 typed server tools |
 | [`llmsdk-mistral`](crates/llmsdk-mistral) | Mistral Chat + Embedding (incl. magistral reasoning) |
-| [`llmsdk-azure`](crates/llmsdk-azure) | Azure OpenAI Chat / Responses / Embedding / Image |
+| [`llmsdk-azure`](crates/llmsdk-azure) | Azure OpenAI Chat / Completion / Responses / Embedding / Image / Speech / Transcription |
 | [`llmsdk-cohere`](crates/llmsdk-cohere) | Cohere Chat + Embedding + Reranking |
 | [`llmsdk-google`](crates/llmsdk-google) | Google Gemini language + Embedding + Imagen + Veo + Files + 8 typed tools |
-| [`llmsdk-anthropic-aws`](crates/llmsdk-anthropic-aws) | Claude on AWS (Anthropic-managed deployment) |
+| [`llmsdk-anthropic-aws`](crates/llmsdk-anthropic-aws) | Claude on AWS (Anthropic-managed deployment, SigV4 / API-key auth) |
 | [`llmsdk-amazon-bedrock`](crates/llmsdk-amazon-bedrock) | Amazon Bedrock Converse + Embedding + Image + Anthropic + Reranking |
 | [`llmsdk-google-vertex`](crates/llmsdk-google-vertex) | Vertex Gemini + Embedding + Image + Video + Anthropic + xAI + MaaS |
 
 ## Capability matrix
 
-| Provider | Generate | Stream | Tools | Embedding | Image | Reasoning | Files / Skills |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenAI Chat       | ✓ | ✓ | ✓ | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1: generations + edits + variations) | ✓ (o1 / o3 / o4-mini / gpt-5*) | — |
-| OpenAI Responses  | ✓ | ✓ | ✓ + 11 provider-defined tools | — | — | ✓ (reasoning summary streaming) | — |
-| Anthropic         | ✓ | ✓ | ✓ + 20 typed server tools | — | — | ✓ (extended thinking, visible + redacted) | ✓ |
+`Tools` lists provider-defined / typed server tools (function tools are
+available everywhere `Lang` is `✓`). `Reason.` is reasoning output —
+either `Content::Reasoning` in the response or `reasoning_effort` /
+`thinking` knobs in `provider_options.*`.
+
+| Provider | Lang | Stream | Tools | Reason. | Embed | Image | Video | Rerank | Files | Skills | Speech / STT |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenAI               | ✓ Chat + Completion + Responses | ✓ | 11 (Responses) | ✓ (o1 / o3 / o4-mini / gpt-5* + Responses summary) | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1: generations + edits + variations) | — | — | ✓ | ✓ | ✓ / ✓ |
+| Anthropic            | ✓ Messages | ✓ | 20 | ✓ (extended thinking, visible + redacted) | — | — | — | — | ✓ | ✓ | — / — |
+| xAI                  | ✓ Chat + Responses | ✓ | 7  | ✓ (grok-3-mini / grok-4 `reasoning_effort`) | — | ✓ | ✓ (Aurora LRO) | — | ✓ | — | — / — |
+| Mistral              | ✓ Chat | ✓ | — | ✓ (magistral `thinking` + `reasoning_effort`) | ✓ | — | — | — | — | — | — / — |
+| Azure (OpenAI)       | ✓ Chat + Completion + Responses | ✓ | 11 | ✓ (inherits OpenAI) | ✓ | ✓ | — | — | — | — | ✓ / ✓ |
+| Cohere               | ✓ Chat | ✓ | — | ✓ (`tool_plan` → reasoning) | ✓ | — | — | ✓ | — | — | — / — |
+| Google Gemini        | ✓ | ✓ | 8 | ✓ (`includeThoughts` + `thinkingBudget`) | ✓ | ✓ (Imagen) | ✓ (Veo LRO) | — | ✓ | — | — / — |
+| Anthropic on AWS     | ✓ Messages | ✓ | 20 (Anthropic) | ✓ | — | — | — | — | ✓ | ✓ | — / — |
+| Amazon Bedrock       | ✓ Converse + Anthropic-on-Bedrock | ✓ | 19 (Anthropic-on-Bedrock only) | ✓ (reasoning metadata + Anthropic thinking) | ✓ (Titan / Cohere Embed / Nova) | ✓ (Nova, 5 task types) | — | ✓ (`amazon.rerank-v1` / `cohere.rerank-v3-5`) | — | — | — / — |
+| Google Vertex        | ✓ Gemini + Anthropic + xAI + MaaS | ✓ | 8 Gemini + 20 Anthropic-on-Vertex | ✓ (inherits Gemini + Anthropic) | ✓ | ✓ (Imagen + Gemini) | ✓ (Veo) | — | — | — | — / — |
 
 Provider-specific knobs (OpenAI `prediction` / `store` / `service_tier` /
 `prompt_cache_key` / `logit_bias` / `text.verbosity` / `strict_json_schema` /
@@ -136,8 +148,10 @@ needed.
 
 ## Middleware stack
 
-Every model surface (`LanguageModel` / `EmbeddingModel` / `ImageModel`) can be
-wrapped with composable middleware. Order is outermost-first:
+Every model surface (`LanguageModel` / `EmbeddingModel` / `ImageModel` /
+`VideoModel` / `RerankingModel`) can be wrapped with composable middleware;
+`wrap_provider` lifts a `ProviderMiddlewareSet` over an entire `Provider`.
+Order is outermost-first:
 
 ```rust
 use llmsdk::{
@@ -179,7 +193,7 @@ Built-in middleware:
 - `#![forbid(unsafe_code)]` across the workspace
 - No `unwrap()` / `expect()` outside tests — errors flow through `?` + `thiserror`
 - Public API requires doc comments + at least one doctest or example
-- Minimal dependencies: jitter, LRU, multipart, and base64 are all implemented in-tree (only `schemars` is pulled in for JSON schema)
+- Minimal dependencies: jitter, LRU, multipart, and base64 are all implemented in-tree. Third-party crates are only pulled in where the protocol forces it: `schemars` for JSON Schema, the `aws-sigv4` / `aws-smithy-eventstream` family for Bedrock + Anthropic-on-AWS, and `gcp_auth` for Vertex Standard Mode OAuth.
 - Default runtime: `tokio`
 - Workspace lints enable `clippy::pedantic` plus selected restriction lints
 

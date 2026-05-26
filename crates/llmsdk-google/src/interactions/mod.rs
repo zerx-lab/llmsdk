@@ -23,8 +23,13 @@
 //! wire shape is intentionally `.loose()` upstream too.
 // Rust guideline compliant 2026-05-25
 
+mod extract_sources;
 mod model;
+mod prepare_tools;
+mod stream;
+mod synthesize_stream;
 
 pub use model::{
     GoogleInteractionsAgent, GoogleInteractionsLanguageModel, GoogleInteractionsStatus,
+    builtin_agent,
 };

@@ -149,3 +149,17 @@ async fn embedding_model_provider_and_id_match() {
     assert_eq!(model.max_embeddings_per_call().await, Some(32));
     assert!(!model.supports_parallel_calls().await);
 }
+
+#[tokio::test]
+async fn embedding_aliases_route_to_same_model() {
+    let server = MockServer::start().await;
+    let provider = provider(&server);
+    for model in [
+        provider.embedding_model("mistral-embed"),
+        provider.text_embedding("mistral-embed"),
+        provider.text_embedding_model("mistral-embed"),
+    ] {
+        assert_eq!(model.provider(), "mistral");
+        assert_eq!(model.model_id(), "mistral-embed");
+    }
+}

@@ -23,25 +23,37 @@ let result = model.do_generate(opts).await?;
 | --- | --- |
 | [`llmsdk`](crates/llmsdk) | 聚合 facade —— 根路径 re-export `llmsdk-provider`，并为每个 provider 暴露一个 feature-gated 模块 |
 | [`llmsdk-provider`](crates/llmsdk-provider) | 核心 trait、错误类型、共享类型、中间件层 |
-| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API key 加载 |
-| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat / Responses / Embeddings / Images |
-| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages / Files / Skills / typed server tools |
-| [`llmsdk-xai`](crates/llmsdk-xai) | xAI Chat / Responses / Image / Video / Files / typed server tools |
+| [`llmsdk-provider-utils`](crates/llmsdk-provider-utils) | HTTP / SSE / multipart / API key 加载（含可选 AWS SigV4 / EventStream 工具） |
+| [`llmsdk-openai`](crates/llmsdk-openai) | OpenAI Chat / Completion / Responses / Embedding / Image / Files / Skills / Speech / Transcription |
+| [`llmsdk-anthropic`](crates/llmsdk-anthropic) | Anthropic Messages + Files + Skills + 20 个 typed server tools |
+| [`llmsdk-xai`](crates/llmsdk-xai) | xAI Chat / Responses / Image / Video / Files + 7 个 typed server tools |
 | [`llmsdk-mistral`](crates/llmsdk-mistral) | Mistral Chat + Embedding（含 magistral reasoning） |
-| [`llmsdk-azure`](crates/llmsdk-azure) | Azure OpenAI Chat / Responses / Embedding / Image |
+| [`llmsdk-azure`](crates/llmsdk-azure) | Azure OpenAI Chat / Completion / Responses / Embedding / Image / Speech / Transcription |
 | [`llmsdk-cohere`](crates/llmsdk-cohere) | Cohere Chat + Embedding + Reranking |
 | [`llmsdk-google`](crates/llmsdk-google) | Google Gemini language + Embedding + Imagen + Veo + Files + 8 个 typed tools |
-| [`llmsdk-anthropic-aws`](crates/llmsdk-anthropic-aws) | Claude on AWS（Anthropic 自有 AWS 部署） |
+| [`llmsdk-anthropic-aws`](crates/llmsdk-anthropic-aws) | Claude on AWS（Anthropic 自有 AWS 部署，支持 SigV4 / API Key 双认证） |
 | [`llmsdk-amazon-bedrock`](crates/llmsdk-amazon-bedrock) | Amazon Bedrock Converse + Embedding + Image + Anthropic + Reranking |
 | [`llmsdk-google-vertex`](crates/llmsdk-google-vertex) | Vertex Gemini + Embedding + Image + Video + Anthropic + xAI + MaaS |
 
 ## 能力矩阵
 
-| Provider | Generate | Stream | Tools | Embedding | Image | Reasoning | Files / Skills |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenAI Chat       | ✓ | ✓ | ✓ | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1：generations + edits + variations) | ✓ (o1 / o3 / o4-mini / gpt-5*) | — |
-| OpenAI Responses  | ✓ | ✓ | ✓ + 11 个 provider-defined 工具 | — | — | ✓ (reasoning summary 流式) | — |
-| Anthropic         | ✓ | ✓ | ✓ + 20 个 typed server 工具 | — | — | ✓ (extended thinking，visible + redacted) | ✓ |
+`Tools` 一列只统计 provider-defined / typed server tool（函数 tool 在
+`Lang` 为 `✓` 的 provider 上一律支持）。`Reason.` 表示 reasoning 输出
+——要么响应里出现 `Content::Reasoning`，要么 `provider_options.*` 暴露
+`reasoning_effort` / `thinking` 旋钮。
+
+| Provider | Lang | Stream | Tools | Reason. | Embed | Image | Video | Rerank | Files | Skills | Speech / STT |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenAI               | ✓ Chat + Completion + Responses | ✓ | 11（Responses） | ✓ (o1 / o3 / o4-mini / gpt-5* + Responses summary) | ✓ (`text-embedding-3-*`) | ✓ (DALL-E 3 / gpt-image-1：generations + edits + variations) | — | — | ✓ | ✓ | ✓ / ✓ |
+| Anthropic            | ✓ Messages | ✓ | 20 | ✓ (extended thinking，visible + redacted) | — | — | — | — | ✓ | ✓ | — / — |
+| xAI                  | ✓ Chat + Responses | ✓ | 7  | ✓ (grok-3-mini / grok-4 `reasoning_effort`) | — | ✓ | ✓ (Aurora LRO) | — | ✓ | — | — / — |
+| Mistral              | ✓ Chat | ✓ | — | ✓ (magistral `thinking` + `reasoning_effort`) | ✓ | — | — | — | — | — | — / — |
+| Azure (OpenAI)       | ✓ Chat + Completion + Responses | ✓ | 11 | ✓（继承 OpenAI） | ✓ | ✓ | — | — | — | — | ✓ / ✓ |
+| Cohere               | ✓ Chat | ✓ | — | ✓ (`tool_plan` → reasoning) | ✓ | — | — | ✓ | — | — | — / — |
+| Google Gemini        | ✓ | ✓ | 8 | ✓ (`includeThoughts` + `thinkingBudget`) | ✓ | ✓ (Imagen) | ✓ (Veo LRO) | — | ✓ | — | — / — |
+| Anthropic on AWS     | ✓ Messages | ✓ | 20（Anthropic） | ✓ | — | — | — | — | ✓ | ✓ | — / — |
+| Amazon Bedrock       | ✓ Converse + Anthropic-on-Bedrock | ✓ | 19（仅 Anthropic-on-Bedrock） | ✓（reasoning metadata + Anthropic thinking） | ✓ (Titan / Cohere Embed / Nova) | ✓ (Nova，5 个 task type) | — | ✓ (`amazon.rerank-v1` / `cohere.rerank-v3-5`) | — | — | — / — |
+| Google Vertex        | ✓ Gemini + Anthropic + xAI + MaaS | ✓ | 8 Gemini + 20 Anthropic-on-Vertex | ✓（继承 Gemini + Anthropic） | ✓ | ✓ (Imagen + Gemini) | ✓ (Veo) | — | — | — | — / — |
 
 provider 特有的细粒度选项（OpenAI 的 `prediction` / `store` / `service_tier` /
 `prompt_cache_key` / `logit_bias` / `text.verbosity` / `strict_json_schema` /
@@ -132,8 +144,10 @@ let result = model
 
 ## 中间件栈
 
-所有模型表面（`LanguageModel` / `EmbeddingModel` / `ImageModel`）都能用
-`wrap_*` 组合器叠加跨切面逻辑，列表头最外层执行：
+所有模型表面（`LanguageModel` / `EmbeddingModel` / `ImageModel` /
+`VideoModel` / `RerankingModel`）都能用 `wrap_*` 组合器叠加跨切面逻辑，
+列表头最外层执行；`wrap_provider` 则能把一个 `ProviderMiddlewareSet`
+套在整个 `Provider` 上：
 
 ```rust
 use llmsdk::{
@@ -175,7 +189,7 @@ let model = wrap_language_model(
 - 全 workspace `#![forbid(unsafe_code)]`
 - 非测试代码禁止 `unwrap()` / `expect()`，错误一律 `?` + `thiserror`
 - 公开 API 必须有 doc comment + 至少一个 doctest 或 example
-- 依赖最小化：jitter / LRU / multipart / base64 全部自实现，仅引入 `schemars` 处理 JSON schema
+- 依赖最小化：jitter / LRU / multipart / base64 全部自实现；引入第三方 crate 仅在协议层强制要求时——`schemars` 用于 JSON Schema，`aws-sigv4` / `aws-smithy-eventstream` 族用于 Bedrock + Anthropic-on-AWS，`gcp_auth` 用于 Vertex Standard Mode OAuth
 - 默认 runtime：`tokio`
 - workspace lints 启用 clippy `pedantic` + 部分 restriction lint
 

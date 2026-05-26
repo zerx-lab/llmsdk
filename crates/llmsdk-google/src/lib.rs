@@ -70,6 +70,7 @@ pub use files::GoogleFiles;
 pub use image::GoogleImageModel;
 pub use interactions::{
     GoogleInteractionsAgent, GoogleInteractionsLanguageModel, GoogleInteractionsStatus,
+    builtin_agent,
 };
 pub use language::GoogleLanguageModel;
 pub use video::GoogleVideoModel;

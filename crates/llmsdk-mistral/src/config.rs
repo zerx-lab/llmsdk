@@ -79,6 +79,12 @@ impl Mistral {
     pub fn text_embedding(&self, model_id: impl Into<String>) -> MistralEmbeddingModel {
         self.embedding(model_id)
     }
+
+    /// Deprecated alias of [`Self::embedding_model`] retained for ai-sdk parity.
+    #[must_use]
+    pub fn text_embedding_model(&self, model_id: impl Into<String>) -> MistralEmbeddingModel {
+        self.embedding(model_id)
+    }
 }
 
 /// Builder for [`Mistral`].

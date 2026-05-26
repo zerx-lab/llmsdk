@@ -11,13 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
     AssistantPart, CallOptions, Content, FilePart, FinishReason, FinishReasonKind,
     GenerateResponse, GenerateResult, InputTokenUsage, LanguageModel, Message, OutputTokenUsage,
-    ReasoningPart, ResponseFormat, ResponseMetadata, Source, StreamPart, StreamResponse,
-    StreamResult, TextPart, Tool, ToolCallPart, ToolMessagePart, ToolResultOutput, Usage, UserPart,
+    ReasoningPart, ResponseFormat, ResponseMetadata, StreamResponse, StreamResult, TextPart,
+    ToolCallPart, ToolMessagePart, ToolResultOutput, Usage, UserPart,
 };
 use llmsdk_provider::shared::{
     FileBytes, FileData, ProviderMetadata, ProviderOptions, RequestInfo, Warning,
@@ -25,21 +24,40 @@ use llmsdk_provider::shared::{
 use llmsdk_provider_utils::http::{
     JsonRequest, get_json, post_for_stream, post_json, response_byte_stream,
 };
-use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
+use llmsdk_provider_utils::sse::sse_json_stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
 use crate::config::Inner;
 use crate::error::rewrite_google_error;
 
-const INTERACTIONS_API_REVISION: &str = "v1";
-const INTERACTIONS_REVISION_HEADER: &str = "x-goog-api-revision";
+// Mirrors upstream `google-interactions-language-model.ts:761-763` —
+// `'Api-Revision': '2026-05-20'`. Pins the wire schema the SDK targets.
+const INTERACTIONS_API_REVISION: &str = "2026-05-20";
+const INTERACTIONS_REVISION_HEADER: &str = "Api-Revision";
 
 const DEFAULT_INITIAL_DELAY_MS: u64 = 1000;
 const DEFAULT_MAX_DELAY_MS: u64 = 10_000;
 const DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
-const TEXT_BLOCK_ID: &str = "text-0";
+/// Percent-encode a string for use in a URL path segment. Encodes anything
+/// outside the RFC 3986 `unreserved` set (`ALPHA / DIGIT / - . _ ~`). Mirrors
+/// upstream's `encodeURIComponent(interactionId)`.
+fn percent_encode_path_segment(input: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(input.len());
+    for b in input.as_bytes() {
+        let ch = *b;
+        if ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_' || ch == b'.' || ch == b'~' {
+            out.push(ch as char);
+        } else {
+            // Writing into an existing `String` via `write!` avoids the
+            // allocation `format!(..)` does for the percent encoding.
+            let _ = write!(out, "%{ch:02X}");
+        }
+    }
+    out
+}
 
 // -------- Public model handle ------------------------------------------
 
@@ -63,19 +81,44 @@ impl GoogleInteractionsAgent {
         }
     }
 
+    /// True when this handle targets an agent (builtin or managed), false
+    /// when it targets a plain model id. Drives the same request-body branch
+    /// as upstream's `isAgent` flag — agent calls must use `agent_config`
+    /// instead of `generation_config`, cannot send `tools` or `responseFormat`,
+    /// and require `background: true`.
+    #[must_use]
+    pub fn is_agent(&self) -> bool {
+        matches!(self, Self::Agent(_) | Self::ManagedAgent(_))
+    }
+
     fn apply_to_request(&self, body: &mut JsonMap<String, JsonValue>) {
         match self {
             Self::Model(id) => {
                 body.insert("model".into(), JsonValue::String(id.clone()));
             }
-            Self::Agent(id) => {
+            // Mirrors upstream `google-interactions-language-model.ts:112-117`:
+            // both `{agent}` and `{managedAgent}` forms route to the wire
+            // `agent` field; the API does not have a `managed_agent` field.
+            Self::Agent(id) | Self::ManagedAgent(id) => {
                 body.insert("agent".into(), JsonValue::String(id.clone()));
-            }
-            Self::ManagedAgent(id) => {
-                body.insert("managed_agent".into(), JsonValue::String(id.clone()));
             }
         }
     }
+}
+
+/// Built-in agent names declared by the Interactions API. Mirrors upstream
+/// `google-interactions-agent.ts`'s string-literal union — passing one of
+/// these into [`GoogleInteractionsAgent::Agent`] targets a hosted agent
+/// without needing to type the literal yourself.
+pub mod builtin_agent {
+    /// Deep Research (December 2025 preview, "pro" tier).
+    pub const DEEP_RESEARCH_PRO_PREVIEW_12_2025: &str = "deep-research-pro-preview-12-2025";
+    /// Deep Research (April 2026 preview).
+    pub const DEEP_RESEARCH_PREVIEW_04_2026: &str = "deep-research-preview-04-2026";
+    /// Deep Research (April 2026 preview, "max" tier).
+    pub const DEEP_RESEARCH_MAX_PREVIEW_04_2026: &str = "deep-research-max-preview-04-2026";
+    /// Antigravity (May 2026 preview).
+    pub const ANTIGRAVITY_PREVIEW_05_2026: &str = "antigravity-preview-05-2026";
 }
 
 /// Interaction lifecycle status returned by the API.
@@ -124,11 +167,21 @@ impl GoogleInteractionsLanguageModel {
     }
 
     fn poll_endpoint(&self, id: &str) -> String {
-        format!("{}/interactions/{id}", self.inner.base_url)
+        format!(
+            "{}/interactions/{}",
+            self.inner.base_url,
+            percent_encode_path_segment(id)
+        )
     }
 
+    // Mirrors upstream `cancel-google-interaction.ts:34` — path segment is
+    // `/cancel`, not the GCP-style `:cancel` verb.
     fn cancel_endpoint(&self, id: &str) -> String {
-        format!("{}/interactions/{id}:cancel", self.inner.base_url)
+        format!(
+            "{}/interactions/{}/cancel",
+            self.inner.base_url,
+            percent_encode_path_segment(id)
+        )
     }
 
     fn add_revision_header(headers: &mut HashMap<String, Option<String>>) {
@@ -211,6 +264,16 @@ impl LanguageModel for GoogleInteractionsLanguageModel {
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
         let provider_opts = parse_provider_options(options.provider_options.as_ref());
+        let is_background = provider_opts.background == Some(true);
+
+        // `background: true` is incompatible with `stream: true` on POST
+        // (mirrors upstream `doStreamBackground`). Drive agent calls via
+        // POST background → poll until terminal → synthesize the polled
+        // response as a deterministic stream sequence.
+        if is_background {
+            return self.do_stream_background(options, provider_opts).await;
+        }
+
         let (body, warnings) = build_request_body(&self.agent, &options, &provider_opts, true)?;
         let request_body_value = JsonValue::Object(body.clone());
 
@@ -230,11 +293,16 @@ impl LanguageModel for GoogleInteractionsLanguageModel {
             Err(err) => return Err(rewrite_google_error(err)),
         };
         let stream_headers = stream_response.headers.clone();
+        // Mirrors upstream `doStream` reading `x-gemini-service-tier` as a
+        // defensive fallback while the body event remains primary
+        // (`interaction.completed.service_tier`).
+        let header_service_tier = stream_headers.get("x-gemini-service-tier").cloned();
         let byte_stream = response_byte_stream(stream_response.response);
         let event_stream = sse_json_stream::<JsonValue>(byte_stream);
 
         let model_id = self.model_id().to_owned();
-        let parts = drive_stream(warnings, model_id, event_stream);
+        let parts =
+            super::stream::drive_stream(warnings, model_id, header_service_tier, event_stream);
 
         Ok(StreamResult {
             stream: Box::pin(parts),
@@ -243,6 +311,88 @@ impl LanguageModel for GoogleInteractionsLanguageModel {
             }),
             response: Some(StreamResponse {
                 headers: Some(headers_to_provider(stream_headers)),
+            }),
+        })
+    }
+}
+
+impl GoogleInteractionsLanguageModel {
+    /// Drive `do_stream` for background-mode interactions (required by agent
+    /// calls). Mirrors upstream `doStreamBackground` minus the live GET-SSE
+    /// reconnect loop: we POST background, poll until terminal, then
+    /// synthesize the polled response as a deterministic stream.
+    async fn do_stream_background(
+        &self,
+        options: CallOptions,
+        provider_opts: InteractionsProviderOptions,
+    ) -> Result<StreamResult, ProviderError> {
+        let (body, warnings) = build_request_body(&self.agent, &options, &provider_opts, false)?;
+        let request_body_value = JsonValue::Object(body.clone());
+
+        let mut headers = self.inner.headers.clone();
+        if let Some(extra) = &options.headers {
+            for (n, v) in extra {
+                headers.insert(n.clone(), v.clone());
+            }
+        }
+        Self::add_revision_header(&mut headers);
+
+        let mut http_request = JsonRequest::new(self.endpoint(), JsonValue::Object(body));
+        http_request.headers = headers.clone();
+
+        let envelope = match post_json::<JsonValue, JsonValue>(&self.inner.http, http_request).await
+        {
+            Ok(r) => r,
+            Err(err) => return Err(rewrite_google_error(err)),
+        };
+        let mut response = envelope.value;
+        let mut response_headers = envelope.headers;
+
+        let id = response
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if id.is_none() {
+            return Err(ProviderError::api_call_builder(
+                self.endpoint(),
+                "background POST response did not include an interaction id; cannot stream",
+            )
+            .build());
+        }
+        let id = id.expect("checked above");
+
+        // Poll the run until terminal so we have a complete payload to
+        // synthesize from.
+        let initial_status = response_status(&response);
+        if initial_status.is_some_and(|s| !s.is_terminal()) {
+            let (polled, polled_headers) = poll_until_terminal(
+                &self.inner,
+                &self.poll_endpoint(&id),
+                &headers,
+                &provider_opts,
+            )
+            .await?;
+            response = polled;
+            response_headers = polled_headers;
+        }
+
+        let header_service_tier = response_headers.get("x-gemini-service-tier").cloned();
+        let model_id = self.model_id().to_owned();
+        let parts = super::synthesize_stream::synthesize_response_to_stream(
+            response,
+            warnings,
+            model_id,
+            header_service_tier,
+        );
+
+        Ok(StreamResult {
+            stream: Box::pin(parts),
+            request: Some(RequestInfo {
+                body: Some(request_body_value),
+            }),
+            response: Some(StreamResponse {
+                headers: Some(headers_to_provider(response_headers)),
             }),
         })
     }
@@ -457,45 +607,157 @@ fn build_request_body(
         body.insert("system_instruction".into(), JsonValue::String(sys));
     }
 
-    // Tools / tool_choice (function tools only — typed provider-defined tools
-    // are not exposed on the Interactions surface in this minimal mapping).
-    if let Some(tools) = &options.tools {
-        let mut wire_tools = Vec::new();
-        for t in tools {
-            match t {
-                Tool::Function(f) => {
-                    let mut entry = JsonMap::new();
-                    entry.insert("type".into(), JsonValue::String("function".into()));
-                    entry.insert(
-                        "function".into(),
-                        json!({
-                            "name": f.name,
-                            "description": f.description,
-                            "parameters": serde_json::to_value(&f.input_schema)
-                                .unwrap_or(JsonValue::Null),
-                        }),
-                    );
-                    wire_tools.push(JsonValue::Object(entry));
-                }
-                Tool::Provider(_) => {
-                    warnings.push(Warning::Other {
-                        message:
-                            "provider-defined tools are not yet routed for Google Interactions"
-                                .to_owned(),
-                    });
-                }
-            }
+    // Tools / tool_choice routing — covers function tools + all 8 typed
+    // Google provider-defined tools (`google.google_search`, `code_execution`,
+    // `url_context`, `file_search`, `google_maps`, `computer_use`,
+    // `mcp_server`, `retrieval`). See `prepare_tools.rs`.
+    {
+        let prepared = super::prepare_tools::prepare_tools(
+            options.tools.as_deref(),
+            options.tool_choice.as_ref(),
+        );
+        warnings.extend(prepared.warnings);
+        if let Some(t) = prepared.tools {
+            body.insert("tools".into(), JsonValue::Array(t));
         }
-        if !wire_tools.is_empty() {
-            body.insert("tools".into(), JsonValue::Array(wire_tools));
+        if let Some(tc) = prepared.tool_choice {
+            // `tool_choice` is sent at the generation_config layer (mirrors
+            // upstream google-interactions-language-model.ts:311).
+            if let Some(JsonValue::Object(gc)) = body.get_mut("generation_config") {
+                gc.insert("tool_choice".into(), tc);
+            } else {
+                let mut gc = JsonMap::new();
+                gc.insert("tool_choice".into(), tc);
+                body.insert("generation_config".into(), JsonValue::Object(gc));
+            }
         }
     }
 
+    // Compaction (mirrors upstream `compactPromptForPreviousInteraction`):
+    // when `previousInteractionId` is set and `store !== false`, drop
+    // assistant turns whose parts carry a matching
+    // `providerOptions.google.interactionId`, plus the tool-result parts
+    // whose `toolCallId` came from a dropped assistant turn. The combo
+    // `previousInteractionId + store:false` is incoherent (the server has
+    // no record to reference); we warn but still send the full history,
+    // matching upstream.
+    let compact_buffer;
+    let prompt_slice: &[Message] = match (
+        provider_opts.previous_interaction_id.as_deref(),
+        provider_opts.store,
+    ) {
+        (Some(prev), store) if store != Some(false) => {
+            compact_buffer = compact_prompt_for_previous_interaction(&options.prompt, prev);
+            &compact_buffer
+        }
+        (Some(_), Some(false)) => {
+            warnings.push(Warning::Other {
+                message: "provider_options.google.previousInteractionId was set together with store: false; the full history will be sent and previous_interaction_id will still be emitted".to_owned(),
+            });
+            &options.prompt
+        }
+        _ => &options.prompt,
+    };
+
     // Input messages (everything after the system message).
-    let input = convert_prompt_to_input(&options.prompt, &mut warnings);
+    let input = convert_prompt_to_input(prompt_slice, &mut warnings);
     body.insert("input".into(), JsonValue::Array(input));
 
     Ok((body, warnings))
+}
+
+/// Drop assistant turns whose parts carry
+/// `providerOptions.google.interactionId == previousInteractionId`. Also
+/// prunes the tool-result parts whose `toolCallId` matches a dropped
+/// assistant tool-call. Mirrors upstream
+/// `convert-to-google-interactions-input.ts:326-375`.
+fn compact_prompt_for_previous_interaction(
+    prompt: &[Message],
+    previous_interaction_id: &str,
+) -> Vec<Message> {
+    let mut out = Vec::with_capacity(prompt.len());
+    let mut dropped_tool_call_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for msg in prompt {
+        match msg {
+            Message::Assistant { content, .. } => {
+                let matches_linked = content.iter().any(|part| match part {
+                    AssistantPart::Text(TextPart {
+                        provider_options, ..
+                    })
+                    | AssistantPart::Reasoning {
+                        provider_options, ..
+                    } => {
+                        part_has_interaction_id(provider_options.as_ref(), previous_interaction_id)
+                    }
+                    AssistantPart::ToolCall(tc) => part_has_interaction_id(
+                        tc.provider_options.as_ref(),
+                        previous_interaction_id,
+                    ),
+                    AssistantPart::File(f) => part_has_interaction_id(
+                        f.provider_options.as_ref(),
+                        previous_interaction_id,
+                    ),
+                    AssistantPart::ReasoningFile {
+                        provider_options, ..
+                    } => {
+                        part_has_interaction_id(provider_options.as_ref(), previous_interaction_id)
+                    }
+                    AssistantPart::ToolResult(tr) => part_has_interaction_id(
+                        tr.provider_options.as_ref(),
+                        previous_interaction_id,
+                    ),
+                    AssistantPart::Custom { .. } => false,
+                });
+                if matches_linked {
+                    for part in content {
+                        if let AssistantPart::ToolCall(tc) = part {
+                            dropped_tool_call_ids.insert(tc.tool_call_id.clone());
+                        }
+                    }
+                    continue;
+                }
+                out.push(msg.clone());
+            }
+            Message::Tool { content, .. } => {
+                let remaining: Vec<ToolMessagePart> = content
+                    .iter()
+                    .filter(|part| {
+                        if let ToolMessagePart::ToolResult(r) = part {
+                            !dropped_tool_call_ids.contains(&r.tool_call_id)
+                        } else {
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if remaining.is_empty() {
+                    continue;
+                }
+                if let Message::Tool {
+                    provider_options, ..
+                } = msg
+                {
+                    out.push(Message::Tool {
+                        content: remaining,
+                        provider_options: provider_options.clone(),
+                    });
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+
+    out
+}
+
+fn part_has_interaction_id(provider_options: Option<&ProviderOptions>, expected: &str) -> bool {
+    provider_options
+        .and_then(|po| po.get("google"))
+        .and_then(|g| g.get("interactionId"))
+        .and_then(JsonValue::as_str)
+        == Some(expected)
 }
 
 /// Convert llmsdk Prompt -> Interactions `input[]`. Each non-system message
@@ -687,6 +949,25 @@ fn response_status(response: &JsonValue) -> Option<GoogleInteractionsStatus> {
         })
 }
 
+/// Wire-string variant of [`map_finish_reason`]: takes the raw `status`
+/// string off a response/event and maps it through the same table. Mirrors
+/// upstream `mapGoogleInteractionsFinishReason({status, hasFunctionCall})`
+/// minus the `hasFunctionCall` branch — `completed` always maps to `Stop`
+/// in the non-tool case; the stream layer overrides to `ToolCalls` itself
+/// when it has seen a function call (kept inside stream state).
+pub(super) fn map_finish_reason_from_status(status: Option<&str>) -> FinishReason {
+    let parsed = status.and_then(|s| match s {
+        "in_progress" => Some(GoogleInteractionsStatus::InProgress),
+        "requires_action" => Some(GoogleInteractionsStatus::RequiresAction),
+        "completed" => Some(GoogleInteractionsStatus::Completed),
+        "failed" => Some(GoogleInteractionsStatus::Failed),
+        "cancelled" => Some(GoogleInteractionsStatus::Cancelled),
+        "incomplete" => Some(GoogleInteractionsStatus::Incomplete),
+        _ => None,
+    });
+    map_finish_reason(parsed)
+}
+
 fn map_finish_reason(status: Option<GoogleInteractionsStatus>) -> FinishReason {
     let (kind, raw) = match status {
         Some(GoogleInteractionsStatus::Completed) => (FinishReasonKind::Stop, "completed"),
@@ -768,15 +1049,57 @@ fn parse_response(
     })
 }
 
-fn translate_step(step: &JsonValue, out: &mut Vec<Content>) {
+pub(super) fn translate_step(step: &JsonValue, out: &mut Vec<Content>) {
+    translate_step_with(
+        step,
+        out,
+        &mut default_id_gen(),
+        &mut std::collections::HashSet::new(),
+    )
+}
+
+fn default_id_gen() -> impl FnMut() -> String {
+    let mut n = 0usize;
+    move || {
+        n += 1;
+        format!("gi-{n}")
+    }
+}
+
+fn translate_step_with<F: FnMut() -> String>(
+    step: &JsonValue,
+    out: &mut Vec<Content>,
+    id_gen: &mut F,
+    seen_sources: &mut std::collections::HashSet<String>,
+) {
     let Some(step_type) = step.get("type").and_then(JsonValue::as_str) else {
         return;
     };
+    // Built-in tool steps surface a Source list (mirroring upstream's
+    // `builtinToolResultToSources`); they don't translate to a content
+    // block on their own. Handled before the user-facing branches below.
+    if matches!(
+        step_type,
+        "url_context_result" | "google_search_result" | "google_maps_result" | "file_search_result"
+    ) {
+        let sources = super::extract_sources::builtin_tool_result_to_sources(
+            step_type,
+            step.get("result"),
+            id_gen,
+        );
+        for src in sources {
+            let key = super::extract_sources::source_key(&src);
+            if seen_sources.insert(key) {
+                out.push(Content::Source(src));
+            }
+        }
+        return;
+    }
     match step_type {
         "model_output" => {
             if let Some(blocks) = step.get("content").and_then(JsonValue::as_array) {
                 for block in blocks {
-                    translate_block(block, out);
+                    translate_block_with(block, out, id_gen, seen_sources);
                 }
             }
         }
@@ -832,7 +1155,12 @@ fn translate_step(step: &JsonValue, out: &mut Vec<Content>) {
     }
 }
 
-fn translate_block(block: &JsonValue, out: &mut Vec<Content>) {
+fn translate_block_with<F: FnMut() -> String>(
+    block: &JsonValue,
+    out: &mut Vec<Content>,
+    id_gen: &mut F,
+    seen_sources: &mut std::collections::HashSet<String>,
+) {
     let Some(kind) = block.get("type").and_then(JsonValue::as_str) else {
         return;
     };
@@ -844,63 +1172,51 @@ fn translate_block(block: &JsonValue, out: &mut Vec<Content>) {
             text: text.to_owned(),
             provider_options: None,
         }));
-        if let Some(annotations) = block.get("annotations").and_then(JsonValue::as_array) {
-            for ann in annotations {
-                if let Some(source) = annotation_to_source(ann) {
-                    out.push(Content::Source(source));
-                }
+        let sources = super::extract_sources::annotations_to_sources(
+            block.get("annotations"),
+            id_gen,
+            seen_sources,
+        );
+        for src in sources {
+            out.push(Content::Source(src));
+        }
+    } else if kind == "image" {
+        let media_type = block
+            .get("mime_type")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("image/png")
+            .to_owned();
+        if let Some(data) = block.get("data").and_then(JsonValue::as_str) {
+            if !data.is_empty() {
+                out.push(Content::File(FilePart {
+                    media_type,
+                    data: FileData::Data {
+                        data: FileBytes::Base64(data.to_owned()),
+                    },
+                    filename: None,
+                    provider_options: None,
+                }));
+                return;
+            }
+        }
+        if let Some(uri) = block.get("uri").and_then(JsonValue::as_str) {
+            if !uri.is_empty() {
+                out.push(Content::File(FilePart {
+                    media_type,
+                    data: FileData::Url {
+                        url: uri.to_owned(),
+                    },
+                    filename: None,
+                    provider_options: None,
+                }));
             }
         }
     }
-    // Image / audio / video blocks could be mapped to Content::File when
-    // the SDK exposes them on outputs; left as a TODO since llmsdk's
-    // assistant-side File variant is not yet wired across providers.
+    // Audio / video / document blocks remain pass-through until the SDK
+    // surfaces a typed `AssistantPart` variant for them.
 }
 
-fn annotation_to_source(ann: &JsonValue) -> Option<Source> {
-    let kind = ann.get("type").and_then(JsonValue::as_str)?;
-    match kind {
-        "url_citation" => {
-            let url = ann.get("url").and_then(JsonValue::as_str)?.to_owned();
-            let title = ann
-                .get("title")
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned);
-            Some(Source::Url {
-                id: url.clone(),
-                url,
-                title,
-                provider_metadata: None,
-            })
-        }
-        "file_citation" => {
-            let id = ann
-                .get("media_id")
-                .or_else(|| ann.get("document_uri"))
-                .and_then(JsonValue::as_str)?
-                .to_owned();
-            let media_type = ann
-                .get("file_name")
-                .and_then(JsonValue::as_str)
-                .map(|_| "application/octet-stream".to_owned())
-                .unwrap_or_else(|| "application/octet-stream".to_owned());
-            let filename = ann
-                .get("file_name")
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned);
-            Some(Source::Document {
-                id,
-                media_type,
-                title: filename.unwrap_or_else(|| "document".to_owned()),
-                filename: None,
-                provider_metadata: None,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn parse_usage(value: Option<&JsonValue>) -> Usage {
+pub(super) fn parse_usage(value: Option<&JsonValue>) -> Usage {
     let Some(u) = value else {
         return Usage::default();
     };
@@ -983,151 +1299,6 @@ impl GoogleInteractionsLanguageModel {
     }
 }
 
-// -------- Stream forwarding ------------------------------------------
-
-fn drive_stream<S>(
-    warnings: Vec<Warning>,
-    model_id: String,
-    events: S,
-) -> impl futures::Stream<Item = Result<StreamPart, ProviderError>> + Send
-where
-    S: futures::Stream<Item = Result<SseEvent<JsonValue>, ProviderError>> + Send + 'static,
-{
-    async_stream::stream! {
-        yield Ok(StreamPart::StreamStart { warnings });
-
-        let mut text_open = false;
-        let mut metadata_emitted = false;
-        let mut last_status: Option<GoogleInteractionsStatus> = None;
-        let mut last_usage: Option<JsonValue> = None;
-        let mut events = Box::pin(events);
-
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(SseEvent::Data(value)) => {
-                    let event_type = value
-                        .get("event_type")
-                        .and_then(JsonValue::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-
-                    if !metadata_emitted {
-                        let id = value
-                            .pointer("/interaction/id")
-                            .and_then(JsonValue::as_str)
-                            .map(str::to_owned);
-                        if id.is_some() {
-                            metadata_emitted = true;
-                            yield Ok(StreamPart::ResponseMetadata(ResponseMetadata {
-                                id,
-                                timestamp: None,
-                                model_id: Some(model_id.clone()),
-                                headers: None,
-                            }));
-                        }
-                    }
-
-                    if let Some(s) = value
-                        .pointer("/interaction/status")
-                        .and_then(JsonValue::as_str)
-                        .map(str::to_owned)
-                        .and_then(|s| match s.as_str() {
-                            "completed" => Some(GoogleInteractionsStatus::Completed),
-                            "failed" => Some(GoogleInteractionsStatus::Failed),
-                            "cancelled" => Some(GoogleInteractionsStatus::Cancelled),
-                            "incomplete" => Some(GoogleInteractionsStatus::Incomplete),
-                            "in_progress" => Some(GoogleInteractionsStatus::InProgress),
-                            "requires_action" => Some(GoogleInteractionsStatus::RequiresAction),
-                            _ => None,
-                        })
-                    {
-                        last_status = Some(s);
-                    }
-                    if let Some(u) = value.pointer("/interaction/usage").cloned() {
-                        last_usage = Some(u);
-                    }
-
-                    match event_type.as_str() {
-                        "content.delta" => {
-                            if let Some(delta) = value
-                                .pointer("/delta/text")
-                                .and_then(JsonValue::as_str)
-                                .filter(|s| !s.is_empty())
-                            {
-                                if !text_open {
-                                    text_open = true;
-                                    yield Ok(StreamPart::TextStart {
-                                        id: TEXT_BLOCK_ID.to_owned(),
-                                        provider_metadata: None,
-                                    });
-                                }
-                                yield Ok(StreamPart::TextDelta {
-                                    id: TEXT_BLOCK_ID.to_owned(),
-                                    delta: delta.to_owned(),
-                                    provider_metadata: None,
-                                });
-                            }
-                        }
-                        "step.done" => {
-                            if text_open {
-                                text_open = false;
-                                yield Ok(StreamPart::TextEnd {
-                                    id: TEXT_BLOCK_ID.to_owned(),
-                                    provider_metadata: None,
-                                });
-                            }
-                            if let Some(step) = value.get("step") {
-                                let mut content_buf = Vec::new();
-                                translate_step(step, &mut content_buf);
-                                for item in content_buf {
-                                    if let Content::ToolCall(tc) = item {
-                                        yield Ok(StreamPart::ToolCall(tc));
-                                    }
-                                }
-                            }
-                        }
-                        "interaction.completed"
-                        | "interaction.failed"
-                        | "interaction.cancelled"
-                        | "interaction.incomplete"
-                            if text_open =>
-                        {
-                            text_open = false;
-                            yield Ok(StreamPart::TextEnd {
-                                id: TEXT_BLOCK_ID.to_owned(),
-                                provider_metadata: None,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(SseEvent::ParseError { raw, message }) => {
-                    yield Ok(StreamPart::Error {
-                        error: json!({ "message": message, "raw": raw }),
-                    });
-                }
-                Err(e) => {
-                    yield Err(e);
-                    return;
-                }
-            }
-        }
-
-        if text_open {
-            yield Ok(StreamPart::TextEnd {
-                id: TEXT_BLOCK_ID.to_owned(),
-                provider_metadata: None,
-            });
-        }
-
-        yield Ok(StreamPart::Finish {
-            finish_reason: map_finish_reason(last_status),
-            usage: parse_usage(last_usage.as_ref()),
-            provider_metadata: None,
-        });
-    }
-}
-
 // -------- Helpers ----------------------------------------------------
 
 fn headers_to_provider(raw: HashMap<String, String>) -> llmsdk_provider::shared::Headers {
@@ -1137,6 +1308,100 @@ fn headers_to_provider(raw: HashMap<String, String>) -> llmsdk_provider::shared:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llmsdk_provider::language_model::ToolResultPart;
+
+    fn assistant_text(text: &str, interaction_id: Option<&str>) -> Message {
+        let provider_options = interaction_id.map(|id| {
+            let mut po = ProviderOptions::new();
+            let mut google = JsonMap::new();
+            google.insert("interactionId".into(), JsonValue::String(id.into()));
+            po.insert("google".to_owned(), google);
+            po
+        });
+        Message::Assistant {
+            content: vec![AssistantPart::Text(TextPart {
+                text: text.into(),
+                provider_options,
+            })],
+            provider_options: None,
+        }
+    }
+
+    fn user_text(text: &str) -> Message {
+        Message::User {
+            content: vec![UserPart::Text(TextPart {
+                text: text.into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }
+    }
+
+    #[test]
+    fn compaction_drops_assistant_turns_tagged_with_previous_interaction() {
+        let prompt = vec![
+            user_text("hi"),
+            assistant_text("prior reply", Some("int-1")),
+            user_text("follow up"),
+        ];
+        let compacted = compact_prompt_for_previous_interaction(&prompt, "int-1");
+        assert_eq!(compacted.len(), 2);
+        assert!(matches!(compacted[0], Message::User { .. }));
+        assert!(matches!(compacted[1], Message::User { .. }));
+    }
+
+    #[test]
+    fn compaction_drops_orphaned_tool_results() {
+        let assistant_with_tool_call = Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "tc-1".into(),
+                tool_name: "search".into(),
+                input: json!({}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: Some({
+                    let mut po = ProviderOptions::new();
+                    let mut g = JsonMap::new();
+                    g.insert("interactionId".into(), JsonValue::String("int-1".into()));
+                    po.insert("google".to_owned(), g);
+                    po
+                }),
+            })],
+            provider_options: None,
+        };
+        let tool_msg = Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "tc-1".into(),
+                tool_name: "search".into(),
+                output: ToolResultOutput::Text {
+                    value: "result".into(),
+                    provider_options: None,
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        };
+        let prompt = vec![user_text("ask"), assistant_with_tool_call, tool_msg];
+        let compacted = compact_prompt_for_previous_interaction(&prompt, "int-1");
+        // Assistant with matching id dropped → its tool-result orphan also pruned.
+        assert_eq!(compacted.len(), 1);
+        assert!(matches!(compacted[0], Message::User { .. }));
+    }
+
+    #[test]
+    fn compaction_keeps_unrelated_assistant_turns() {
+        let prompt = vec![
+            assistant_text("kept", Some("int-2")),
+            assistant_text("dropped", Some("int-1")),
+        ];
+        let compacted = compact_prompt_for_previous_interaction(&prompt, "int-1");
+        assert_eq!(compacted.len(), 1);
+        if let Message::Assistant { content, .. } = &compacted[0] {
+            if let AssistantPart::Text(TextPart { text, .. }) = &content[0] {
+                assert_eq!(text, "kept");
+            }
+        }
+    }
 
     #[test]
     fn agent_routes_id_into_request_body() {
@@ -1154,11 +1419,52 @@ mod tests {
             Some("agents/foo")
         );
 
+        // Both `Agent` and `ManagedAgent` route to the wire `agent` field,
+        // matching upstream `google-interactions-language-model.ts:112-117`.
         let mut body = JsonMap::new();
         GoogleInteractionsAgent::ManagedAgent("managed/bar".into()).apply_to_request(&mut body);
         assert_eq!(
-            body.get("managed_agent").and_then(JsonValue::as_str),
+            body.get("agent").and_then(JsonValue::as_str),
             Some("managed/bar")
+        );
+        assert!(body.get("managed_agent").is_none());
+    }
+
+    #[test]
+    fn percent_encode_path_segment_handles_special_chars() {
+        assert_eq!(percent_encode_path_segment("abc"), "abc");
+        assert_eq!(
+            percent_encode_path_segment("agents/foo bar"),
+            "agents%2Ffoo%20bar"
+        );
+        assert_eq!(
+            percent_encode_path_segment("int-2025_05.06~v1"),
+            "int-2025_05.06~v1"
+        );
+    }
+
+    #[test]
+    fn cancel_and_poll_endpoints_are_url_encoded() {
+        let inner = Arc::new(
+            Inner::builder()
+                .base_url("https://api.example")
+                .build()
+                .expect("inner build"),
+        );
+        let model = GoogleInteractionsLanguageModel::new(
+            inner,
+            GoogleInteractionsAgent::Model("ignored".into()),
+        );
+        // Mirrors upstream `encodeURIComponent` use in cancel-google-interaction.ts:34
+        // and poll-google-interactions.ts:76. Special characters in the
+        // interaction id must be percent-encoded so the URL stays valid.
+        assert_eq!(
+            model.cancel_endpoint("int/with slash"),
+            "https://api.example/interactions/int%2Fwith%20slash/cancel"
+        );
+        assert_eq!(
+            model.poll_endpoint("int/with slash"),
+            "https://api.example/interactions/int%2Fwith%20slash"
         );
     }
 
@@ -1187,17 +1493,5 @@ mod tests {
         ));
         assert_eq!(u.input_tokens.total, Some(10));
         assert_eq!(u.output_tokens.total, Some(5));
-    }
-
-    #[test]
-    fn url_citation_becomes_source() {
-        let ann = json!({"type": "url_citation", "url": "https://x", "title": "X"});
-        let src = annotation_to_source(&ann).expect("source");
-        if let Source::Url { url, title, .. } = src {
-            assert_eq!(url, "https://x");
-            assert_eq!(title.as_deref(), Some("X"));
-        } else {
-            panic!("expected url source");
-        }
     }
 }

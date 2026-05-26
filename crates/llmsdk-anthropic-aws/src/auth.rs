@@ -110,9 +110,10 @@ impl RequestAuth for SigV4Auth {
         // for Files/Skills). Fall back to body-byte sniffing only when the
         // framework can't supply one (legacy or third-party RequestAuth
         // construction sites).
-        let content_type = context
-            .content_type
-            .map_or_else(|| sniff_content_type(context.body).to_owned(), str::to_owned);
+        let content_type = context.content_type.map_or_else(
+            || sniff_content_type(context.body).to_owned(),
+            str::to_owned,
+        );
         sign_post(
             context.url,
             context.body,
