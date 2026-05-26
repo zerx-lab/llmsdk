@@ -439,6 +439,43 @@ async fn moderation_blocks_promote_to_provider_error() {
 }
 
 #[tokio::test]
+async fn empty_video_url_surfaces_as_provider_error() {
+    // Mirrors upstream `xai-video-model.ts:324-330`: when the status payload
+    // is `done` but `video.url` is the empty string, throw rather than
+    // returning a bogus URL.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/videos/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req-empty-url"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/videos/req-empty-url"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "done",
+            "video": { "url": "" }
+        })))
+        .mount(&server)
+        .await;
+
+    let model = provider(&server).video("grok-imagine-video");
+    let err = model
+        .do_generate(VideoOptions {
+            prompt: Some("hello".into()),
+            provider_options: Some(fast_poll_options(&json!({}))),
+            ..Default::default()
+        })
+        .await
+        .expect_err("empty url should fail");
+    assert!(
+        err.to_string().to_lowercase().contains("no video url"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn missing_request_id_in_post_response_is_a_provider_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
