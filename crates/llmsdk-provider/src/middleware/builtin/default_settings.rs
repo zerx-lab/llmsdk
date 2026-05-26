@@ -90,11 +90,48 @@ fn merge_provider_options(
             for (provider, caller_inner) in c {
                 let entry = d.entry(provider).or_default();
                 for (k, v) in caller_inner {
-                    entry.insert(k, v);
+                    match entry.remove(&k) {
+                        Some(base) => {
+                            // Mirror upstream `mergeObjects` deep recursion
+                            // (`packages/ai/src/util/merge-objects.ts:14-84`):
+                            // when both sides are JSON objects (not arrays,
+                            // not dates), merge recursively so per-feature
+                            // overrides do not clobber sibling keys the
+                            // caller did not mention.
+                            entry.insert(k, deep_merge_value(base, v));
+                        }
+                        None => {
+                            entry.insert(k, v);
+                        }
+                    }
                 }
             }
             Some(d)
         }
+    }
+}
+
+/// Deep merge two JSON values mirroring upstream `mergeObjects`.
+///
+/// When both sides are JSON objects, recurse per-key. Otherwise the
+/// `overrides` value wins. Arrays / scalars / nulls do not merge.
+fn deep_merge_value(base: serde_json::Value, overrides: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match (base, overrides) {
+        (Value::Object(mut b), Value::Object(o)) => {
+            for (k, v) in o {
+                match b.remove(&k) {
+                    Some(base_v) => {
+                        b.insert(k, deep_merge_value(base_v, v));
+                    }
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+            Value::Object(b)
+        }
+        (_, overrides) => overrides,
     }
 }
 
@@ -169,5 +206,59 @@ mod tests {
         let captured = rec.0.lock().expect("mutex").clone().expect("params");
         assert_eq!(captured.temperature, Some(0.1), "caller wins");
         assert_eq!(captured.max_output_tokens, Some(1024), "default filled");
+    }
+
+    #[tokio::test]
+    async fn provider_options_merge_is_deep_recursive() {
+        // Mirrors upstream `mergeObjects` semantics tested in
+        // `packages/ai/src/util/merge-objects.test.ts`: when the caller
+        // overrides a nested key, sibling keys at the *same nested level*
+        // must survive from the defaults — a shallow per-key insert would
+        // wipe them out. Catches the prior bug where Rust did per-key
+        // insert on the inner Map but did not recurse into the JSON
+        // value payload.
+        let rec = Arc::new(Recorder::default());
+
+        let mut defaults_inner = serde_json::Map::new();
+        defaults_inner.insert(
+            "feature".into(),
+            serde_json::json!({ "enabled": true, "cache": true }),
+        );
+        let mut defaults_po = ProviderOptions::new();
+        defaults_po.insert("anthropic".into(), defaults_inner);
+
+        let defaults = CallOptions {
+            provider_options: Some(defaults_po),
+            ..Default::default()
+        };
+        let wrapped = wrap_language_model(
+            Arc::clone(&rec) as Arc<dyn LanguageModel>,
+            [Arc::new(DefaultSettingsMiddleware::new(defaults))
+                as Arc<dyn LanguageModelMiddleware>],
+        );
+
+        let mut caller_inner = serde_json::Map::new();
+        caller_inner.insert("feature".into(), serde_json::json!({ "enabled": false }));
+        let mut caller_po = ProviderOptions::new();
+        caller_po.insert("anthropic".into(), caller_inner);
+
+        wrapped
+            .do_generate(CallOptions {
+                prompt: user_prompt(),
+                provider_options: Some(caller_po),
+                ..Default::default()
+            })
+            .await
+            .expect("generate");
+
+        let captured = rec.0.lock().expect("mutex").clone().expect("params");
+        let merged = captured.provider_options.expect("provider_options merged");
+        let anthropic = merged.get("anthropic").expect("anthropic key present");
+        let feature = anthropic.get("feature").expect("feature key present");
+        assert_eq!(feature["enabled"], false, "caller override survives");
+        assert_eq!(
+            feature["cache"], true,
+            "sibling key from defaults must survive deep merge"
+        );
     }
 }
