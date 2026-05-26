@@ -447,8 +447,12 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(p.provider_name(), PROVIDER_NAME_MESSAGES);
-        // Files / Skills derive their provider suffix from the messages name.
-        assert_eq!(p.files().provider(), "anthropic-aws.files");
+        // Files reuses the messages provider name verbatim (upstream
+        // `anthropic-aws-provider.ts:267` and the
+        // `expect(files.provider).toBe('anthropic-aws.messages')`
+        // assertion in `anthropic-aws-provider.test.ts:454`).
+        // Skills swaps `.messages` for `.skills`.
+        assert_eq!(p.files().provider(), "anthropic-aws.messages");
         assert_eq!(p.skills().provider(), "anthropic-aws.skills");
     }
 

@@ -59,7 +59,9 @@ impl LanguageModel for OpenAiCompletionLanguageModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        let (request, warnings) = build_request(&self.model_id, &options, false)?;
+        let provider_options_name = self.inner.provider_options_name();
+        let (request, warnings) =
+            build_request(&self.model_id, &options, false, provider_options_name)?;
 
         let mut headers = self.inner.headers.clone();
         if let Some(extra) = &options.headers {
@@ -82,11 +84,19 @@ impl LanguageModel for OpenAiCompletionLanguageModel {
             Err(err) => return Err(rewrite_openai_error(err)),
         };
 
-        parse_completion(response.value, response.headers, request_body, warnings)
+        parse_completion(
+            response.value,
+            response.headers,
+            request_body,
+            warnings,
+            provider_options_name,
+        )
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        let (request, warnings) = build_request(&self.model_id, &options, true)?;
+        let provider_options_name = self.inner.provider_options_name();
+        let (request, warnings) =
+            build_request(&self.model_id, &options, true, provider_options_name)?;
 
         let mut headers = self.inner.headers.clone();
         if let Some(extra) = &options.headers {
@@ -111,7 +121,7 @@ impl LanguageModel for OpenAiCompletionLanguageModel {
         let byte_stream = response_byte_stream(stream_response.response);
         let event_stream = sse_json_stream::<CompletionChunk>(byte_stream);
 
-        let parts = drive_completion_stream(warnings, event_stream);
+        let parts = drive_completion_stream(warnings, event_stream, provider_options_name);
 
         Ok(StreamResult {
             stream: Box::pin(parts),
@@ -197,14 +207,34 @@ impl LogprobsOption {
     }
 }
 
-fn parse_provider_options(options: &CallOptions) -> CompletionProviderOptions {
+fn parse_provider_options(
+    options: &CallOptions,
+    provider_options_name: &str,
+) -> CompletionProviderOptions {
     let Some(po) = options.provider_options.as_ref() else {
         return CompletionProviderOptions::default();
     };
-    let Some(slot) = po.get("openai") else {
+    // Mirror upstream merge semantics: parse `openai` first as base, then
+    // layer `provider_options_name` (e.g. `azure`) on top so Azure-scoped
+    // fields override the canonical OpenAI ones. See
+    // `openai-completion-language-model.ts:106-117`.
+    let mut merged = serde_json::Map::new();
+    if let Some(base) = po.get("openai") {
+        for (k, v) in base {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if provider_options_name != "openai"
+        && let Some(slot) = po.get(provider_options_name)
+    {
+        for (k, v) in slot {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if merged.is_empty() {
         return CompletionProviderOptions::default();
-    };
-    serde_json::from_value::<CompletionProviderOptions>(serde_json::Value::Object(slot.clone()))
+    }
+    serde_json::from_value::<CompletionProviderOptions>(serde_json::Value::Object(merged))
         .unwrap_or_default()
 }
 
@@ -212,8 +242,9 @@ fn build_request(
     model_id: &str,
     options: &CallOptions,
     stream: bool,
+    provider_options_name: &str,
 ) -> Result<(CompletionRequest, Vec<Warning>), ProviderError> {
-    let provider_opts = parse_provider_options(options);
+    let provider_opts = parse_provider_options(options, provider_options_name);
     let mut warnings = Vec::new();
 
     if options.top_k.is_some() {
@@ -400,6 +431,7 @@ fn parse_completion(
     headers: HashMap<String, String>,
     request_body: Option<serde_json::Value>,
     warnings: Vec<Warning>,
+    provider_options_name: &str,
 ) -> Result<GenerateResult, ProviderError> {
     let choice = response.choices.first().ok_or_else(|| {
         ProviderError::type_validation(
@@ -414,7 +446,7 @@ fn parse_completion(
         let mut openai = serde_json::Map::new();
         openai.insert("logprobs".to_owned(), lp.clone());
         let mut pm = ProviderMetadata::new();
-        pm.insert("openai".to_owned(), openai);
+        pm.insert(provider_options_name.to_owned(), openai);
         provider_metadata = Some(pm);
     }
 
@@ -485,6 +517,7 @@ struct CompletionChunkChoice {
 fn drive_completion_stream<S>(
     warnings: Vec<Warning>,
     events: S,
+    provider_options_name: &'static str,
 ) -> impl futures::Stream<Item = Result<StreamPart, ProviderError>> + Send
 where
     S: futures::Stream<Item = Result<SseEvent<CompletionChunk>, ProviderError>> + Send + 'static,
@@ -567,7 +600,7 @@ where
             let mut openai = serde_json::Map::new();
             openai.insert("logprobs".to_owned(), lp);
             let mut pm = ProviderMetadata::new();
-            pm.insert("openai".to_owned(), openai);
+            pm.insert(provider_options_name.to_owned(), openai);
             pm
         });
 
@@ -610,5 +643,42 @@ mod tests {
             provider_options: None,
         }];
         assert!(convert_completion_prompt(&prompt).is_err());
+    }
+
+    #[test]
+    fn provider_options_merge_openai_base_then_namespace_override() {
+        // Mirrors upstream merge semantics in
+        // `openai-completion-language-model.ts:106-117`: parse "openai" first,
+        // then layer the namespace-specific scope (e.g. "azure") on top.
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        let mut openai = serde_json::Map::new();
+        openai.insert("user".into(), serde_json::json!("alice"));
+        openai.insert("echo".into(), serde_json::json!(false));
+        po.insert("openai".into(), openai);
+        let mut azure = serde_json::Map::new();
+        azure.insert("echo".into(), serde_json::json!(true));
+        po.insert("azure".into(), azure);
+
+        let opts = CallOptions {
+            provider_options: Some(po),
+            ..Default::default()
+        };
+        let parsed = parse_provider_options(&opts, "azure");
+        assert_eq!(parsed.user.as_deref(), Some("alice"));
+        assert_eq!(parsed.echo, Some(true));
+    }
+
+    #[test]
+    fn provider_options_openai_only_namespace_returns_base() {
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        let mut openai = serde_json::Map::new();
+        openai.insert("user".into(), serde_json::json!("bob"));
+        po.insert("openai".into(), openai);
+        let opts = CallOptions {
+            provider_options: Some(po),
+            ..Default::default()
+        };
+        let parsed = parse_provider_options(&opts, "openai");
+        assert_eq!(parsed.user.as_deref(), Some("bob"));
     }
 }

@@ -91,7 +91,8 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        let (request, warnings, betas) = build_request(&self.model_id, &options, false);
+        let (request, warnings, betas, mark_code_execution_dynamic) =
+            build_request(&self.model_id, &options, false);
 
         let body_value = self.prepare_body(&request)?;
         let request_body_value = Some(body_value.clone());
@@ -122,11 +123,13 @@ impl LanguageModel for AnthropicMessagesModel {
             response.headers,
             request_body_value,
             warnings,
+            mark_code_execution_dynamic,
         )
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        let (request, warnings, betas) = build_request(&self.model_id, &options, true);
+        let (request, warnings, betas, mark_code_execution_dynamic) =
+            build_request(&self.model_id, &options, true);
 
         let body_value = self.prepare_body(&request)?;
         let request_body_value = Some(body_value.clone());
@@ -154,7 +157,11 @@ impl LanguageModel for AnthropicMessagesModel {
         let byte_stream = response_byte_stream(stream_response.response);
         let event_stream = sse_json_stream::<StreamEvent>(byte_stream);
 
-        let state = StreamState::with_generate_id(warnings, self.inner.generate_id.clone());
+        let state = StreamState::with_generate_id(
+            warnings,
+            self.inner.generate_id.clone(),
+            mark_code_execution_dynamic,
+        );
         let include_raw = options.include_raw_chunks.unwrap_or(false);
         let parts = build_part_stream(state, event_stream, include_raw);
 
@@ -187,6 +194,7 @@ fn build_request(
     MessagesRequest,
     Vec<Warning>,
     std::collections::BTreeSet<String>,
+    bool, // mark_code_execution_dynamic
 ) {
     let provider_opts = parse_provider_options(options.provider_options.as_ref());
     let send_reasoning = provider_opts.send_reasoning.unwrap_or(true);
@@ -402,7 +410,10 @@ fn build_request(
         }
     }
 
-    (request, warnings, betas)
+    let mark_code_execution_dynamic =
+        has_web_tool_20260209_without_code_execution(options.tools.as_deref());
+
+    (request, warnings, betas, mark_code_execution_dynamic)
 }
 
 /// Normalize the `context_management` provider-option value into the
@@ -549,6 +560,46 @@ fn build_output_config(
         obj.insert("format".to_owned(), fmt);
     }
     Some(serde_json::Value::Object(obj))
+}
+
+/// Whether the request enables `web_search_20260209` or `web_fetch_20260209`
+/// **without** an explicit `code_execution` tool.
+///
+/// When true, the model may implicitly invoke `code_execution` to satisfy
+/// the web tool. Such calls must be marked `dynamic: true` so the SDK's
+/// generic tool-call validation does not reject them.
+///
+/// Mirrors `hasWebTool20260209WithoutCodeExecution` in upstream
+/// `anthropic-language-model.ts:2661-2683`.
+fn has_web_tool_20260209_without_code_execution(tools: Option<&[Tool]>) -> bool {
+    let Some(tools) = tools else {
+        return false;
+    };
+    let mut has_web_2026 = false;
+    let mut has_code_execution = false;
+    for t in tools {
+        match t {
+            Tool::Provider(p) => {
+                if p.id == "anthropic.web_fetch_20260209" || p.id == "anthropic.web_search_20260209"
+                {
+                    has_web_2026 = true;
+                } else if p.id == "anthropic.code_execution_20250522"
+                    || p.id == "anthropic.code_execution_20250825"
+                    || p.id == "anthropic.code_execution_20260120"
+                {
+                    has_code_execution = true;
+                    break;
+                }
+            }
+            Tool::Function(f) => {
+                if f.name == "code_execution" {
+                    has_code_execution = true;
+                    break;
+                }
+            }
+        }
+    }
+    has_web_2026 && !has_code_execution
 }
 
 /// Resolved metadata for a versioned Anthropic provider-defined tool.

@@ -71,6 +71,10 @@ pub(crate) struct StreamState {
     source_seq: u64,
     /// Optional id generator (mirrors `config.generateId` upstream).
     generate_id: Option<Arc<GenerateIdFn>>,
+    /// When true, `code_execution` server-tool uses are emitted with
+    /// `dynamic: true` to bypass strict tool validation. See
+    /// `model::has_web_tool_20260209_without_code_execution`.
+    mark_code_execution_dynamic: bool,
 }
 
 impl std::fmt::Debug for StreamState {
@@ -84,6 +88,10 @@ impl std::fmt::Debug for StreamState {
             .field("blocks", &self.blocks)
             .field("source_seq", &self.source_seq)
             .field("generate_id", &self.generate_id.is_some())
+            .field(
+                "mark_code_execution_dynamic",
+                &self.mark_code_execution_dynamic,
+            )
             .finish()
     }
 }
@@ -91,12 +99,13 @@ impl std::fmt::Debug for StreamState {
 impl StreamState {
     #[cfg(test)]
     pub(crate) fn new(warnings: Vec<Warning>) -> Self {
-        Self::with_generate_id(warnings, None)
+        Self::with_generate_id(warnings, None, false)
     }
 
     pub(crate) fn with_generate_id(
         warnings: Vec<Warning>,
         generate_id: Option<Arc<GenerateIdFn>>,
+        mark_code_execution_dynamic: bool,
     ) -> Self {
         Self {
             initial_warnings: Some(warnings),
@@ -113,6 +122,7 @@ impl StreamState {
             blocks: BTreeMap::new(),
             source_seq: 0,
             generate_id,
+            mark_code_execution_dynamic,
         }
     }
 
@@ -217,6 +227,10 @@ impl StreamState {
         vec![StreamPart::ResponseMetadata(meta)]
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "dispatch over BlockStart variants; each branch is short but the function is long"
+    )]
     fn on_block_start(&mut self, index: u32, block: BlockStart) -> Vec<StreamPart> {
         match block {
             BlockStart::Text { text } => {
@@ -249,11 +263,16 @@ impl StreamState {
                         arguments: arguments.clone(),
                     },
                 );
+                // Mark code_execution invocations as dynamic when the request
+                // enabled web_*_20260209 without an explicit code_execution
+                // tool. Mirrors upstream anthropic-language-model.ts:1714-1735.
+                let dynamic =
+                    (self.mark_code_execution_dynamic && name == "code_execution").then_some(true);
                 let mut out = vec![StreamPart::ToolInputStart {
                     id: id.clone(),
                     tool_name: name,
                     provider_executed: None,
-                    dynamic: None,
+                    dynamic,
                     title: None,
                     provider_metadata: None,
                 }];
@@ -301,6 +320,29 @@ impl StreamState {
                     id,
                     provider_metadata: Some(redacted_metadata(&data)),
                 }]
+            }
+            BlockStart::Compaction { content } => {
+                // Open a regular text block tagged with
+                // `anthropic.type = "compaction"`. Any inline `content`
+                // is forwarded as the first text delta. Mirrors upstream
+                // anthropic-language-model.ts:1606-1618.
+                let id = index.to_string();
+                self.blocks
+                    .insert(index, BlockKind::Text { id: id.clone() });
+                let mut out = vec![StreamPart::TextStart {
+                    id: id.clone(),
+                    provider_metadata: Some(compaction_metadata()),
+                }];
+                if let Some(text) = content
+                    && !text.is_empty()
+                {
+                    out.push(StreamPart::TextDelta {
+                        id,
+                        delta: text,
+                        provider_metadata: None,
+                    });
+                }
+                out
             }
             BlockStart::Other => Vec::new(),
         }
@@ -350,6 +392,21 @@ impl StreamState {
                     id: id.clone(),
                     delta: String::new(),
                     provider_metadata: Some(signature_metadata(&signature)),
+                }]
+            }
+            (BlockKind::Text { id }, BlockDelta::CompactionDelta { content }) => {
+                // Forward compaction-block deltas as plain text deltas.
+                // Mirrors upstream anthropic-language-model.ts:2207-2218.
+                let Some(text) = content else {
+                    return Vec::new();
+                };
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                vec![StreamPart::TextDelta {
+                    id: id.clone(),
+                    delta: text,
+                    provider_metadata: None,
                 }]
             }
             (BlockKind::Text { .. }, BlockDelta::CitationsDelta { citation }) => {
@@ -412,6 +469,17 @@ fn redacted_metadata(data: &str) -> ProviderMetadata {
     anthropic.insert(
         "redactedData".to_owned(),
         serde_json::Value::String(data.to_owned()),
+    );
+    let mut pm = ProviderMetadata::new();
+    pm.insert("anthropic".to_owned(), anthropic);
+    pm
+}
+
+fn compaction_metadata() -> ProviderMetadata {
+    let mut anthropic = Map::new();
+    anthropic.insert(
+        "type".to_owned(),
+        serde_json::Value::String("compaction".to_owned()),
     );
     let mut pm = ProviderMetadata::new();
     pm.insert("anthropic".to_owned(), anthropic);
@@ -678,5 +746,74 @@ mod tests {
         let _ = state.start_frames();
         assert!(state.on_event(StreamEvent::Ping).is_empty());
         assert!(state.on_event(StreamEvent::Other).is_empty());
+    }
+
+    #[test]
+    fn compaction_block_emits_text_with_anthropic_marker() {
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: None,
+                model: None,
+                usage: empty_usage(),
+            },
+        });
+
+        let f1 = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::Compaction {
+                content: Some("compacted prefix ".into()),
+            },
+        });
+        // First: TextStart carrying anthropic.type="compaction".
+        if let StreamPart::TextStart {
+            provider_metadata, ..
+        } = &f1[0]
+        {
+            let pm = provider_metadata.as_ref().expect("metadata set");
+            assert_eq!(
+                pm.get("anthropic").and_then(|b| b.get("type")),
+                Some(&serde_json::Value::String("compaction".into()))
+            );
+        } else {
+            panic!("expected TextStart, got {:?}", f1[0]);
+        }
+        // Inline content forwarded as TextDelta.
+        assert!(
+            matches!(&f1[1], StreamPart::TextDelta { delta, .. } if delta == "compacted prefix ")
+        );
+
+        // Subsequent compaction_delta → text-delta forwarded.
+        let f2 = state.on_event(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: BlockDelta::CompactionDelta {
+                content: Some("tail".into()),
+            },
+        });
+        assert!(matches!(&f2[0], StreamPart::TextDelta { delta, .. } if delta == "tail"));
+
+        // null/empty content deltas are inert.
+        assert!(
+            state
+                .on_event(StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: BlockDelta::CompactionDelta { content: None },
+                })
+                .is_empty()
+        );
+        assert!(
+            state
+                .on_event(StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: BlockDelta::CompactionDelta {
+                        content: Some(String::new()),
+                    },
+                })
+                .is_empty()
+        );
+
+        let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
+        assert!(matches!(stop[0], StreamPart::TextEnd { .. }));
     }
 }

@@ -60,17 +60,24 @@ struct OpenAiTranscriptionProviderOptions {
     timestamp_granularities: Option<Vec<String>>,
 }
 
-fn parse_options(opts: Option<&ProviderOptions>) -> OpenAiTranscriptionProviderOptions {
-    let Some(map) = opts else {
-        return OpenAiTranscriptionProviderOptions::default();
-    };
-    let Some(slot) = map.get("openai") else {
-        return OpenAiTranscriptionProviderOptions::default();
-    };
-    serde_json::from_value::<OpenAiTranscriptionProviderOptions>(serde_json::Value::Object(
-        slot.clone(),
-    ))
-    .unwrap_or_default()
+/// Returns `Some(_)` only when the caller actually supplied
+/// `provider_options.openai.*`. Mirrors upstream `if (openAIOptions)` gate
+/// in `openai-transcription-model.ts:161` — without that gate the zod-style
+/// defaults (`temperature: 0`, `timestamp_granularities: ['segment']`) would
+/// leak into the wire even for callers that omitted the namespace entirely.
+fn parse_options(opts: Option<&ProviderOptions>) -> Option<OpenAiTranscriptionProviderOptions> {
+    let map = opts?;
+    let slot = map.get("openai")?;
+    let mut parsed = serde_json::from_value::<OpenAiTranscriptionProviderOptions>(
+        serde_json::Value::Object(slot.clone()),
+    )
+    .unwrap_or_default();
+    // Apply the same defaults the upstream zod schema applies on parse —
+    // see `openai-transcription-model-options.ts:41` (`.default(0)`).
+    if parsed.temperature.is_none() {
+        parsed.temperature = Some(0.0);
+    }
+    Some(parsed)
 }
 
 #[async_trait]
@@ -108,23 +115,25 @@ impl TranscriptionModel for OpenAiTranscriptionModel {
             );
         }
 
-        if let Some(includes) = &provider_opts.include {
-            for v in includes {
-                mp.text("include[]", v);
+        if let Some(opts) = &provider_opts {
+            if let Some(includes) = &opts.include {
+                for v in includes {
+                    mp.text("include[]", v);
+                }
             }
-        }
-        if let Some(lang) = &provider_opts.language {
-            mp.text("language", lang);
-        }
-        if let Some(prompt) = &provider_opts.prompt {
-            mp.text("prompt", prompt);
-        }
-        if let Some(temp) = provider_opts.temperature {
-            mp.text("temperature", &temp.to_string());
-        }
-        if let Some(granularities) = &provider_opts.timestamp_granularities {
-            for v in granularities {
-                mp.text("timestamp_granularities[]", v);
+            if let Some(lang) = &opts.language {
+                mp.text("language", lang);
+            }
+            if let Some(prompt) = &opts.prompt {
+                mp.text("prompt", prompt);
+            }
+            if let Some(temp) = opts.temperature {
+                mp.text("temperature", &temp.to_string());
+            }
+            if let Some(granularities) = &opts.timestamp_granularities {
+                for v in granularities {
+                    mp.text("timestamp_granularities[]", v);
+                }
             }
         }
 

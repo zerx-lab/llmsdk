@@ -294,23 +294,33 @@ impl AzureOpenAiBuilder {
             None => HttpClient::new()?,
         };
 
-        let mk_inner = |provider_id: &'static str| -> Arc<Inner> {
-            Arc::new(Inner::new(
-                url_strategy.clone(),
-                headers.clone(),
-                http.clone(),
-                provider_id,
-            ))
+        // Upstream `@ai-sdk/openai` switches the providerOptions namespace
+        // key to `"azure"` for the Responses and (legacy) Completion endpoints
+        // when the provider name contains "azure" (see
+        // `openai-responses-language-model.ts:180-181` and
+        // `openai-completion-language-model.ts:54`). Chat / Embedding / Image
+        // / Speech / Transcription stay on `"openai"` since the upstream
+        // provider also hardcodes that key there.
+        let mk_inner = |provider_id: &'static str, options_name: &'static str| -> Arc<Inner> {
+            Arc::new(
+                Inner::new(
+                    url_strategy.clone(),
+                    headers.clone(),
+                    http.clone(),
+                    provider_id,
+                )
+                .with_provider_options_name(options_name),
+            )
         };
 
         Ok(AzureOpenAi {
-            chat_inner: mk_inner(PROVIDER_ID_CHAT),
-            responses_inner: mk_inner(PROVIDER_ID_RESPONSES),
-            embedding_inner: mk_inner(PROVIDER_ID_EMBEDDINGS),
-            image_inner: mk_inner(PROVIDER_ID_IMAGE),
-            completion_inner: mk_inner(PROVIDER_ID_COMPLETION),
-            speech_inner: mk_inner(PROVIDER_ID_SPEECH),
-            transcription_inner: mk_inner(PROVIDER_ID_TRANSCRIPTION),
+            chat_inner: mk_inner(PROVIDER_ID_CHAT, "openai"),
+            responses_inner: mk_inner(PROVIDER_ID_RESPONSES, "azure"),
+            embedding_inner: mk_inner(PROVIDER_ID_EMBEDDINGS, "openai"),
+            image_inner: mk_inner(PROVIDER_ID_IMAGE, "openai"),
+            completion_inner: mk_inner(PROVIDER_ID_COMPLETION, "azure"),
+            speech_inner: mk_inner(PROVIDER_ID_SPEECH, "openai"),
+            transcription_inner: mk_inner(PROVIDER_ID_TRANSCRIPTION, "openai"),
         })
     }
 }

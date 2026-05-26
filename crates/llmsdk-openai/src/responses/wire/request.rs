@@ -138,8 +138,16 @@ pub enum UserContentPart {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum InputImage {
-    Url { image_url: String },
-    Reference { file_id: String },
+    Url {
+        image_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    Reference {
+        file_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
 /// `input_file` payload (one of three shapes).
@@ -315,6 +323,7 @@ mod tests {
                 UserContentPart::InputText { text: "hi".into() },
                 UserContentPart::InputImage(InputImage::Url {
                     image_url: "https://x".into(),
+                    detail: None,
                 }),
             ],
         });

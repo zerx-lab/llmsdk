@@ -90,6 +90,13 @@ pub(crate) enum BlockStart {
         #[serde(default)]
         data: String,
     },
+    /// Compaction notice opened mid-stream. Surfaced as a regular text
+    /// block tagged with `provider_metadata.anthropic.type = "compaction"`.
+    /// Mirrors upstream `anthropic-language-model.ts:1606-1618`.
+    Compaction {
+        #[serde(default)]
+        content: Option<String>,
+    },
     #[serde(other)]
     Other,
 }
@@ -115,6 +122,12 @@ pub(crate) enum BlockDelta {
     /// `page_location` / `char_location`). Raw JSON kept for fidelity.
     CitationsDelta {
         citation: JsonValue,
+    },
+    /// Streamed compaction-block text fragment. Forwarded as a regular
+    /// text delta. Mirrors upstream `anthropic-language-model.ts:2207-2218`.
+    CompactionDelta {
+        #[serde(default)]
+        content: Option<String>,
     },
     #[serde(other)]
     Other,

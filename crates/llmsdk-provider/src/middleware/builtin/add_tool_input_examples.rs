@@ -13,22 +13,30 @@ use crate::middleware::language_model::{CallKind, LanguageModelMiddleware};
 /// Middleware that serializes `tool.input_examples` (if any) and appends them
 /// to the tool's `description` field.
 ///
-/// Default formatter renders each example as `Example {i}: {json}`. Override
-/// with [`Self::with_formatter`] to control the prose. Examples themselves
-/// are *kept* on the tool — the middleware only enriches the description so
-/// downstream code that inspects `input_examples` keeps working.
+/// Default layout mirrors `@ai-sdk/ai/src/middleware/add-tool-input-examples-middleware.ts`:
+/// `"{description}\n\n{prefix}\n{example_1}\n{example_2}..."` where `prefix`
+/// defaults to `"Input Examples:"` and each example is `JSON.stringify(example.input)`
+/// (no enumeration prefix). Override with [`Self::with_prefix`] to customise
+/// the header line or [`Self::with_formatter`] to take full control.
 pub struct AddToolInputExamplesMiddleware {
+    prefix: String,
     formatter: ExampleFormatter,
 }
 
 /// Boxed formatter that renders a list of [`crate::language_model::ToolInputExample`]
-/// into a string appended to a tool's description.
+/// into a string appended to a tool's description. The middleware passes the
+/// configured `prefix` alongside the examples so custom formatters can keep
+/// the header line in sync.
 type ExampleFormatter =
-    Box<dyn Fn(&[crate::language_model::ToolInputExample]) -> String + Send + Sync>;
+    Box<dyn Fn(&str, &[crate::language_model::ToolInputExample]) -> String + Send + Sync>;
 
 impl std::fmt::Debug for AddToolInputExamplesMiddleware {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AddToolInputExamplesMiddleware").finish()
+        // `formatter` is a boxed closure with no useful Debug representation;
+        // mark non-exhaustive instead of dumping a function pointer address.
+        f.debug_struct("AddToolInputExamplesMiddleware")
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
     }
 }
 
@@ -39,32 +47,47 @@ impl Default for AddToolInputExamplesMiddleware {
 }
 
 impl AddToolInputExamplesMiddleware {
-    /// Build with the default `Example {i}: {json}` formatter.
+    /// Build with the upstream-aligned default prefix `"Input Examples:"`.
     #[must_use]
     pub fn new() -> Self {
         Self {
+            prefix: "Input Examples:".to_owned(),
             formatter: Box::new(default_formatter),
         }
     }
 
-    /// Override how examples are formatted into the description.
+    /// Override the header line prepended before the serialized examples.
+    /// Mirrors upstream `prefix` option (default `"Input Examples:"`).
+    #[must_use]
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+
+    /// Override how examples are formatted into the description. The
+    /// formatter receives the configured `prefix` plus the examples and
+    /// returns the full block that will be appended verbatim.
     #[must_use]
     pub fn with_formatter<F>(mut self, formatter: F) -> Self
     where
-        F: Fn(&[crate::language_model::ToolInputExample]) -> String + Send + Sync + 'static,
+        F: Fn(&str, &[crate::language_model::ToolInputExample]) -> String + Send + Sync + 'static,
     {
         self.formatter = Box::new(formatter);
         self
     }
 }
 
-fn default_formatter(examples: &[crate::language_model::ToolInputExample]) -> String {
+fn default_formatter(prefix: &str, examples: &[crate::language_model::ToolInputExample]) -> String {
     use std::fmt::Write as _;
-    let mut buf = String::from("\n\nExamples:");
-    for (idx, ex) in examples.iter().enumerate() {
+    // Upstream produces `"\n\n{prefix}\n{ex1}\n{ex2}..."`. The leading two
+    // newlines separate the examples block from any pre-existing description;
+    // they are stripped by the caller when `description` was empty.
+    let mut buf = String::from("\n\n");
+    buf.push_str(prefix);
+    for ex in examples {
         let json =
             serde_json::to_string(&ex.input).unwrap_or_else(|_| "<unserializable>".to_owned());
-        let _ = write!(buf, "\n{}. {json}", idx + 1);
+        let _ = write!(buf, "\n{json}");
     }
     buf
 }
@@ -90,7 +113,7 @@ impl LanguageModelMiddleware for AddToolInputExamplesMiddleware {
                 if examples.is_empty() {
                     continue;
                 }
-                let suffix = (self.formatter)(examples);
+                let suffix = (self.formatter)(&self.prefix, examples);
                 *description = Some(match description.take() {
                     Some(existing) => format!("{existing}{suffix}"),
                     None => suffix.trim_start().to_owned(),

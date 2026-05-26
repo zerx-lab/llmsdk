@@ -32,6 +32,7 @@ pub(crate) fn parse_response(
     headers: HashMap<String, String>,
     request_body: Option<serde_json::Value>,
     warnings: Vec<Warning>,
+    mark_code_execution_dynamic: bool,
 ) -> Result<GenerateResult, ProviderError> {
     let mut content = Vec::new();
     for part in response.content {
@@ -79,18 +80,18 @@ pub(crate) fn parse_response(
                     provider_options,
                 }));
             }
-            ResponseContent::Compaction(v) => {
-                // Compaction notices are informational — surface via
-                // provider_metadata-style marker but no first-class block.
+            ResponseContent::Compaction { content: text } => {
+                // Surface compaction as regular text content tagged with
+                // `anthropic.type = "compaction"` on `provider_options`.
+                // Mirrors upstream anthropic-language-model.ts:959-969.
                 let mut anthropic = Map::new();
                 anthropic.insert("type".into(), JsonValue::String("compaction".into()));
-                anthropic.insert("compaction".into(), v);
                 let mut po = ProviderOptions::new();
                 po.insert("anthropic".into(), anthropic);
-                content.push(Content::Custom {
-                    kind: "anthropic.compaction".into(),
+                content.push(Content::Text(TextPart {
+                    text: text.unwrap_or_default(),
                     provider_options: Some(po),
-                });
+                }));
             }
             ResponseContent::Thinking {
                 thinking,
@@ -109,12 +110,18 @@ pub(crate) fn parse_response(
                 }));
             }
             ResponseContent::ServerToolUse { id, name, input } => {
+                // Mark code_execution invocations as dynamic when the request
+                // enabled web_*_20260209 without an explicit code_execution
+                // tool. Mirrors upstream anthropic-language-model.ts:1028-1031
+                // and :1058-1060.
+                let dynamic =
+                    (mark_code_execution_dynamic && name == "code_execution").then_some(true);
                 content.push(Content::ToolCall(ToolCallPart {
                     tool_call_id: id,
                     tool_name: name,
                     input,
                     provider_executed: Some(true),
-                    dynamic: None,
+                    dynamic,
                     provider_options: None,
                 }));
             }
@@ -128,14 +135,39 @@ pub(crate) fn parse_response(
             | ResponseContent::ToolSearchToolResult(v)
             | ResponseContent::AdvisorToolResult(v) => {
                 let (tool_call_id, tool_name) = extract_tool_call_id_and_name(&v);
+                // Detect server-tool error variants. Mirrors upstream
+                // anthropic-language-model.ts:1142-1153 / 1185-1196 / 1813-1869:
+                // when `content.type` ends in `_tool_result_error`, the tool
+                // call failed — surface it via `ErrorJson` so consumers can
+                // route on `isError`.
+                let is_error = is_tool_result_error(&v);
+                let mut anthropic_meta = Map::new();
+                if is_error {
+                    anthropic_meta.insert("isError".into(), JsonValue::Bool(true));
+                }
+                let provider_metadata = if anthropic_meta.is_empty() {
+                    None
+                } else {
+                    let mut pm = ProviderMetadata::new();
+                    pm.insert("anthropic".into(), anthropic_meta);
+                    Some(pm)
+                };
+                let output = if is_error {
+                    ToolResultOutput::ErrorJson {
+                        value: v,
+                        provider_options: None,
+                    }
+                } else {
+                    ToolResultOutput::Json {
+                        value: v,
+                        provider_options: None,
+                    }
+                };
                 content.push(Content::ToolResult(ToolResult {
                     tool_call_id,
                     tool_name,
-                    output: ToolResultOutput::Json {
-                        value: v,
-                        provider_options: None,
-                    },
-                    provider_metadata: None,
+                    output,
+                    provider_metadata,
                 }));
             }
             // Drop: empty text, anything we don't surface.
@@ -306,6 +338,27 @@ fn extract_tool_call_id_and_name(v: &JsonValue) -> (String, String) {
     (tool_call_id, tool_name)
 }
 
+/// Detect server-tool error variants by inspecting `content.type` (single
+/// object) or scanning `content[].type` (array). Matches the upstream
+/// `*_tool_result_error` variants surfaced for `web_search` / `web_fetch` /
+/// `code_execution` and friends.
+fn is_tool_result_error(v: &JsonValue) -> bool {
+    let Some(content) = v.get("content") else {
+        return false;
+    };
+    if let Some(s) = content.get("type").and_then(|x| x.as_str()) {
+        return s.ends_with("_tool_result_error");
+    }
+    if let Some(arr) = content.as_array() {
+        return arr.iter().any(|item| {
+            item.get("type")
+                .and_then(|x| x.as_str())
+                .is_some_and(|s| s.ends_with("_tool_result_error"))
+        });
+    }
+    false
+}
+
 /// Build a `provider_options` map for a [`ReasoningPart`] that carries the
 /// `signature` (visible thinking) and/or `redactedData` (server-redacted).
 fn thinking_provider_options(
@@ -360,7 +413,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         assert_eq!(r.content.len(), 1);
         assert_eq!(r.finish_reason.unified, FinishReasonKind::Stop);
         assert_eq!(r.usage.input_tokens.total, Some(3));
@@ -389,7 +442,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         if let Content::ToolCall(tc) = &r.content[0] {
             assert_eq!(tc.tool_call_id, "tu_1");
             assert_eq!(tc.input["city"], "NYC");
@@ -434,7 +487,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let anthropic = pm.get("anthropic").unwrap();
         let iters = anthropic
@@ -470,7 +523,7 @@ mod tests {
             }),
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let container = pm.get("anthropic").unwrap().get("container").unwrap();
         assert_eq!(container["id"], "ctr-xyz");
@@ -508,7 +561,7 @@ mod tests {
                 ],
             }),
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let edits = pm
             .get("anthropic")
@@ -544,8 +597,169 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![]).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
         assert!(r.provider_metadata.is_none());
+    }
+
+    #[test]
+    fn server_tool_use_code_execution_marked_dynamic_when_flag_set() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ServerToolUse {
+                id: "srv_1".into(),
+                name: "code_execution".into(),
+                input: serde_json::json!({"code": "1+1"}),
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], true).unwrap();
+        match &r.content[0] {
+            Content::ToolCall(tc) => {
+                assert_eq!(tc.dynamic, Some(true));
+                assert_eq!(tc.provider_executed, Some(true));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_tool_use_non_code_execution_not_marked_when_flag_set() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ServerToolUse {
+                id: "srv_2".into(),
+                name: "web_search".into(),
+                input: serde_json::json!({"q": "rust"}),
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], true).unwrap();
+        match &r.content[0] {
+            Content::ToolCall(tc) => assert_eq!(tc.dynamic, None),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_search_tool_result_error_surfaced_as_error_json() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::WebSearchToolResult(serde_json::json!({
+                "tool_use_id": "srv_1",
+                "name": "web_search",
+                "content": {
+                    "type": "web_search_tool_result_error",
+                    "error_code": "max_uses_exceeded"
+                }
+            }))],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        match &r.content[0] {
+            Content::ToolResult(tr) => {
+                assert!(matches!(tr.output, ToolResultOutput::ErrorJson { .. }));
+                let pm = tr.provider_metadata.as_ref().expect("metadata present");
+                assert_eq!(
+                    pm.get("anthropic").and_then(|b| b.get("isError")),
+                    Some(&JsonValue::Bool(true))
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_search_tool_result_success_remains_json() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::WebSearchToolResult(serde_json::json!({
+                "tool_use_id": "srv_1",
+                "name": "web_search",
+                "content": [{"type": "web_search_result", "url": "https://x"}]
+            }))],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        match &r.content[0] {
+            Content::ToolResult(tr) => {
+                assert!(matches!(tr.output, ToolResultOutput::Json { .. }));
+                assert!(tr.provider_metadata.is_none());
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compaction_block_surfaced_as_text_with_anthropic_marker() {
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::Compaction {
+                content: Some("[earlier turns compacted]".into()),
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        match &r.content[0] {
+            Content::Text(t) => {
+                assert_eq!(t.text, "[earlier turns compacted]");
+                let po = t.provider_options.as_ref().expect("provider_options set");
+                assert_eq!(
+                    po.get("anthropic").and_then(|b| b.get("type")),
+                    Some(&JsonValue::String("compaction".into()))
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     #[test]
@@ -565,7 +779,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let err = parse_response(resp, empty_headers(), None, vec![]).unwrap_err();
+        let err = parse_response(resp, empty_headers(), None, vec![], false).unwrap_err();
         assert!(format!("{err}").contains("no content"));
     }
 }

@@ -56,6 +56,13 @@ impl LanguageModelMiddleware for SimulateStreamingMiddleware {
             let block_id = format!("sim-{idx}");
             match content {
                 Content::Text(t) => {
+                    // Mirror upstream `simulate-streaming-middleware.ts:27`:
+                    // empty-text content blocks are skipped — without this
+                    // guard downstream consumers receive a spurious
+                    // text-start / text-delta("") / text-end triple.
+                    if t.text.is_empty() {
+                        continue;
+                    }
                     parts.push(Ok(StreamPart::TextStart {
                         id: block_id.clone(),
                         provider_metadata: None,
@@ -206,5 +213,33 @@ mod tests {
             tags,
             vec!["start", "text-start", "text-delta", "text-end", "finish"]
         );
+    }
+
+    #[tokio::test]
+    async fn empty_text_block_is_skipped() {
+        // Mirrors upstream `simulate-streaming-middleware.ts:27` —
+        // a zero-length text block must not surface as a stream segment.
+        let inner: Arc<dyn LanguageModel> = Arc::new(Gen {
+            text: String::new(),
+        });
+        let wrapped = wrap_language_model(
+            inner,
+            [Arc::new(SimulateStreamingMiddleware::new()) as Arc<dyn LanguageModelMiddleware>],
+        );
+        let mut s = wrapped.do_stream(CallOptions::default()).await.unwrap();
+        let mut tags: Vec<&'static str> = Vec::new();
+        while let Some(item) = s.stream.next().await {
+            tags.push(match item.unwrap() {
+                StreamPart::StreamStart { .. } => "start",
+                StreamPart::TextStart { .. } => "text-start",
+                StreamPart::TextDelta { .. } => "text-delta",
+                StreamPart::TextEnd { .. } => "text-end",
+                StreamPart::Finish { .. } => "finish",
+                _ => "other",
+            });
+        }
+        // No text-* events for the empty block — only the surrounding
+        // stream-start and finish frames remain.
+        assert_eq!(tags, vec!["start", "finish"]);
     }
 }

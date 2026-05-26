@@ -47,20 +47,30 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
     let mut messages: Vec<WireMessage> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut validator = CacheControlValidator::new();
 
     for message in prompt {
         match message {
             Message::System { content, .. } => systems.push(content.as_str()),
             Message::User { content, .. } => {
-                let parts = convert_user(content, &mut warnings, &mut betas);
+                let parts = convert_user(content, &mut warnings, &mut betas, &mut validator);
                 push_user(&mut messages, parts);
             }
-            Message::Assistant { content, .. } => {
-                let parts = convert_assistant(content, send_reasoning, &mut warnings);
+            Message::Assistant {
+                content,
+                provider_options,
+            } => {
+                let parts = convert_assistant(
+                    content,
+                    provider_options.as_ref(),
+                    send_reasoning,
+                    &mut warnings,
+                    &mut validator,
+                );
                 messages.push(WireMessage::Assistant { content: parts });
             }
             Message::Tool { content, .. } => {
-                let parts = convert_tool(content, &mut warnings, &mut betas);
+                let parts = convert_tool(content, &mut warnings, &mut betas, &mut validator);
                 push_user(&mut messages, parts);
             }
         }
@@ -71,6 +81,8 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
     } else {
         Some(systems.join("\n\n"))
     };
+
+    warnings.append(&mut validator.warnings);
 
     Converted {
         system,
@@ -101,16 +113,22 @@ fn convert_user(
     parts: &[UserPart],
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    validator: &mut CacheControlValidator,
 ) -> Vec<WireUserPart> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
             UserPart::Text(t) => out.push(WireUserPart::Text {
                 text: t.text.clone(),
-                cache_control: read_cache_control(t.provider_options.as_ref()),
+                cache_control: validator.get(
+                    t.provider_options.as_ref(),
+                    "user message part",
+                    true,
+                ),
             }),
             UserPart::File(f) => {
-                let cache_control = read_cache_control(f.provider_options.as_ref());
+                let cache_control =
+                    validator.get(f.provider_options.as_ref(), "user message part", true);
                 let citations = read_citations_config(f.provider_options.as_ref());
                 let (title, context) = read_document_meta(f.provider_options.as_ref());
                 let top = f
@@ -241,6 +259,10 @@ fn resolve_anthropic_file_id(
 }
 
 /// Pluck a `cache_control` block from `provider_options["anthropic"]`.
+///
+/// Pure read; does not enforce the 4-breakpoint limit. Most call sites
+/// should go through [`CacheControlValidator::get`] instead so warnings
+/// are surfaced consistently with ai-sdk's `get-cache-control.ts`.
 pub(super) fn read_cache_control(
     options: Option<&llmsdk_provider::shared::ProviderOptions>,
 ) -> Option<CacheControl> {
@@ -258,6 +280,67 @@ pub(super) fn read_cache_control(
         kind: kind.to_owned(),
         ttl,
     })
+}
+
+/// Anthropic permits at most 4 cache-control breakpoints per request.
+///
+/// Mirrors `MAX_CACHE_BREAKPOINTS` from upstream `get-cache-control.ts`.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// Tracks cache breakpoint usage across one request conversion, emitting
+/// warnings for over-the-limit or non-cacheable contexts.
+///
+/// Mirrors `CacheControlValidator` from upstream `get-cache-control.ts`.
+pub(super) struct CacheControlValidator {
+    count: usize,
+    pub(super) warnings: Vec<Warning>,
+}
+
+impl CacheControlValidator {
+    pub(super) fn new() -> Self {
+        Self {
+            count: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Read `cache_control` from `provider_options`, returning None and pushing
+    /// a warning when the breakpoint limit is reached or the context disallows
+    /// caching.
+    ///
+    /// `context_type` is a short human-readable label ("user message part",
+    /// "thinking block", …) used in the warning text. `can_cache` mirrors the
+    /// upstream `canCache` flag — when false and a `cache_control` is requested,
+    /// emit a warning and drop the value without counting toward the limit.
+    pub(super) fn get(
+        &mut self,
+        options: Option<&llmsdk_provider::shared::ProviderOptions>,
+        context_type: &str,
+        can_cache: bool,
+    ) -> Option<CacheControl> {
+        let value = read_cache_control(options)?;
+        if !can_cache {
+            self.warnings.push(Warning::UnsupportedSetting {
+                setting: "cache_control".to_owned(),
+                details: Some(format!(
+                    "cache_control cannot be set on {context_type}. It will be ignored."
+                )),
+            });
+            return None;
+        }
+        self.count += 1;
+        if self.count > MAX_CACHE_BREAKPOINTS {
+            self.warnings.push(Warning::UnsupportedSetting {
+                setting: "cache_control".to_owned(),
+                details: Some(format!(
+                    "Maximum {MAX_CACHE_BREAKPOINTS} cache breakpoints exceeded (found {count}). This breakpoint will be ignored.",
+                    count = self.count,
+                )),
+            });
+            return None;
+        }
+        Some(value)
+    }
 }
 
 /// Pluck a `citations` config from `provider_options["anthropic"]`.
@@ -297,16 +380,35 @@ fn read_document_meta(
 
 fn convert_assistant(
     parts: &[AssistantPart],
+    message_provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
     send_reasoning: bool,
     warnings: &mut Vec<Warning>,
+    validator: &mut CacheControlValidator,
 ) -> Vec<WireAssistantPart> {
     let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
+    let parts_count = parts.len();
+    for (idx, part) in parts.iter().enumerate() {
+        // Cache-control fallback chain mirrors upstream
+        // convert-to-anthropic-prompt.ts:548-558:
+        // 1. part.providerOptions  → "assistant message part"
+        // 2. last part only: message.providerOptions  → "assistant message"
+        let is_last = idx + 1 == parts_count;
+        let part_provider_options = assistant_part_provider_options(part);
+        let part_cc = validator.get(part_provider_options, "assistant message part", true);
+        let cache_control = if part_cc.is_some() {
+            part_cc
+        } else if is_last {
+            validator.get(message_provider_options, "assistant message", true)
+        } else {
+            None
+        };
+
         match part {
             AssistantPart::Text(t) => out.push(WireAssistantPart::Text {
                 text: t.text.clone(),
+                cache_control,
             }),
-            AssistantPart::ToolCall(tc) => out.push(convert_tool_call(tc)),
+            AssistantPart::ToolCall(tc) => out.push(convert_tool_call(tc, cache_control)),
             AssistantPart::Reasoning {
                 text,
                 provider_options,
@@ -314,6 +416,10 @@ fn convert_assistant(
                 if !send_reasoning {
                     continue;
                 }
+                // Thinking blocks cannot carry cache_control. If the user
+                // supplied one, validator.get with can_cache=false records
+                // a warning and drops it.
+                let _ = validator.get(provider_options.as_ref(), "thinking block", false);
                 let (signature, redacted_data) = extract_thinking_meta(provider_options.as_ref());
                 if let Some(data) = redacted_data {
                     out.push(WireAssistantPart::RedactedThinking { data });
@@ -377,7 +483,7 @@ fn extract_thinking_meta(
     (signature, redacted_data)
 }
 
-fn convert_tool_call(tc: &ToolCallPart) -> WireAssistantPart {
+fn convert_tool_call(tc: &ToolCallPart, cache_control: Option<CacheControl>) -> WireAssistantPart {
     // Ensure input is always an object (Anthropic requires JSON-typed input).
     let input = if tc.input.is_null() {
         serde_json::Value::Object(serde_json::Map::new())
@@ -388,6 +494,29 @@ fn convert_tool_call(tc: &ToolCallPart) -> WireAssistantPart {
         id: tc.tool_call_id.clone(),
         name: tc.tool_name.clone(),
         input,
+        cache_control,
+    }
+}
+
+/// Pluck `provider_options` from an `AssistantPart` variant, regardless of
+/// the variant's shape.
+fn assistant_part_provider_options(
+    part: &AssistantPart,
+) -> Option<&llmsdk_provider::shared::ProviderOptions> {
+    match part {
+        AssistantPart::Text(t) => t.provider_options.as_ref(),
+        AssistantPart::ToolCall(tc) => tc.provider_options.as_ref(),
+        AssistantPart::Reasoning {
+            provider_options, ..
+        }
+        | AssistantPart::ReasoningFile {
+            provider_options, ..
+        }
+        | AssistantPart::Custom {
+            provider_options, ..
+        } => provider_options.as_ref(),
+        AssistantPart::File(f) => f.provider_options.as_ref(),
+        AssistantPart::ToolResult(r) => r.provider_options.as_ref(),
     }
 }
 
@@ -395,17 +524,32 @@ fn convert_tool(
     parts: &[ToolMessagePart],
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    validator: &mut CacheControlValidator,
 ) -> Vec<WireUserPart> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
             ToolMessagePart::ToolResult(r) => {
-                let (content, is_error) = tool_result_to_content(r, warnings, betas);
+                let (content, is_error) = tool_result_to_content(r, warnings, betas, validator);
+                // Cache control fallback chain matches upstream
+                // convert-to-anthropic-prompt.ts:362-376:
+                // 1. part.providerOptions (tool result part)
+                // 2. output.providerOptions / nested content[].providerOptions
+                //    (tool result output) — handled inside
+                //    `tool_result_to_content`, but we also need to consider it
+                //    here as the message-level cache_control fallback.
+                let part_cc = validator.get(r.provider_options.as_ref(), "tool result part", true);
+                let output_cc = if part_cc.is_none() {
+                    let output_opts = output_provider_options(&r.output);
+                    validator.get(output_opts, "tool result output", true)
+                } else {
+                    None
+                };
                 out.push(WireUserPart::ToolResult {
                     tool_use_id: r.tool_call_id.clone(),
                     content,
                     is_error,
-                    cache_control: read_cache_control(r.provider_options.as_ref()),
+                    cache_control: part_cc.or(output_cc),
                 });
             }
             ToolMessagePart::ToolApprovalResponse(_) => {
@@ -419,10 +563,48 @@ fn convert_tool(
     out
 }
 
+/// Pluck `provider_options` from a `ToolResultOutput` variant.
+///
+/// Mirrors the `output.providerOptions` / nested `content[].providerOptions`
+/// fallback in upstream `convert-to-anthropic-prompt.ts:347-356`.
+fn output_provider_options(
+    output: &ToolResultOutput,
+) -> Option<&llmsdk_provider::shared::ProviderOptions> {
+    match output {
+        ToolResultOutput::Text {
+            provider_options, ..
+        }
+        | ToolResultOutput::Json {
+            provider_options, ..
+        }
+        | ToolResultOutput::ErrorText {
+            provider_options, ..
+        }
+        | ToolResultOutput::ErrorJson {
+            provider_options, ..
+        }
+        | ToolResultOutput::ExecutionDenied {
+            provider_options, ..
+        } => provider_options.as_ref(),
+        ToolResultOutput::Content { value } => value.iter().find_map(|p| match p {
+            ToolOutputPart::Text {
+                provider_options, ..
+            }
+            | ToolOutputPart::File {
+                provider_options, ..
+            }
+            | ToolOutputPart::Custom {
+                provider_options, ..
+            } => provider_options.as_ref(),
+        }),
+    }
+}
+
 fn tool_result_to_content(
     part: &ToolResultPart,
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    validator: &mut CacheControlValidator,
 ) -> (WireToolResultContent, Option<bool>) {
     match &part.output {
         ToolResultOutput::Text { value, .. } => (WireToolResultContent::Text(value.clone()), None),
@@ -452,7 +634,7 @@ fn tool_result_to_content(
         ToolResultOutput::Content { value } => {
             let parts: Vec<WireNestedToolResultContent> = value
                 .iter()
-                .filter_map(|p| convert_nested_tool_output(p, warnings, betas))
+                .filter_map(|p| convert_nested_tool_output(p, warnings, betas, validator))
                 .collect();
             (WireToolResultContent::Parts(parts), None)
         }
@@ -467,6 +649,7 @@ fn convert_nested_tool_output(
     part: &ToolOutputPart,
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    validator: &mut CacheControlValidator,
 ) -> Option<WireNestedToolResultContent> {
     match part {
         ToolOutputPart::Text {
@@ -474,14 +657,21 @@ fn convert_nested_tool_output(
             provider_options,
         } => Some(WireNestedToolResultContent::Text {
             text: text.clone(),
-            cache_control: read_cache_control(provider_options.as_ref()),
+            cache_control: validator.get(provider_options.as_ref(), "tool result output", true),
         }),
         ToolOutputPart::File {
             data,
             media_type,
             provider_options,
             ..
-        } => convert_nested_file(data, media_type, provider_options.as_ref(), warnings, betas),
+        } => convert_nested_file(
+            data,
+            media_type,
+            provider_options.as_ref(),
+            warnings,
+            betas,
+            validator,
+        ),
         ToolOutputPart::Custom { provider_options } => {
             convert_nested_custom(provider_options.as_ref(), warnings)
         }
@@ -495,8 +685,9 @@ fn convert_nested_file(
     provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
+    validator: &mut CacheControlValidator,
 ) -> Option<WireNestedToolResultContent> {
-    let cache_control = read_cache_control(provider_options);
+    let cache_control = validator.get(provider_options, "tool result output", true);
     let top = media_type.split('/').next().unwrap_or(media_type);
     if top == "image" {
         let source = match data {

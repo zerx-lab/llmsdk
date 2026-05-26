@@ -301,17 +301,15 @@ impl Anthropic {
 
     /// Files API handle (`POST /v1/files`).
     ///
-    /// Mirrors `provider.files()`.
+    /// Mirrors `provider.files()`. The handle's `provider()` reports the
+    /// same string as the Messages model handle — upstream sets
+    /// `provider: providerName` for Files (no `.files` suffix), see
+    /// `@ai-sdk/anthropic/src/anthropic-provider.ts:190` and the
+    /// `expect(files.provider).toBe('anthropic-aws.messages')` test in
+    /// `anthropic-aws-provider.test.ts:454`.
     #[must_use]
     pub fn files(&self) -> AnthropicFiles {
-        let provider = format!(
-            "{}.files",
-            self.inner
-                .provider_name
-                .strip_suffix(".messages")
-                .unwrap_or(&self.inner.provider_name)
-        );
-        AnthropicFiles::new(Arc::clone(&self.inner), provider)
+        AnthropicFiles::new(Arc::clone(&self.inner), self.inner.provider_name.clone())
     }
 
     /// Skills API handle (`POST /v1/skills`).
@@ -598,10 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn files_handle_reports_provider_suffix() {
+    fn files_handle_reuses_messages_provider_name() {
+        // Mirrors upstream `anthropic-provider.ts:190` where Files takes
+        // `provider: providerName` directly (no `.files` suffix).
         let a = fixed_key();
         let f = a.files();
-        assert_eq!(f.provider(), "anthropic.files");
+        assert_eq!(f.provider(), "anthropic.messages");
     }
 
     #[test]
@@ -618,7 +618,8 @@ mod tests {
             .name("acme.bedrock.anthropic.messages")
             .build()
             .unwrap();
-        assert_eq!(a.files().provider(), "acme.bedrock.anthropic.files");
+        // Files reuses the full messages name; Skills swaps the suffix.
+        assert_eq!(a.files().provider(), "acme.bedrock.anthropic.messages");
         assert_eq!(a.skills().provider(), "acme.bedrock.anthropic.skills");
     }
 

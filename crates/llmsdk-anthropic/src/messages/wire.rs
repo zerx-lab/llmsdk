@@ -231,13 +231,21 @@ pub(crate) struct CitationsConfig {
 pub(crate) enum WireAssistantPart {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     /// Visible thinking block (signature required for cache replay).
+    ///
+    /// Thinking blocks cannot carry `cache_control` directly — they are
+    /// cached implicitly via prior assistant turns. Validation is enforced
+    /// via [`CacheControlValidator::get`] with `can_cache: false`.
     Thinking {
         thinking: String,
         /// Opaque signature returned by the server; required when replaying
@@ -245,10 +253,8 @@ pub(crate) enum WireAssistantPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
-    /// Redacted thinking block — opaque to clients.
-    RedactedThinking {
-        data: String,
-    },
+    /// Redacted thinking block — opaque to clients (no `cache_control`).
+    RedactedThinking { data: String },
 }
 
 /// `tools[]` entry.
@@ -428,8 +434,15 @@ pub(crate) enum ResponseContent {
         #[serde(default)]
         dynamic: Option<bool>,
     },
-    /// Server-emitted compaction block (response trimming notice).
-    Compaction(JsonValue),
+    /// Server-emitted compaction block — an informational text fragment
+    /// summarising response trimming. Surfaced upstream as a regular
+    /// `text` content block tagged with
+    /// `provider_metadata.anthropic.type = "compaction"`. Mirrors
+    /// `AnthropicCompactionContent` in `anthropic-api.ts:52-56`.
+    Compaction {
+        #[serde(default)]
+        content: Option<String>,
+    },
     /// Visible reasoning trace from extended thinking.
     Thinking {
         thinking: String,

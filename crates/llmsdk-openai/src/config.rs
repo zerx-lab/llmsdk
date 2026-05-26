@@ -98,6 +98,12 @@ pub struct Inner {
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
     pub(crate) provider_id: &'static str,
+    /// Namespace key under which `provider_options` and `provider_metadata`
+    /// are read/written for this `Inner`. Defaults to `"openai"`; Azure
+    /// switches to `"azure"` for Responses and Completion to mirror
+    /// `@ai-sdk/openai`'s `provider.includes('azure') ? 'azure' : 'openai'`
+    /// dispatch.
+    pub(crate) provider_options_name: &'static str,
     /// Optional per-request signer (e.g. AWS `SigV4` for Bedrock Mantle, AAD
     /// token refresh for Azure with managed identity). Called once per
     /// outgoing request after `headers` is cloned.
@@ -146,6 +152,7 @@ impl Inner {
             headers,
             http,
             provider_id,
+            provider_options_name: "openai",
             signer: None,
         }
     }
@@ -164,8 +171,22 @@ impl Inner {
             headers,
             http,
             provider_id,
+            provider_options_name: "openai",
             signer: Some(signer),
         }
+    }
+
+    /// Override the `provider_options` / `provider_metadata` namespace key.
+    ///
+    /// Defaults to `"openai"`. Azure passes `"azure"` for Responses /
+    /// Completion to align with `@ai-sdk/openai`'s
+    /// `config.provider.includes('azure') ? 'azure' : 'openai'` switch.
+    /// Chat / Embedding / Image endpoints keep `"openai"` since the upstream
+    /// JS provider also hardcodes that namespace there.
+    #[must_use]
+    pub fn with_provider_options_name(mut self, name: &'static str) -> Self {
+        self.provider_options_name = name;
+        self
     }
 
     /// Apply the optional [`RequestSigner`] hook, if any.
@@ -192,6 +213,12 @@ impl Inner {
     #[must_use]
     pub(crate) fn provider_id(&self) -> &'static str {
         self.provider_id
+    }
+
+    /// Namespace key for `provider_options` / `provider_metadata` lookup.
+    #[must_use]
+    pub(crate) fn provider_options_name(&self) -> &'static str {
+        self.provider_options_name
     }
 }
 
@@ -384,6 +411,7 @@ impl OpenAiBuilder {
                 headers,
                 http,
                 provider_id: PROVIDER_ID,
+                provider_options_name: "openai",
                 signer: None,
             }),
         })

@@ -33,7 +33,11 @@ pub(crate) struct TextQuery {
 pub(crate) struct RerankingConfiguration {
     #[serde(rename = "type")]
     pub kind: &'static str,
-    #[serde(rename = "bedrockRerankingConfiguration")]
+    // AWS REST API requires the `amazonBedrockRerankingConfiguration` key —
+    // see `bedrock-runtime-api Rerank` reference and upstream
+    // `amazon-bedrock-reranking-api.ts:10`. The shorter `bedrockRerankingConfiguration`
+    // is rejected by the service with a `ValidationException`.
+    #[serde(rename = "amazonBedrockRerankingConfiguration")]
     pub bedrock_reranking_configuration: BedrockRerankingConfiguration,
 }
 

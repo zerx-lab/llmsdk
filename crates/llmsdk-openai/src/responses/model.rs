@@ -31,8 +31,6 @@ use crate::chat::capabilities::Capabilities;
 use crate::config::Inner;
 use crate::error::rewrite_openai_error;
 
-const PROVIDER_OPTIONS_NAME: &str = "openai";
-
 /// OpenAI Responses API model handle.
 ///
 /// Cheap to clone. Multiple clones share the underlying HTTP client and
@@ -79,13 +77,14 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
+        let provider_options_name = self.inner.provider_options_name();
         let Built {
             body,
             warnings,
             web_search_tool_name,
             is_shell_provider_executed,
             ..
-        } = build_request(&self.model_id, &options, false);
+        } = build_request(&self.model_id, &options, false, provider_options_name);
         let request_body_value = serde_json::to_value(&body).ok();
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = self.inner.headers.clone();
@@ -112,13 +111,14 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
             response.headers,
             request_body_value,
             warnings,
-            PROVIDER_OPTIONS_NAME,
+            provider_options_name,
             web_search_tool_name.as_deref(),
             is_shell_provider_executed,
         )
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
+        let provider_options_name = self.inner.provider_options_name();
         let Built {
             mut body,
             warnings,
@@ -127,7 +127,7 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
             store,
             include_raw_chunks,
             ..
-        } = build_request(&self.model_id, &options, true);
+        } = build_request(&self.model_id, &options, true, provider_options_name);
         body.stream = Some(true);
         let request_body_value = serde_json::to_value(&body).ok();
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
@@ -154,7 +154,7 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
 
         let state = StreamState::new(StreamSetup {
             warnings,
-            provider_options_name: PROVIDER_OPTIONS_NAME,
+            provider_options_name,
             store,
             include_raw_chunks,
             web_search_tool_name,
@@ -223,9 +223,14 @@ struct Built {
     include_raw_chunks: bool,
 }
 
-fn build_request(model_id: &str, options: &CallOptions, _streaming: bool) -> Built {
+fn build_request(
+    model_id: &str,
+    options: &CallOptions,
+    _streaming: bool,
+    provider_options_name: &'static str,
+) -> Built {
     let caps = Capabilities::detect(model_id);
-    let mut provider_opts = parse(options.provider_options.as_ref(), PROVIDER_OPTIONS_NAME);
+    let mut provider_opts = parse(options.provider_options.as_ref(), provider_options_name);
     let mut warnings = validate(&mut provider_opts, &caps);
 
     let is_reasoning = provider_opts
@@ -312,7 +317,7 @@ fn build_request(model_id: &str, options: &CallOptions, _streaming: bool) -> Bui
 
     let ctx = ConvertCtx {
         system_message_mode,
-        provider_options_name: PROVIDER_OPTIONS_NAME,
+        provider_options_name,
         pass_through_unsupported_files: provider_opts
             .pass_through_unsupported_files
             .unwrap_or(false),

@@ -133,12 +133,15 @@ fn convert_user_file(
 
     // Image
     if mt.starts_with("image/") {
+        let detail = read_image_detail(file.provider_options.as_ref(), ctx);
         let payload = match &file.data {
             FileData::Url { url } => InputImage::Url {
                 image_url: url.clone(),
+                detail,
             },
             FileData::Data { data } => InputImage::Url {
                 image_url: data_uri(mt, data),
+                detail,
             },
             FileData::Reference { reference } => {
                 let id = reference
@@ -148,6 +151,7 @@ fn convert_user_file(
                 match id {
                     Some(id) => InputImage::Reference {
                         file_id: id.to_string(),
+                        detail,
                     },
                     None => {
                         warnings.push(Warning::Other {
@@ -281,6 +285,13 @@ fn convert_assistant(
     for part in parts {
         match part {
             AssistantPart::Text(t) => {
+                // Skip text parts that already exist in the conversation context
+                // to avoid "Duplicate item found" errors. Mirrors upstream
+                // convert-to-openai-responses-input.ts:234.
+                let text_item_id = read_item_id(t.provider_options.as_ref(), ctx);
+                if ctx.has_conversation && text_item_id.is_some() {
+                    continue;
+                }
                 pick_text_metadata(
                     t.provider_options.as_ref(),
                     ctx.provider_options_name,
@@ -295,12 +306,6 @@ fn convert_assistant(
                 text,
                 provider_options,
             } => {
-                flush_text(
-                    items,
-                    &mut text_buf,
-                    &mut assistant_item_id,
-                    &mut assistant_phase,
-                );
                 let openai = provider_options.as_ref().and_then(|po| {
                     po.get(ctx.provider_options_name)
                         .or_else(|| po.get("openai"))
@@ -309,6 +314,20 @@ fn convert_assistant(
                     .and_then(|m| m.get("itemId"))
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
+
+                // Skip reasoning items with item IDs when using conversation
+                // or previousResponseId — they already exist server-side.
+                // Mirrors upstream convert-to-openai-responses-input.ts:513-518.
+                if (ctx.has_conversation || ctx.has_previous_response_id) && id.is_some() {
+                    continue;
+                }
+
+                flush_text(
+                    items,
+                    &mut text_buf,
+                    &mut assistant_item_id,
+                    &mut assistant_phase,
+                );
                 let encrypted = openai
                     .and_then(|m| m.get("reasoningEncryptedContent"))
                     .and_then(|v| v.as_str())
@@ -320,6 +339,12 @@ fn convert_assistant(
                 }));
             }
             AssistantPart::ToolCall(tc) => {
+                // Skip tool-call parts that already exist in the conversation
+                // context. Mirrors upstream convert-to-openai-responses-input.ts:265.
+                let call_item_id = read_item_id(tc.provider_options.as_ref(), ctx);
+                if ctx.has_conversation && call_item_id.is_some() {
+                    continue;
+                }
                 flush_text(
                     items,
                     &mut text_buf,
@@ -345,6 +370,30 @@ fn convert_assistant(
         &mut assistant_item_id,
         &mut assistant_phase,
     );
+}
+
+/// Pluck `provider_options.<openai|provider_name>.itemId` if present.
+fn read_item_id(po: Option<&ProviderOptions>, ctx: &ConvertCtx<'_>) -> Option<String> {
+    let map = po?;
+    let bucket = map
+        .get(ctx.provider_options_name)
+        .or_else(|| map.get("openai"))?;
+    bucket
+        .get("itemId")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+/// Pluck `provider_options.<openai|provider_name>.imageDetail` if present.
+fn read_image_detail(po: Option<&ProviderOptions>, ctx: &ConvertCtx<'_>) -> Option<String> {
+    let map = po?;
+    let bucket = map
+        .get(ctx.provider_options_name)
+        .or_else(|| map.get("openai"))?;
+    bucket
+        .get("imageDetail")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 fn pick_text_metadata(
@@ -514,14 +563,147 @@ fn convert_tool_message(
 
 fn push_tool_result(
     result: &ToolResultPart,
-    _ctx: &ConvertCtx<'_>,
+    ctx: &ConvertCtx<'_>,
     items: &mut Vec<InputItem>,
-    _warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Warning>,
 ) {
+    // Skip tool results that already exist in the conversation context.
+    // Mirrors upstream convert-to-openai-responses-input.ts:417.
+    if ctx.has_conversation {
+        return;
+    }
+
+    let output = match &result.output {
+        // Content with rich parts → input_text / input_image / input_file array.
+        // Mirrors upstream convert-to-openai-responses-input.ts:780-833.
+        ToolResultOutput::Content { value } => {
+            let parts: Vec<UserContentPart> = value
+                .iter()
+                .filter_map(|part| convert_tool_output_part(part, ctx, warnings))
+                .collect();
+            if parts.is_empty() {
+                FunctionCallOutputBody::Text(String::new())
+            } else {
+                FunctionCallOutputBody::Parts(parts)
+            }
+        }
+        _ => FunctionCallOutputBody::Text(tool_output_string(&result.output)),
+    };
+
     items.push(InputItem::Typed(TypedInputItem::FunctionCallOutput {
         call_id: result.tool_call_id.clone(),
-        output: FunctionCallOutputBody::Text(tool_output_string(&result.output)),
+        output,
     }));
+}
+
+fn convert_tool_output_part(
+    part: &llmsdk_provider::language_model::ToolOutputPart,
+    ctx: &ConvertCtx<'_>,
+    warnings: &mut Vec<Warning>,
+) -> Option<UserContentPart> {
+    use llmsdk_provider::language_model::ToolOutputPart;
+
+    match part {
+        ToolOutputPart::Text { text, .. } => {
+            Some(UserContentPart::InputText { text: text.clone() })
+        }
+        ToolOutputPart::File {
+            data,
+            media_type,
+            filename,
+            provider_options,
+        } => {
+            let mt = media_type.as_str();
+            let detail = read_image_detail(provider_options.as_ref(), ctx);
+
+            if mt.starts_with("image/") {
+                let payload = match data {
+                    FileData::Url { url } => InputImage::Url {
+                        image_url: url.clone(),
+                        detail,
+                    },
+                    FileData::Data { data } => InputImage::Url {
+                        image_url: data_uri(mt, data),
+                        detail,
+                    },
+                    FileData::Reference { reference } => {
+                        let id = reference
+                            .get(ctx.provider_options_name)
+                            .or_else(|| reference.get("openai"))
+                            .and_then(|v| v.as_str());
+                        match id {
+                            Some(id) => InputImage::Reference {
+                                file_id: id.to_string(),
+                                detail,
+                            },
+                            None => {
+                                warnings.push(Warning::Other {
+                                    message: format!(
+                                        "tool-result file reference for {mt} missing OpenAI file_id"
+                                    ),
+                                });
+                                return None;
+                            }
+                        }
+                    }
+                    FileData::Text { .. } => {
+                        warnings.push(Warning::Other {
+                            message: "tool-result image with inline text payload is not supported"
+                                .into(),
+                        });
+                        return None;
+                    }
+                };
+                return Some(UserContentPart::InputImage(payload));
+            }
+
+            // Non-image: input_file (PDF or pass-through).
+            let payload = match data {
+                FileData::Url { url } => InputFile::Url {
+                    file_url: url.clone(),
+                },
+                FileData::Data { data } => InputFile::Data {
+                    filename: filename.clone().unwrap_or_else(|| "file".into()),
+                    file_data: data_uri(mt, data),
+                },
+                FileData::Reference { reference } => {
+                    let id = reference
+                        .get(ctx.provider_options_name)
+                        .or_else(|| reference.get("openai"))
+                        .and_then(|v| v.as_str());
+                    match id {
+                        Some(id) => InputFile::Reference {
+                            file_id: id.to_string(),
+                        },
+                        None => {
+                            warnings.push(Warning::Other {
+                                message: format!(
+                                    "tool-result file reference for {mt} missing OpenAI file_id"
+                                ),
+                            });
+                            return None;
+                        }
+                    }
+                }
+                FileData::Text { .. } => {
+                    warnings.push(Warning::Other {
+                        message: format!(
+                            "tool-result inline text payload for {mt} is not supported"
+                        ),
+                    });
+                    return None;
+                }
+            };
+            Some(UserContentPart::InputFile(payload))
+        }
+        ToolOutputPart::Custom { .. } => {
+            warnings.push(Warning::Other {
+                message: "tool-result custom content part dropped (not supported by Responses)"
+                    .into(),
+            });
+            None
+        }
+    }
 }
 
 fn tool_output_string(output: &ToolResultOutput) -> String {
@@ -820,5 +1002,185 @@ mod tests {
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "item_reference");
         assert_eq!(v["id"], "ws_1");
+    }
+
+    // --- M14 fix-pack regression tests ---
+
+    fn po_with_item_id(id: &str) -> ProviderOptions {
+        let mut po = ProviderOptions::new();
+        po.insert(
+            "openai".into(),
+            json!({"itemId": id}).as_object().unwrap().clone(),
+        );
+        po
+    }
+
+    #[test]
+    fn reasoning_skipped_when_previous_response_id_and_item_id_present() {
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Reasoning {
+                text: "thinking".into(),
+                provider_options: Some(po_with_item_id("rs_existing")),
+            }],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_previous_response_id: true,
+                ..Default::default()
+            },
+        );
+        assert!(out.is_empty(), "reasoning with itemId must be skipped");
+    }
+
+    #[test]
+    fn reasoning_skipped_when_conversation_and_item_id_present() {
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Reasoning {
+                text: "thinking".into(),
+                provider_options: Some(po_with_item_id("rs_existing")),
+            }],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_conversation: true,
+                ..Default::default()
+            },
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn text_skipped_when_conversation_and_item_id_present() {
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Text(TextPart {
+                text: "hello".into(),
+                provider_options: Some(po_with_item_id("msg_existing")),
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_conversation: true,
+                ..Default::default()
+            },
+        );
+        assert!(out.is_empty(), "text with itemId must be skipped");
+    }
+
+    #[test]
+    fn tool_call_skipped_when_conversation_and_item_id_present() {
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                input: json!({"city": "NYC"}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: Some(po_with_item_id("fc_existing")),
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_conversation: true,
+                ..Default::default()
+            },
+        );
+        assert!(out.is_empty(), "tool-call with itemId must be skipped");
+    }
+
+    #[test]
+    fn tool_result_skipped_when_conversation() {
+        let p = vec![Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                output: ToolResultOutput::Text {
+                    value: "sunny".into(),
+                    provider_options: None,
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                has_conversation: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.is_empty(),
+            "tool-result must be skipped under hasConversation"
+        );
+    }
+
+    #[test]
+    fn tool_result_content_with_text_serializes_as_parts() {
+        use llmsdk_provider::language_model::ToolOutputPart;
+        let p = vec![Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "search".into(),
+                output: ToolResultOutput::Content {
+                    value: vec![ToolOutputPart::Text {
+                        text: "The weather in SF is 72°F".into(),
+                        provider_options: None,
+                    }],
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["type"], "function_call_output");
+        assert_eq!(v["output"][0]["type"], "input_text");
+        assert_eq!(v["output"][0]["text"], "The weather in SF is 72°F");
+    }
+
+    #[test]
+    fn tool_result_content_with_image_data_serializes_with_detail() {
+        use llmsdk_provider::language_model::ToolOutputPart;
+        let mut po = ProviderOptions::new();
+        po.insert(
+            "openai".into(),
+            json!({"imageDetail": "high"}).as_object().unwrap().clone(),
+        );
+        let p = vec![Message::Tool {
+            content: vec![ToolMessagePart::ToolResult(ToolResultPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "render".into(),
+                output: ToolResultOutput::Content {
+                    value: vec![ToolOutputPart::File {
+                        data: FileData::Data {
+                            data: FileBytes::Base64("AAEC".into()),
+                        },
+                        media_type: "image/png".into(),
+                        filename: None,
+                        provider_options: Some(po),
+                    }],
+                },
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["output"][0]["type"], "input_image");
+        assert_eq!(v["output"][0]["detail"], "high");
+        assert!(
+            v["output"][0]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 }

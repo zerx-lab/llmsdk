@@ -27,7 +27,19 @@ async fn rerank_text_documents() {
             "sources": [
                 { "type": "INLINE", "inlineDocumentSource": { "type": "TEXT", "textDocument": { "text": "apples" } } },
                 { "type": "INLINE", "inlineDocumentSource": { "type": "TEXT", "textDocument": { "text": "bananas" } } }
-            ]
+            ],
+            // AWS rejects requests without `amazonBedrockRerankingConfiguration`
+            // (see API_agent-runtime_Rerank doc). Pin the field name here so a
+            // future rename can't silently break production traffic.
+            "rerankingConfiguration": {
+                "type": "BEDROCK_RERANKING_MODEL",
+                "amazonBedrockRerankingConfiguration": {
+                    "modelConfiguration": {
+                        "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/cohere.rerank-v3-5:0"
+                    },
+                    "numberOfResults": 2
+                }
+            }
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
