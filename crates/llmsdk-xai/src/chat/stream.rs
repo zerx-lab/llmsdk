@@ -20,6 +20,7 @@ use llmsdk_provider::language_model::{
     FinishReason, FinishReasonKind, ResponseMetadata, Source, StreamPart, ToolCallPart,
 };
 use llmsdk_provider::shared::Warning;
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 
 use super::finish_reason::map as map_finish_reason;
 use super::parse_response::next_id as next_citation_id;
@@ -93,7 +94,7 @@ impl StreamState {
             self.response_id.clone_from(&chunk.id);
             out.push(StreamPart::ResponseMetadata(ResponseMetadata {
                 id: chunk.id.clone(),
-                timestamp: chunk.created.map(|c| c.to_string()),
+                timestamp: chunk.created.map(rfc3339_from_unix_seconds),
                 model_id: chunk.model.clone(),
                 headers: None,
             }));

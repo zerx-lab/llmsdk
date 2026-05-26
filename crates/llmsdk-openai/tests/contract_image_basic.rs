@@ -84,7 +84,9 @@ async fn happy_path_decodes_png_and_captures_revised_prompt() {
     assert_eq!(images[0]["size"], "1024x1024");
 
     let resp = result.response.expect("response info");
-    assert_eq!(resp.timestamp.as_deref(), Some("1700000000"));
+    // `ResponseInfo.timestamp` is an RFC 3339 string ("portability"
+    // promised in the doc); upstream `created` of 1_700_000_000s = 2023-11-14T22:13:20Z.
+    assert_eq!(resp.timestamp.as_deref(), Some("2023-11-14T22:13:20.000Z"));
     assert_eq!(resp.model_id.as_deref(), Some("dall-e-3"));
 
     assert!(result.warnings.is_empty(), "no warnings expected");

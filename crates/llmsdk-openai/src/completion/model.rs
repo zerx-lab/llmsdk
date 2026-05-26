@@ -19,6 +19,7 @@ use llmsdk_provider::language_model::{
 use llmsdk_provider::shared::{ProviderMetadata, RequestInfo, Warning};
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
 use llmsdk_provider_utils::sse::{SseEvent, sse_json_stream};
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::finish_reason::map as map_finish_reason;
@@ -467,7 +468,7 @@ fn parse_completion(
         response: Some(GenerateResponse {
             metadata: ResponseMetadata {
                 id: response.id,
-                timestamp: response.created.map(|c| c.to_string()),
+                timestamp: response.created.map(rfc3339_from_unix_seconds),
                 model_id: response.model,
                 headers: Some(headers_to_provider(headers)),
             },
@@ -545,7 +546,7 @@ where
                         metadata_emitted = true;
                         yield Ok(StreamPart::ResponseMetadata(ResponseMetadata {
                             id: chunk.id.clone(),
-                            timestamp: chunk.created.map(|c| c.to_string()),
+                            timestamp: chunk.created.map(rfc3339_from_unix_seconds),
                             model_id: chunk.model.clone(),
                             headers: None,
                         }));

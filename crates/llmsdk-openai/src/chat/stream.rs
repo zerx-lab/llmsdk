@@ -27,6 +27,7 @@ use llmsdk_provider::language_model::{
     FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart,
 };
 use llmsdk_provider::shared::{ProviderMetadata, Warning};
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 use serde_json::Map;
 
 use super::finish_reason::map as map_finish_reason;
@@ -183,7 +184,7 @@ impl StreamState {
             out.push(StreamPart::ResponseMetadata(
                 llmsdk_provider::language_model::ResponseMetadata {
                     id: chunk.id.clone(),
-                    timestamp: chunk.created.map(|c| c.to_string()),
+                    timestamp: chunk.created.map(rfc3339_from_unix_seconds),
                     model_id: chunk.model.clone(),
                     headers: None,
                 },

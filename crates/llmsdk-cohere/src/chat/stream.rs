@@ -224,8 +224,13 @@ impl StreamState {
                     let input = if trimmed.is_empty() {
                         serde_json::Value::Object(serde_json::Map::new())
                     } else {
-                        serde_json::from_str::<serde_json::Value>(trimmed)
-                            .unwrap_or(serde_json::Value::String(trimmed.to_owned()))
+                        match serde_json::from_str::<serde_json::Value>(trimmed) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                out.extend(self.on_parse_error(trimmed, &e.to_string()));
+                                return out;
+                            }
+                        }
                     };
 
                     out.push(StreamPart::ToolCall(ToolCallPart {
@@ -496,6 +501,36 @@ mod tests {
         };
         assert_eq!(tc.tool_call_id, "c1");
         assert_eq!(tc.input["city"], "NYC");
+    }
+
+    #[test]
+    fn malformed_tool_call_args_emit_stream_error() {
+        // Mirrors ai-sdk: parseJSON throws JSONParseError on invalid JSON
+        // (commit 3cfb7621e). Rust must not silently fall back to a string.
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_chunk(ChatChunk::ToolCallStart {
+            delta: ToolCallStartDelta {
+                message: ToolCallStartDeltaMessage {
+                    tool_calls: WireToolCall {
+                        id: "c1".into(),
+                        kind: WireToolCallKind::Function,
+                        function: WireFunctionCall {
+                            name: "weather".into(),
+                            arguments: "not-json".into(),
+                        },
+                    },
+                },
+            },
+        });
+        let end = state.on_chunk(ChatChunk::ToolCallEnd);
+        assert!(matches!(end.last().unwrap(), StreamPart::Error { .. }));
+        assert!(!end.iter().any(|p| matches!(p, StreamPart::ToolCall(_))));
+        let tail = state.flush();
+        let StreamPart::Finish { finish_reason, .. } = tail.last().unwrap() else {
+            panic!("expected Finish");
+        };
+        assert_eq!(finish_reason.unified, FinishReasonKind::Error);
     }
 
     #[test]

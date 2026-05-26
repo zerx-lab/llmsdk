@@ -1,11 +1,12 @@
 //! `OpenAI` usage object -> normalized [`Usage`].
 //!
-//! Mirrors `convert-openai-chat-usage.ts`. Differences:
-//!
-//! - We keep the raw object exactly; ai-sdk only keeps the typed sub-fields.
-//! - `no_cache` is `total - cache_read` when both are known, else `None`
-//!   (ai-sdk computes a zero, which we treat as "unknown" for clearer
-//!   downstream display).
+//! Mirrors `convert-openai-chat-usage.ts:18-58`. Upstream defaults each
+//! missing wire field to `0` via `?? 0` before subtracting, so `no_cache` and
+//! `text` are derived whenever `total_in` / `total_out` are known regardless
+//! of whether the cache/reasoning sub-fields were sent. We keep `total_in` /
+//! `total_out` themselves as `Option` because they carry "wire present?"
+//! information used elsewhere (`raw` keeps the original object intact, which
+//! upstream omits in favour of typed-only output).
 // Rust guideline compliant 2026-02-21
 
 use llmsdk_provider::language_model::{InputTokenUsage, OutputTokenUsage, Usage};
@@ -29,15 +30,10 @@ pub(crate) fn convert(usage: Option<&WireUsage>) -> Usage {
         .as_ref()
         .and_then(|d| d.reasoning_tokens);
 
-    let no_cache = match (total_in, cache_read) {
-        (Some(t), Some(c)) => Some(t.saturating_sub(c)),
-        _ => None,
-    };
-    let text = match (total_out, reasoning) {
-        (Some(t), Some(r)) => Some(t.saturating_sub(r)),
-        (Some(t), None) => Some(t),
-        _ => None,
-    };
+    // Mirrors upstream `?? 0` fallback: when `prompt_tokens` is present but
+    // `cached_tokens` is missing, treat cached as zero so `no_cache == total`.
+    let no_cache = total_in.map(|t| t.saturating_sub(cache_read.unwrap_or(0)));
+    let text = total_out.map(|t| t.saturating_sub(reasoning.unwrap_or(0)));
 
     let raw = serde_json::to_value(usage)
         .ok()
@@ -105,9 +101,11 @@ mod tests {
             completion_tokens_details: None,
         };
         let u = convert(Some(&wire));
+        // Upstream `?? 0` semantics: missing sub-fields default to 0, so
+        // `no_cache == total_in` and `text == total_out` when the sub-field is absent.
         assert_eq!(u.input_tokens.total, Some(10));
         assert!(u.input_tokens.cache_read.is_none());
-        assert!(u.input_tokens.no_cache.is_none());
+        assert_eq!(u.input_tokens.no_cache, Some(10));
         assert_eq!(u.output_tokens.text, Some(5));
         assert!(u.output_tokens.reasoning.is_none());
     }

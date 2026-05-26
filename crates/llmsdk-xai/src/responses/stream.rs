@@ -17,6 +17,7 @@ use llmsdk_provider::language_model::{
     ToolResultOutput,
 };
 use llmsdk_provider::shared::{ProviderMetadata, Warning};
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 use serde_json::{Map, Value, json};
 
 use super::finish_reason::map as map_finish_reason;
@@ -107,7 +108,7 @@ impl StreamState {
                     self.is_first_chunk = false;
                     out.push(StreamPart::ResponseMetadata(ResponseMetadata {
                         id: response.id,
-                        timestamp: response.created_at.map(|c| c.to_string()),
+                        timestamp: response.created_at.map(rfc3339_from_unix_seconds),
                         model_id: response.model,
                         headers: None,
                     }));

@@ -21,6 +21,7 @@ pub mod headers;
 pub mod http;
 pub mod multipart;
 pub mod sse;
+pub mod time;
 
 #[cfg(feature = "aws-sigv4")]
 pub mod aws_sigv4;
@@ -36,3 +37,5 @@ pub use headers::combine_headers;
 pub use http::{HttpClient, JsonRequest, parse_json_response};
 #[doc(inline)]
 pub use sse::{SseEvent, sse_json_stream};
+#[doc(inline)]
+pub use time::{rfc3339_from_unix, rfc3339_from_unix_seconds, rfc3339_now};

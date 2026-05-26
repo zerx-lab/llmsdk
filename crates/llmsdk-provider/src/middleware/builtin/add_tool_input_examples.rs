@@ -23,12 +23,12 @@ pub struct AddToolInputExamplesMiddleware {
     formatter: ExampleFormatter,
 }
 
-/// Boxed formatter that renders a list of [`crate::language_model::ToolInputExample`]
-/// into a string appended to a tool's description. The middleware passes the
-/// configured `prefix` alongside the examples so custom formatters can keep
-/// the header line in sync.
+/// Boxed formatter invoked once per [`crate::language_model::ToolInputExample`],
+/// receiving the example and its zero-based index. Mirrors upstream
+/// `(example, index) => string` signature
+/// (`@ai-sdk/ai/src/middleware/add-tool-input-examples-middleware.ts:46`).
 type ExampleFormatter =
-    Box<dyn Fn(&str, &[crate::language_model::ToolInputExample]) -> String + Send + Sync>;
+    Box<dyn Fn(&crate::language_model::ToolInputExample, usize) -> String + Send + Sync>;
 
 impl std::fmt::Debug for AddToolInputExamplesMiddleware {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,32 +64,25 @@ impl AddToolInputExamplesMiddleware {
         self
     }
 
-    /// Override how examples are formatted into the description. The
-    /// formatter receives the configured `prefix` plus the examples and
-    /// returns the full block that will be appended verbatim.
+    /// Override how each example is rendered. The formatter receives the
+    /// example and its zero-based index, mirroring upstream
+    /// `(example, index) => string`
+    /// (`@ai-sdk/ai/src/middleware/add-tool-input-examples-middleware.ts:46`).
     #[must_use]
     pub fn with_formatter<F>(mut self, formatter: F) -> Self
     where
-        F: Fn(&str, &[crate::language_model::ToolInputExample]) -> String + Send + Sync + 'static,
+        F: Fn(&crate::language_model::ToolInputExample, usize) -> String + Send + Sync + 'static,
     {
         self.formatter = Box::new(formatter);
         self
     }
 }
 
-fn default_formatter(prefix: &str, examples: &[crate::language_model::ToolInputExample]) -> String {
-    use std::fmt::Write as _;
-    // Upstream produces `"\n\n{prefix}\n{ex1}\n{ex2}..."`. The leading two
-    // newlines separate the examples block from any pre-existing description;
-    // they are stripped by the caller when `description` was empty.
-    let mut buf = String::from("\n\n");
-    buf.push_str(prefix);
-    for ex in examples {
-        let json =
-            serde_json::to_string(&ex.input).unwrap_or_else(|_| "<unserializable>".to_owned());
-        let _ = write!(buf, "\n{json}");
-    }
-    buf
+fn default_formatter(example: &crate::language_model::ToolInputExample, _index: usize) -> String {
+    // Mirrors upstream `defaultFormatExample = (example) => JSON.stringify(example.input)`
+    // (`add-tool-input-examples-middleware.ts:1-3`). Index is unused for the
+    // default but exposed so custom formatters can prepend ordinals.
+    serde_json::to_string(&example.input).unwrap_or_else(|_| "<unserializable>".to_owned())
 }
 
 #[async_trait]
@@ -113,10 +106,22 @@ impl LanguageModelMiddleware for AddToolInputExamplesMiddleware {
                 if examples.is_empty() {
                     continue;
                 }
-                let suffix = (self.formatter)(&self.prefix, examples);
+                // Mirrors upstream `add-tool-input-examples-middleware.ts:67-72`:
+                //   formattedExamples = examples.map((ex, i) => format(ex, i)).join('\n')
+                //   examplesSection   = `${prefix}\n${formattedExamples}`
+                //   description       = description ? `${description}\n\n${examplesSection}` : examplesSection
+                let formatted = examples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ex)| (self.formatter)(ex, i))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let examples_section = format!("{}\n{formatted}", self.prefix);
                 *description = Some(match description.take() {
-                    Some(existing) => format!("{existing}{suffix}"),
-                    None => suffix.trim_start().to_owned(),
+                    Some(existing) if !existing.is_empty() => {
+                        format!("{existing}\n\n{examples_section}")
+                    }
+                    _ => examples_section,
                 });
             }
         }

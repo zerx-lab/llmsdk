@@ -35,6 +35,7 @@ use llmsdk_provider::shared::{
 };
 use llmsdk_provider_utils::http::{JsonRequest, RawRequest, post_json, post_raw};
 use llmsdk_provider_utils::multipart::Multipart;
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 
@@ -187,7 +188,7 @@ impl OpenAiImageModel {
             }),
             response: Some(ResponseInfo {
                 id: resp.created.map(|c| format!("openai-img-{c}")),
-                timestamp: resp.created.map(|c| c.to_string()),
+                timestamp: resp.created.map(rfc3339_from_unix_seconds),
                 model_id: Some(self.model_id.clone()),
                 headers: Some(headers_to_provider(response_headers)),
                 ..ResponseInfo::default()
@@ -360,7 +361,7 @@ impl OpenAiImageModel {
             request: None,
             response: Some(ResponseInfo {
                 id: resp.created.map(|c| format!("openai-img-{c}")),
-                timestamp: resp.created.map(|c| c.to_string()),
+                timestamp: resp.created.map(rfc3339_from_unix_seconds),
                 model_id: Some(self.model_id.clone()),
                 headers: Some(headers_to_provider(response_headers)),
                 ..ResponseInfo::default()

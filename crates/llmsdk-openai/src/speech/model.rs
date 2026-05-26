@@ -6,13 +6,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use llmsdk_provider::error::Result;
 use llmsdk_provider::shared::{ProviderOptions, RequestInfo, Warning};
 use llmsdk_provider::{SpeechModel, SpeechOptions, SpeechResponseInfo, SpeechResult};
 use llmsdk_provider_utils::http::{JsonRequest, post_json_for_bytes};
+use llmsdk_provider_utils::time::rfc3339_now;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Inner;
@@ -160,64 +160,4 @@ impl SpeechModel for OpenAiSpeechModel {
 
 fn headers_to_provider(raw: HashMap<String, String>) -> llmsdk_provider::shared::Headers {
     raw.into_iter().map(|(k, v)| (k, Some(v))).collect()
-}
-
-/// Render the current wall-clock time as an RFC 3339 string.
-fn rfc3339_now() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let nsecs = now.subsec_nanos();
-    rfc3339_from_unix(secs, nsecs)
-}
-
-/// Minimal Unix epoch -> RFC 3339 converter (UTC). Avoids pulling in `chrono`.
-#[allow(
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names,
-    reason = "civil-from-days algorithm (Howard Hinnant) trades safety lints for arithmetic clarity; values stay in u32 / i64 ranges for any plausible epoch"
-)]
-fn rfc3339_from_unix(secs: u64, nsecs: u32) -> String {
-    // Algorithm: civil_from_days, per Howard Hinnant.
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let h = (rem / 3600) as u32;
-    let m = ((rem % 3600) / 60) as u32;
-    let s = (rem % 60) as u32;
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}.{ms:03}Z",
-        ms = nsecs / 1_000_000
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rfc3339_zero_epoch() {
-        assert_eq!(rfc3339_from_unix(0, 0), "1970-01-01T00:00:00.000Z");
-    }
-
-    #[test]
-    fn rfc3339_known_value() {
-        // 1_700_000_000s = 2023-11-14T22:13:20Z
-        assert_eq!(
-            rfc3339_from_unix(1_700_000_000, 0),
-            "2023-11-14T22:13:20.000Z"
-        );
-    }
 }

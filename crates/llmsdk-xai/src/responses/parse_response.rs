@@ -12,6 +12,7 @@ use llmsdk_provider::language_model::{
     ToolCallPart, ToolResult, ToolResultOutput,
 };
 use llmsdk_provider::shared::{Headers, ProviderMetadata, ProviderOptions, RequestInfo, Warning};
+use llmsdk_provider_utils::time::rfc3339_from_unix_seconds;
 use serde_json::{Map, Value, json};
 
 use super::finish_reason;
@@ -111,7 +112,7 @@ pub(crate) fn parse_response(
     let response_meta = GenerateResponse {
         metadata: ResponseMetadata {
             id: response.id,
-            timestamp: response.created_at.map(|c| c.to_string()),
+            timestamp: response.created_at.map(rfc3339_from_unix_seconds),
             model_id: response.model,
             headers: Some(headers_to_provider(headers)),
         },
