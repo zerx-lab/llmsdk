@@ -33,8 +33,10 @@ pub(crate) fn parse_response(
     request_body: Option<serde_json::Value>,
     warnings: Vec<Warning>,
     mark_code_execution_dynamic: bool,
+    uses_json_response_tool: bool,
 ) -> Result<GenerateResult, ProviderError> {
     let mut content = Vec::new();
+    let mut is_json_response_from_tool = false;
     for part in response.content {
         match part {
             ResponseContent::Text { text, citations } if !text.is_empty() => {
@@ -49,6 +51,24 @@ pub(crate) fn parse_response(
                     text,
                     provider_options,
                 }));
+            }
+            ResponseContent::ToolUse {
+                id,
+                ref name,
+                ref input,
+                ..
+            } if uses_json_response_tool && name == "json" => {
+                // jsonResponseTool fallback: ai-sdk treats the synthesized
+                // `json` tool's call as the model's text output and flags the
+                // finish reason to map `tool_use → stop`. Mirrors upstream
+                // anthropic-language-model.ts:971-982.
+                is_json_response_from_tool = true;
+                let text = serde_json::to_string(input).unwrap_or_default();
+                content.push(Content::Text(TextPart {
+                    text,
+                    provider_options: None,
+                }));
+                let _ = id; // tool_call_id is irrelevant once flattened to text
             }
             ResponseContent::ToolUse {
                 id,
@@ -197,7 +217,10 @@ pub(crate) fn parse_response(
         return Err(ProviderError::no_content_generated());
     }
 
-    let finish = finish_reason::map(response.stop_reason.as_deref());
+    let finish = finish_reason::map_with_json_tool(
+        response.stop_reason.as_deref(),
+        is_json_response_from_tool,
+    );
     let usage = usage::convert(&response.usage);
 
     let response_meta = GenerateResponse {
@@ -431,7 +454,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         assert_eq!(r.content.len(), 1);
         assert_eq!(r.finish_reason.unified, FinishReasonKind::Stop);
         assert_eq!(r.usage.input_tokens.total, Some(3));
@@ -460,13 +483,90 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         if let Content::ToolCall(tc) = &r.content[0] {
             assert_eq!(tc.tool_call_id, "tu_1");
             assert_eq!(tc.input["city"], "NYC");
         } else {
             panic!("expected tool call");
         }
+        assert_eq!(r.finish_reason.unified, FinishReasonKind::ToolCalls);
+    }
+
+    #[test]
+    fn json_response_tool_flattens_tool_use_into_text() {
+        // Mirrors upstream anthropic-language-model.ts:971-982 + :1346:
+        // when the request synthesized a `name='json'` jsonResponseTool, the
+        // server's `tool_use` response is rendered as text (JSON.stringify of
+        // input) and the stop reason `tool_use` collapses to `stop`.
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ToolUse {
+                id: "tu_json".into(),
+                name: "json".into(),
+                input: serde_json::json!({"city": "Tokyo", "tempC": 24}),
+                caller: None,
+                dynamic: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            usage: ResponseUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        // `uses_json_response_tool: true` activates the fallback path.
+        let r = parse_response(resp, empty_headers(), None, vec![], false, true).unwrap();
+        assert_eq!(
+            r.content.len(),
+            1,
+            "json tool call must collapse to one text"
+        );
+        let Content::Text(text) = &r.content[0] else {
+            panic!("expected text content from jsonResponseTool fallback");
+        };
+        // Order-insensitive check: JSON keys can serialize in any order.
+        let parsed: serde_json::Value = serde_json::from_str(&text.text).expect("valid JSON");
+        assert_eq!(parsed["city"], "Tokyo");
+        assert_eq!(parsed["tempC"], 24);
+        // tool_use → stop when jsonResponseTool path was taken.
+        assert_eq!(r.finish_reason.unified, FinishReasonKind::Stop);
+        assert_eq!(r.finish_reason.raw.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn json_response_tool_inactive_keeps_tool_call_semantics() {
+        // Negative control: when uses_json_response_tool=false, a `name='json'`
+        // tool_use must remain a ToolCall — we cannot collapse arbitrary
+        // user tools sharing the same name.
+        let resp = MessagesResponse {
+            id: None,
+            model: None,
+            content: vec![ResponseContent::ToolUse {
+                id: "tu_json".into(),
+                name: "json".into(),
+                input: serde_json::json!({"raw": true}),
+                caller: None,
+                dynamic: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+            usage: ResponseUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                iterations: None,
+            },
+            container: None,
+            context_management: None,
+        };
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
+        assert!(matches!(r.content[0], Content::ToolCall(_)));
         assert_eq!(r.finish_reason.unified, FinishReasonKind::ToolCalls);
     }
 
@@ -502,7 +602,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         let Content::ToolCall(tc) = &r.content[0] else {
             panic!("expected tool call");
         };
@@ -543,7 +643,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         let Content::ToolCall(tc) = &r.content[0] else {
             panic!("expected tool call");
         };
@@ -591,7 +691,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let anthropic = pm.get("anthropic").unwrap();
         let iters = anthropic
@@ -627,7 +727,7 @@ mod tests {
             }),
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let container = pm.get("anthropic").unwrap().get("container").unwrap();
         assert_eq!(container["id"], "ctr-xyz");
@@ -665,7 +765,7 @@ mod tests {
                 ],
             }),
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         let pm = r.provider_metadata.unwrap();
         let edits = pm
             .get("anthropic")
@@ -701,7 +801,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         assert!(r.provider_metadata.is_none());
     }
 
@@ -726,7 +826,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], true).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], true, false).unwrap();
         match &r.content[0] {
             Content::ToolCall(tc) => {
                 assert_eq!(tc.dynamic, Some(true));
@@ -757,7 +857,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], true).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], true, false).unwrap();
         match &r.content[0] {
             Content::ToolCall(tc) => assert_eq!(tc.dynamic, None),
             other => panic!("expected ToolCall, got {other:?}"),
@@ -788,7 +888,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         match &r.content[0] {
             Content::ToolResult(tr) => {
                 assert!(matches!(tr.output, ToolResultOutput::ErrorJson { .. }));
@@ -823,7 +923,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         match &r.content[0] {
             Content::ToolResult(tr) => {
                 assert!(matches!(tr.output, ToolResultOutput::Json { .. }));
@@ -852,7 +952,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let r = parse_response(resp, empty_headers(), None, vec![], false).unwrap();
+        let r = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap();
         match &r.content[0] {
             Content::Text(t) => {
                 assert_eq!(t.text, "[earlier turns compacted]");
@@ -883,7 +983,7 @@ mod tests {
             container: None,
             context_management: None,
         };
-        let err = parse_response(resp, empty_headers(), None, vec![], false).unwrap_err();
+        let err = parse_response(resp, empty_headers(), None, vec![], false, false).unwrap_err();
         assert!(format!("{err}").contains("no content"));
     }
 }

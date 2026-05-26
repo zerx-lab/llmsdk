@@ -75,6 +75,13 @@ pub struct Inner {
     /// Optional generator for citation source ids. When `None`, an
     /// in-stream counter is used (`anthropic-cite-{n}`).
     pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
+    /// Wrapping-provider override for `supportsNativeStructuredOutput`
+    /// (default `true`). Bedrock pins this to `false` for `claude-opus-4-7`
+    /// because the AWS gateway rejects `output_config.format` for that
+    /// model. Combined with `model_capabilities().supports_structured_output`
+    /// to drive the jsonResponseTool fallback path. Mirrors upstream
+    /// `anthropic-language-model.ts:332` reading `config.supportsNativeStructuredOutput`.
+    pub(crate) supports_native_structured_output: bool,
 }
 
 impl fmt::Debug for Inner {
@@ -88,6 +95,10 @@ impl fmt::Debug for Inner {
             .field("endpoint_override", &self.endpoint_override.is_some())
             .field("body_transformer", &self.body_transformer.is_some())
             .field("generate_id", &self.generate_id.is_some())
+            .field(
+                "supports_native_structured_output",
+                &self.supports_native_structured_output,
+            )
             .finish()
     }
 }
@@ -122,6 +133,15 @@ impl Inner {
             f(body);
         }
     }
+
+    /// Whether the configured backend honors `output_config.format`
+    /// natively. Wrapping providers (Bedrock for `claude-opus-4-7`) flip
+    /// this off via [`InnerBuilder::supports_native_structured_output`]
+    /// so the language model can fall back to the jsonResponseTool path.
+    #[must_use]
+    pub fn supports_native_structured_output(&self) -> bool {
+        self.supports_native_structured_output
+    }
 }
 
 /// Builder for the cross-crate [`Inner`].
@@ -129,7 +149,7 @@ impl Inner {
 /// Used by wrapping providers (Google Vertex Anthropic, Amazon Bedrock
 /// Anthropic) to assemble an [`Inner`] without going through the
 /// user-facing [`Anthropic`] builder.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct InnerBuilder {
     base_url: Option<String>,
     headers: HashMap<String, Option<String>>,
@@ -139,6 +159,29 @@ pub struct InnerBuilder {
     endpoint_override: Option<Arc<EndpointFn>>,
     body_transformer: Option<Arc<BodyTransformFn>>,
     generate_id: Option<Arc<GenerateIdFn>>,
+    /// Default `true`. Cleared by wrapping providers whose backend
+    /// rejects `output_config.format` (e.g. Bedrock + claude-opus-4-7),
+    /// forcing the request through the jsonResponseTool fallback.
+    supports_native_structured_output: bool,
+}
+
+impl Default for InnerBuilder {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            headers: HashMap::new(),
+            http: None,
+            provider_name: None,
+            request_auth: None,
+            endpoint_override: None,
+            body_transformer: None,
+            generate_id: None,
+            // Match upstream `supportsNativeStructuredOutput ?? true`
+            // (anthropic-language-model.ts:332). Wrapping providers
+            // override per-model.
+            supports_native_structured_output: true,
+        }
+    }
 }
 
 impl fmt::Debug for InnerBuilder {
@@ -152,6 +195,10 @@ impl fmt::Debug for InnerBuilder {
             .field("endpoint_override", &self.endpoint_override.is_some())
             .field("body_transformer", &self.body_transformer.is_some())
             .field("generate_id", &self.generate_id.is_some())
+            .field(
+                "supports_native_structured_output",
+                &self.supports_native_structured_output,
+            )
             .finish()
     }
 }
@@ -236,6 +283,18 @@ impl InnerBuilder {
         self
     }
 
+    /// Set the `supportsNativeStructuredOutput` capability flag.
+    ///
+    /// Defaults to `true` (mirrors upstream `?? true`). Wrapping providers
+    /// flip this to `false` to drive the model through the jsonResponseTool
+    /// fallback — see Amazon Bedrock's `claude-opus-4-7` route, which
+    /// rejects `output_config.format`.
+    #[must_use]
+    pub fn supports_native_structured_output(mut self, value: bool) -> Self {
+        self.supports_native_structured_output = value;
+        self
+    }
+
     /// Finalize the [`Inner`].
     ///
     /// # Errors
@@ -258,6 +317,7 @@ impl InnerBuilder {
             endpoint_override: self.endpoint_override,
             body_transformer: self.body_transformer,
             generate_id: self.generate_id,
+            supports_native_structured_output: self.supports_native_structured_output,
         })
     }
 }
@@ -535,6 +595,8 @@ impl AnthropicBuilder {
                 endpoint_override: None,
                 body_transformer: None,
                 generate_id: self.generate_id,
+                // Native Anthropic backend honors output_config.format.
+                supports_native_structured_output: true,
             }),
         })
     }

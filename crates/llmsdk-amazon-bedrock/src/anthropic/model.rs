@@ -46,14 +46,19 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
         // Bedrock rejects `output_config.format` for `claude-opus-4-7`
         // (incl. regional variants like `us.anthropic.claude-opus-4-7`).
         // Mirrors ai-sdk `supportsNativeStructuredOutput: !modelId.includes('claude-opus-4-7')`
-        // in `amazon-bedrock-anthropic-provider.ts:336`.
-        let strips_structured_output = model_id.contains("claude-opus-4-7");
+        // in `amazon-bedrock-anthropic-provider.ts:336`. Routing through the
+        // upstream capability flag (instead of a post-hoc body strip) lets
+        // the model fall back to the jsonResponseTool path automatically,
+        // preserving the user's response_format schema as a synthesized
+        // function tool.
+        let supports_native = !model_id.contains("claude-opus-4-7");
 
         let inner = AnthropicInner::builder()
             .base_url(base_url)
             .provider_name("bedrock.anthropic.messages")
             .http_client(bedrock.http.clone())
             .request_auth(auth_adapter)
+            .supports_native_structured_output(supports_native)
             .endpoint(|base, model_id, is_streaming| {
                 let suffix = if is_streaming {
                     "invoke-with-response-stream"
@@ -73,9 +78,6 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
                     "anthropic_version".to_owned(),
                     Value::String("bedrock-2023-05-31".to_owned()),
                 );
-                if strips_structured_output {
-                    strip_output_config_format(obj);
-                }
                 apply_bedrock_tool_upgrades(obj);
             })
             .build()?;
@@ -88,20 +90,6 @@ pub(crate) trait AmazonBedrockAnthropicModelExt {
 /// without depending on the chat module type.
 fn encode_path_segment(input: &str) -> String {
     crate::chat::encode_path_segment(input)
-}
-
-/// Remove `output_config.format` from the request body, deleting the whole
-/// `output_config` key when it becomes empty.
-///
-/// Used to satisfy Bedrock's rejection of `output_config.format` for
-/// `claude-opus-4-7` (and regional variants like `us.anthropic.claude-opus-4-7`).
-fn strip_output_config_format(obj: &mut serde_json::Map<String, Value>) {
-    if let Some(Value::Object(oc)) = obj.get_mut("output_config") {
-        oc.remove("format");
-        if oc.is_empty() {
-            obj.remove("output_config");
-        }
-    }
 }
 
 /// Upgrade legacy Anthropic tool versions to the variants Bedrock accepts,
@@ -262,39 +250,6 @@ mod tests {
                 .iter()
                 .any(|v| v == "computer-use-2025-01-24")
         );
-    }
-
-    #[test]
-    fn strip_output_config_format_drops_format_key() {
-        let mut obj = json!({
-            "output_config": {
-                "format": {"type": "json_schema"},
-                "effort": "high"
-            }
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
-        strip_output_config_format(&mut obj);
-        assert!(obj.get("output_config").unwrap().get("format").is_none());
-        assert_eq!(
-            obj.get("output_config").unwrap().get("effort"),
-            Some(&Value::String("high".into()))
-        );
-    }
-
-    #[test]
-    fn strip_output_config_format_removes_empty_output_config() {
-        let mut obj = json!({
-            "output_config": {"format": {"type": "json_schema"}},
-            "messages": []
-        })
-        .as_object()
-        .cloned()
-        .unwrap();
-        strip_output_config_format(&mut obj);
-        assert!(obj.get("output_config").is_none());
-        assert!(obj.get("messages").is_some());
     }
 
     #[test]

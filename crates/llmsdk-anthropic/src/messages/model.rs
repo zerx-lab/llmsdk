@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    CallOptions, GenerateResult, LanguageModel, StreamResult, Tool, ToolChoice,
+    CallOptions, FunctionTool, GenerateResult, LanguageModel, StreamResult, Tool, ToolChoice,
 };
 use llmsdk_provider::shared::Warning;
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
@@ -91,8 +91,13 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        let (request, warnings, betas, mark_code_execution_dynamic) =
-            build_request(&self.model_id, &options, false);
+        let (request, warnings, betas, mark_code_execution_dynamic, uses_json_response_tool) =
+            build_request(
+                &self.model_id,
+                &options,
+                false,
+                self.inner.supports_native_structured_output(),
+            );
 
         let body_value = self.prepare_body(&request)?;
         let request_body_value = Some(body_value.clone());
@@ -124,12 +129,18 @@ impl LanguageModel for AnthropicMessagesModel {
             request_body_value,
             warnings,
             mark_code_execution_dynamic,
+            uses_json_response_tool,
         )
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        let (request, warnings, betas, mark_code_execution_dynamic) =
-            build_request(&self.model_id, &options, true);
+        let (request, warnings, betas, mark_code_execution_dynamic, uses_json_response_tool) =
+            build_request(
+                &self.model_id,
+                &options,
+                true,
+                self.inner.supports_native_structured_output(),
+            );
 
         let body_value = self.prepare_body(&request)?;
         let request_body_value = Some(body_value.clone());
@@ -161,6 +172,7 @@ impl LanguageModel for AnthropicMessagesModel {
             warnings,
             self.inner.generate_id.clone(),
             mark_code_execution_dynamic,
+            uses_json_response_tool,
         );
         let include_raw = options.include_raw_chunks.unwrap_or(false);
         let parts = build_part_stream(state, event_stream, include_raw);
@@ -190,11 +202,13 @@ fn build_request(
     model_id: &str,
     options: &CallOptions,
     stream: bool,
+    config_supports_native_structured_output: bool,
 ) -> (
     MessagesRequest,
     Vec<Warning>,
     std::collections::BTreeSet<String>,
     bool, // mark_code_execution_dynamic
+    bool, // uses_json_response_tool
 ) {
     let provider_opts = parse_provider_options(options.provider_options.as_ref());
     let send_reasoning = provider_opts.send_reasoning.unwrap_or(true);
@@ -223,48 +237,113 @@ fn build_request(
             details: Some("Anthropic does not support seed".to_owned()),
         });
     }
-    // structuredOutputMode controls whether `response_format` flows into
-    // `output_config.format` (outputFormat) or is dropped (other modes).
+    // Decide between three response-format strategies based on
+    // `structuredOutputMode` + model capabilities (`supportsStructuredOutput`):
+    //
+    // 1. **outputFormat**: send `response_format.schema` as
+    //    `output_config.format` (native structured output).
+    // 2. **jsonResponseTool fallback**: synthesize a tool named `json` whose
+    //    inputSchema is the user schema, force `tool_choice = {type:"required"}`,
+    //    and at parse time render the tool call as text. Used when the model
+    //    does not support native structured output but the caller still
+    //    requested `responseFormat: 'json'`. Mirrors upstream
+    //    `anthropic-language-model.ts:331-355` + `:722-747`.
+    // 3. **none**: drop `response_format` entirely (no schema present, or
+    //    caller explicitly opted out).
+    let caps = model_capabilities(model_id);
     let structured_output_mode = provider_opts
         .structured_output_mode
         .as_deref()
         .unwrap_or("auto");
-    let output_format = if matches!(structured_output_mode, "outputFormat" | "auto") {
-        match &options.response_format {
-            Some(llmsdk_provider::language_model::ResponseFormat::Json {
-                schema: Some(schema),
-                ..
-            }) => {
-                let raw: serde_json::Value = schema.clone().into();
-                Some(serde_json::json!({
-                    "type": "json_schema",
-                    "schema": sanitize_json_schema(&raw),
-                }))
-            }
-            _ => None,
-        }
+    // Effective capability merges the per-backend override (Bedrock's
+    // `supports_native_structured_output = false` for claude-opus-4-7) with
+    // the per-model table. Mirrors upstream
+    // `anthropic-language-model.ts:331-333`'s
+    // `(config.supportsNativeStructuredOutput ?? true) && modelSupportsStructuredOutput`.
+    let supports_structured_output =
+        caps.supports_structured_output && config_supports_native_structured_output;
+    let use_structured_output = matches!(structured_output_mode, "outputFormat")
+        || (matches!(structured_output_mode, "auto") && supports_structured_output);
+    let response_format_schema = match &options.response_format {
+        Some(llmsdk_provider::language_model::ResponseFormat::Json {
+            schema: Some(schema),
+            ..
+        }) => Some(schema.clone()),
+        _ => None,
+    };
+    let output_format = if use_structured_output {
+        response_format_schema.as_ref().map(|schema| {
+            let raw: serde_json::Value = schema.clone().into();
+            serde_json::json!({
+                "type": "json_schema",
+                "schema": sanitize_json_schema(&raw),
+            })
+        })
     } else {
         None
     };
-    if options.response_format.is_some() && output_format.is_none() {
-        warnings.push(Warning::UnsupportedSetting {
-            setting: "responseFormat".to_owned(),
-            details: Some("responseFormat ignored under current structuredOutputMode".to_owned()),
-        });
-    }
+    // jsonResponseTool fires only when the schema is present *and* we did
+    // not route through native structured output. Without a schema the model
+    // has nothing to constrain against, so we silently drop the request like
+    // ai-sdk does.
+    let uses_json_response_tool = response_format_schema.is_some() && !use_structured_output;
+    let json_response_tool = uses_json_response_tool.then(|| {
+        let schema = response_format_schema
+            .as_ref()
+            .expect("schema presence checked above");
+        let raw: serde_json::Value = schema.clone().into();
+        Tool::Function(FunctionTool {
+            name: "json".to_owned(),
+            description: Some("Respond with a JSON object.".to_owned()),
+            input_schema: serde_json::from_value(raw).unwrap_or_default(),
+            input_examples: None,
+            strict: None,
+            provider_options: None,
+        })
+    });
 
     let mut betas: std::collections::BTreeSet<String> = prompt_betas;
     let tool_streaming_default = provider_opts.tool_streaming.unwrap_or(true);
-    let caps = model_capabilities(model_id);
+
+    // When jsonResponseTool is active, ai-sdk overrides three knobs (see
+    // `anthropic-language-model.ts:728-737`): the tool is appended last,
+    // tool_choice becomes `{type:"required"}`, and parallel tool use is
+    // forced off. The user-provided `tool_choice` is intentionally
+    // overridden because the model must call the synthesized `json` tool
+    // for the request to produce a parseable response.
+    let (combined_tools, effective_tool_choice, effective_disable_parallel) =
+        if let Some(json_tool) = &json_response_tool {
+            let mut tools_vec: Vec<Tool> = options.tools.clone().unwrap_or_default();
+            tools_vec.push(json_tool.clone());
+            (Some(tools_vec), Some(ToolChoice::Required), Some(true))
+        } else {
+            (
+                options.tools.clone(),
+                options.tool_choice.clone(),
+                provider_opts.disable_parallel_tool_use,
+            )
+        };
+
     let (tools, tool_choice) = convert_tools(
-        options.tools.as_deref(),
-        options.tool_choice.as_ref(),
+        combined_tools.as_deref(),
+        effective_tool_choice.as_ref(),
         &mut warnings,
         &mut betas,
-        provider_opts.disable_parallel_tool_use,
+        effective_disable_parallel,
         tool_streaming_default,
-        caps.supports_structured_output,
-        caps.supports_structured_output, // supports_strict_tools mirrors structured_output per ai-sdk
+        // When jsonResponseTool fires, upstream forces `supportsStructuredOutput: false`
+        // (line 734) so the synthesized tool is emitted without the strict /
+        // structured-outputs beta header.
+        if uses_json_response_tool {
+            false
+        } else {
+            supports_structured_output
+        },
+        if uses_json_response_tool {
+            false
+        } else {
+            supports_structured_output
+        },
     );
 
     // anthropicBeta extra tokens.
@@ -413,7 +492,13 @@ fn build_request(
     let mark_code_execution_dynamic =
         has_web_tool_20260209_without_code_execution(options.tools.as_deref());
 
-    (request, warnings, betas, mark_code_execution_dynamic)
+    (
+        request,
+        warnings,
+        betas,
+        mark_code_execution_dynamic,
+        uses_json_response_tool,
+    )
 }
 
 /// Normalize the `context_management` provider-option value into the

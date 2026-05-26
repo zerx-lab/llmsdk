@@ -33,7 +33,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use crate::config::GenerateIdFn;
 
-use super::finish_reason::map as map_finish_reason;
+use super::finish_reason::{map as map_finish_reason, map_with_json_tool};
 use super::stream_event::{BlockDelta, BlockStart, StreamEvent};
 use super::usage::convert as convert_usage;
 use super::wire::ResponseUsage;
@@ -58,8 +58,18 @@ enum BlockKind {
     /// Extended-thinking block; tracks the latest signature observed via
     /// `signature_delta`.
     Reasoning { id: String },
+    /// `tool_use` block synthesized by `jsonResponseTool`: `input_json` deltas
+    /// are forwarded as text deltas and the block closes as text-end, not
+    /// tool-call. Mirrors upstream `anthropic-language-model.ts:2229-2266`.
+    JsonText { id: String },
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors ai-sdk anthropic-language-model.ts stream state flags 1:1; \
+              each flag is independently observable on the wire and cannot be \
+              collapsed without losing the json-response-tool semantics"
+)]
 pub(crate) struct StreamState {
     initial_warnings: Option<Vec<Warning>>,
     finish_reason: FinishReason,
@@ -80,6 +90,16 @@ pub(crate) struct StreamState {
     /// `dynamic: true` to bypass strict tool validation. See
     /// `model::has_web_tool_20260209_without_code_execution`.
     mark_code_execution_dynamic: bool,
+    /// When true, the request synthesized a `name = "json"` tool to
+    /// fall back to a tool-call-based JSON response (see
+    /// `model::build_request` jsonResponseTool path). At parse time this
+    /// flag flips a `tool_use(name='json')` block into a text-only frame
+    /// and remaps `tool_use` finish reason to `stop`, mirroring upstream
+    /// `anthropic-language-model.ts:1620-1632` + `:2229-2266`.
+    uses_json_response_tool: bool,
+    /// Set to true once a `name='json'` `tool_use` block is encountered so
+    /// the final `Finish` frame can collapse `tool_use → stop`.
+    is_json_response_from_tool: bool,
 }
 
 impl std::fmt::Debug for StreamState {
@@ -97,6 +117,11 @@ impl std::fmt::Debug for StreamState {
                 "mark_code_execution_dynamic",
                 &self.mark_code_execution_dynamic,
             )
+            .field("uses_json_response_tool", &self.uses_json_response_tool)
+            .field(
+                "is_json_response_from_tool",
+                &self.is_json_response_from_tool,
+            )
             .finish()
     }
 }
@@ -104,13 +129,14 @@ impl std::fmt::Debug for StreamState {
 impl StreamState {
     #[cfg(test)]
     pub(crate) fn new(warnings: Vec<Warning>) -> Self {
-        Self::with_generate_id(warnings, None, false)
+        Self::with_generate_id(warnings, None, false, false)
     }
 
     pub(crate) fn with_generate_id(
         warnings: Vec<Warning>,
         generate_id: Option<Arc<GenerateIdFn>>,
         mark_code_execution_dynamic: bool,
+        uses_json_response_tool: bool,
     ) -> Self {
         Self {
             initial_warnings: Some(warnings),
@@ -128,6 +154,8 @@ impl StreamState {
             source_seq: 0,
             generate_id,
             mark_code_execution_dynamic,
+            uses_json_response_tool,
+            is_json_response_from_tool: false,
         }
     }
 
@@ -192,10 +220,12 @@ impl StreamState {
         let mut out = Vec::new();
         for (_idx, kind) in self.blocks {
             match kind {
-                BlockKind::Text { id } => out.push(StreamPart::TextEnd {
-                    id,
-                    provider_metadata: None,
-                }),
+                BlockKind::Text { id } | BlockKind::JsonText { id } => {
+                    out.push(StreamPart::TextEnd {
+                        id,
+                        provider_metadata: None,
+                    });
+                }
                 BlockKind::ToolUse {
                     id,
                     name,
@@ -216,9 +246,19 @@ impl StreamState {
                 }),
             }
         }
+        // When jsonResponseTool fired, the `tool_use` raw stop reason must
+        // collapse to `stop`; everything else flows through unchanged so we
+        // don't override an upstream `Error` or unmapped raw value.
+        let finish = if self.is_json_response_from_tool
+            && self.finish_reason.unified == FinishReasonKind::ToolCalls
+        {
+            map_with_json_tool(self.finish_reason.raw.as_deref(), true)
+        } else {
+            self.finish_reason
+        };
         out.push(StreamPart::Finish {
             usage: convert_usage(&self.usage),
-            finish_reason: self.finish_reason,
+            finish_reason: finish,
             provider_metadata: None,
         });
         out
@@ -264,6 +304,43 @@ impl StreamState {
                 input,
                 caller,
             } => {
+                // jsonResponseTool fallback: when the request synthesized a
+                // `name="json"` tool, route this block as text rather than
+                // a tool call so consumers see only the assembled JSON. The
+                // flag also flips `tool_use → stop` at finish time.
+                // Mirrors upstream anthropic-language-model.ts:2229-2266.
+                if self.uses_json_response_tool && name == "json" {
+                    self.is_json_response_from_tool = true;
+                    let block_id = index.to_string();
+                    self.blocks.insert(
+                        index,
+                        BlockKind::JsonText {
+                            id: block_id.clone(),
+                        },
+                    );
+                    let mut out = vec![StreamPart::TextStart {
+                        id: block_id.clone(),
+                        provider_metadata: None,
+                    }];
+                    // `content_block_start` may carry an inline non-empty
+                    // input object (programmatic-tool-call short path). When
+                    // present, surface it as the opening text delta.
+                    if let Some(v) = input
+                        && !v.is_null()
+                    {
+                        let text = serde_json::to_string(&v).unwrap_or_default();
+                        if !text.is_empty() && text != "{}" {
+                            out.push(StreamPart::TextDelta {
+                                id: block_id,
+                                delta: text,
+                                provider_metadata: None,
+                            });
+                        }
+                    }
+                    let _ = id;
+                    let _ = caller;
+                    return out;
+                }
                 let arguments = match input {
                     Some(v) if !v.is_null() => serde_json::to_string(&v).unwrap_or_default(),
                     _ => String::new(),
@@ -392,6 +469,20 @@ impl StreamState {
                     provider_metadata: None,
                 }]
             }
+            (BlockKind::JsonText { id }, BlockDelta::InputJsonDelta { partial_json }) => {
+                // jsonResponseTool: forward `input_json_delta` fragments as
+                // raw text deltas — they already form a valid JSON suffix
+                // when concatenated. Mirrors upstream
+                // anthropic-language-model.ts:2253-2261.
+                if partial_json.is_empty() {
+                    return Vec::new();
+                }
+                vec![StreamPart::TextDelta {
+                    id: id.clone(),
+                    delta: partial_json,
+                    provider_metadata: None,
+                }]
+            }
             (BlockKind::Reasoning { id }, BlockDelta::ThinkingDelta { thinking }) => {
                 if thinking.is_empty() {
                     return Vec::new();
@@ -445,7 +536,7 @@ impl StreamState {
             return Vec::new();
         };
         match kind {
-            BlockKind::Text { id } => vec![StreamPart::TextEnd {
+            BlockKind::Text { id } | BlockKind::JsonText { id } => vec![StreamPart::TextEnd {
                 id,
                 provider_metadata: None,
             }],
@@ -915,5 +1006,80 @@ mod tests {
 
         let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
         assert!(matches!(stop[0], StreamPart::TextEnd { .. }));
+    }
+
+    #[test]
+    fn json_response_tool_streams_as_text_and_collapses_finish_reason() {
+        // Mirrors upstream anthropic-language-model.ts:2229-2266: when
+        // `usesJsonResponseTool` is on and the server opens a
+        // `tool_use(name="json")` block, the stream emits text-start /
+        // text-delta (forwarding input_json_delta as text) / text-end.
+        // The closing `tool_use` finish reason collapses to `stop`.
+        let mut state = StreamState::with_generate_id(
+            vec![],
+            None,
+            /*mark_dyn=*/ false,
+            /*uses_json=*/ true,
+        );
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: None,
+                model: None,
+                usage: empty_usage(),
+            },
+        });
+
+        let open = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::ToolUse {
+                id: "tu_json".into(),
+                name: "json".into(),
+                input: None,
+                caller: None,
+            },
+        });
+        assert!(
+            matches!(open[0], StreamPart::TextStart { .. }),
+            "synthesized json tool must open as text"
+        );
+
+        let d1 = state.on_event(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: BlockDelta::InputJsonDelta {
+                partial_json: r#"{"city":"#.into(),
+            },
+        });
+        let d2 = state.on_event(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: BlockDelta::InputJsonDelta {
+                partial_json: r#""Tokyo"}"#.into(),
+            },
+        });
+        let mut accumulated = String::new();
+        for f in d1.iter().chain(d2.iter()) {
+            if let StreamPart::TextDelta { delta, .. } = f {
+                accumulated.push_str(delta);
+            } else {
+                panic!("expected text-delta from json tool, got {f:?}");
+            }
+        }
+        assert_eq!(accumulated, r#"{"city":"Tokyo"}"#);
+
+        let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
+        assert!(matches!(stop[0], StreamPart::TextEnd { .. }));
+
+        let _ = state.on_event(StreamEvent::MessageDelta {
+            delta: MessageDeltaInner {
+                stop_reason: Some("tool_use".into()),
+            },
+            usage: None,
+        });
+        let tail = state.flush();
+        let Some(StreamPart::Finish { finish_reason, .. }) = tail.last() else {
+            panic!("expected trailing Finish");
+        };
+        assert_eq!(finish_reason.unified, FinishReasonKind::Stop);
+        assert_eq!(finish_reason.raw.as_deref(), Some("tool_use"));
     }
 }

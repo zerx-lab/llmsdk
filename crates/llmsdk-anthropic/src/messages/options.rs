@@ -18,9 +18,12 @@ pub(crate) struct AnthropicChatOptions {
     /// receiving reasoning input.
     pub send_reasoning: Option<bool>,
     /// Strategy for structured outputs: `outputFormat` / `jsonTool` /
-    /// `auto`. Only the `outputFormat` path is implemented today (driven
-    /// off `response_format` + `output_config.format`); `jsonTool` and
-    /// `auto` fall back to legacy behavior.
+    /// `auto`. `outputFormat` routes the schema through native
+    /// `output_config.format`; `jsonTool` synthesizes a `name="json"`
+    /// function tool and renders its call as text (see
+    /// `model::build_request` jsonResponseTool path); `auto` (default)
+    /// picks `outputFormat` when the model supports native structured
+    /// output and falls back to `jsonTool` otherwise.
     pub structured_output_mode: Option<String>,
     /// Extended-thinking config.
     pub thinking: Option<ThinkingConfig>,
