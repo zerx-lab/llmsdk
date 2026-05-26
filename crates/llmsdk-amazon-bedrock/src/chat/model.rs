@@ -307,6 +307,18 @@ pub(crate) fn build_request(
     );
     warnings.extend(tool_warnings);
 
+    // Resolve top-level `CallOptions.reasoning` (and any user-supplied
+    // `provider_options.amazonBedrock.reasoningConfig` overrides) into the
+    // final `reasoning_config` block. Mirrors upstream
+    // `resolveAmazonBedrockReasoningConfig`
+    // (amazon-bedrock-chat-language-model.ts:1220-1294).
+    bedrock_opts.reasoning_config = super::reasoning_mapper::resolve_reasoning_config(
+        options.reasoning,
+        bedrock_opts.reasoning_config.take(),
+        model_id,
+        &mut warnings,
+    );
+
     // Anthropic thinking ('enabled' | 'adaptive') is incompatible with both
     // topK and topP on Anthropic-on-Bedrock — strip both with a warning.
     // Mirrors amazon-bedrock-chat-language-model.ts:363-372.

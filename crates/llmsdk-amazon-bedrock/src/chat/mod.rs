@@ -21,6 +21,7 @@ mod normalize_tool_call_id;
 mod options;
 mod parse_response;
 mod prepare_tools;
+mod reasoning_mapper;
 mod reasoning_metadata;
 mod stream;
 mod usage;
