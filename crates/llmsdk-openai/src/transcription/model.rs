@@ -73,9 +73,15 @@ fn parse_options(opts: Option<&ProviderOptions>) -> Option<OpenAiTranscriptionPr
     )
     .unwrap_or_default();
     // Apply the same defaults the upstream zod schema applies on parse —
-    // see `openai-transcription-model-options.ts:41` (`.default(0)`).
+    // see `openai-transcription-model-options.ts:41` (`.default(0)`) and
+    // `:47-49` (`.default(['segment'])`). These only fire once we know the
+    // caller opted into the namespace, matching upstream's `if (openAIOptions)`
+    // gate.
     if parsed.temperature.is_none() {
         parsed.temperature = Some(0.0);
+    }
+    if parsed.timestamp_granularities.is_none() {
+        parsed.timestamp_granularities = Some(vec!["segment".to_owned()]);
     }
     Some(parsed)
 }
@@ -378,5 +384,33 @@ mod tests {
     fn decode_base64_passes_audio_through() {
         // Base64 "AAEC" = [0,1,2]
         assert_eq!(decode_base64("AAEC").unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn parse_options_applies_zod_defaults_when_namespace_present() {
+        // Mirrors upstream openai-transcription-model-options.ts:41 + :47-49:
+        // when the caller opts into provider_options.openai (even an empty
+        // map), zod fills `temperature: 0` and `timestampGranularities:
+        // ['segment']`. Without the second default the multipart form omits
+        // `timestamp_granularities[]` and verbose_json responses come back
+        // without segment timestamps.
+        let mut po = ProviderOptions::new();
+        po.insert("openai".into(), serde_json::Map::new());
+        let parsed = parse_options(Some(&po)).expect("namespace present must yield Some");
+        assert_eq!(parsed.temperature, Some(0.0));
+        assert_eq!(
+            parsed.timestamp_granularities,
+            Some(vec!["segment".to_owned()])
+        );
+    }
+
+    #[test]
+    fn parse_options_skips_when_namespace_absent() {
+        // Mirrors upstream `if (openAIOptions)` gate — no namespace, no
+        // defaults applied (so callers who never opt in stay out of the
+        // wire entirely).
+        let po = ProviderOptions::new();
+        assert!(parse_options(Some(&po)).is_none());
+        assert!(parse_options(None).is_none());
     }
 }
