@@ -201,6 +201,11 @@ impl TranscriptionModel for OpenAiTranscriptionModel {
             language,
             duration_in_seconds: response.duration,
             warnings: Vec::new(),
+            // OpenAI transcription uses multipart/form-data; the raw body is
+            // binary and cannot be losslessly stringified, so we leave the
+            // upstream-aligned telemetry slot empty here (matches upstream
+            // `openai-transcription-model.ts` not setting `request.body`).
+            request: None,
             response: TranscriptionResponseInfo {
                 timestamp: rfc3339_now(),
                 model_id: self.model_id.clone(),

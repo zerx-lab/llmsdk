@@ -96,6 +96,7 @@ impl LanguageModel for AmazonBedrockChatModel {
             prepared.warnings,
             prepared.is_mistral,
             prepared.uses_json_response_tool,
+            self.inner.generate_id.as_ref(),
         )
     }
 
@@ -171,6 +172,7 @@ impl LanguageModel for AmazonBedrockChatModel {
             response_headers.clone(),
             model_id,
             options.include_raw_chunks.unwrap_or(false),
+            self.inner.generate_id.clone(),
         );
 
         let stream_headers: Headers = response_headers

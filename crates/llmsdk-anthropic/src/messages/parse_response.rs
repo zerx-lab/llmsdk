@@ -365,7 +365,7 @@ fn headers_to_provider(raw: HashMap<String, String>) -> Headers {
 
 /// Pluck `tool_use_id` and `name` out of a server-tool result payload,
 /// falling back to empty strings when the upstream did not surface them.
-fn extract_tool_call_id_and_name(v: &JsonValue) -> (String, String) {
+pub(crate) fn extract_tool_call_id_and_name(v: &JsonValue) -> (String, String) {
     let tool_call_id = v
         .get("tool_use_id")
         .and_then(|x| x.as_str())
@@ -383,7 +383,7 @@ fn extract_tool_call_id_and_name(v: &JsonValue) -> (String, String) {
 /// object) or scanning `content[].type` (array). Matches the upstream
 /// `*_tool_result_error` variants surfaced for `web_search` / `web_fetch` /
 /// `code_execution` and friends.
-fn is_tool_result_error(v: &JsonValue) -> bool {
+pub(crate) fn is_tool_result_error(v: &JsonValue) -> bool {
     let Some(content) = v.get("content") else {
         return false;
     };

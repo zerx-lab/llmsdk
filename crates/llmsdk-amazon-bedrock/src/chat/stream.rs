@@ -29,6 +29,10 @@ use crate::PROVIDER_ID;
 
 /// Build the unified [`StreamPart`] stream from a Bedrock EventStream byte
 /// stream.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single-call helper mirroring upstream build_stream surface"
+)]
 pub(crate) fn build_stream<S>(
     bytes: S,
     warnings: Vec<Warning>,
@@ -37,12 +41,13 @@ pub(crate) fn build_stream<S>(
     response_headers: HashMap<String, String>,
     model_id: String,
     include_raw: bool,
+    generate_id: Option<std::sync::Arc<crate::config::GenerateIdFn>>,
 ) -> impl Stream<Item = Result<StreamPart, ProviderError>> + Send + 'static
 where
     S: Stream<Item = Result<Bytes, ProviderError>> + Send + 'static,
 {
     let events = decode_event_stream(bytes);
-    let state = State::new(warnings, is_mistral, uses_json_response_tool);
+    let state = State::new(warnings, is_mistral, uses_json_response_tool, generate_id);
     async_stream::stream! {
         // Stream-start + response-metadata frames (mirrors upstream).
         yield Ok(StreamPart::StreamStart { warnings: state.initial_warnings() });
@@ -119,10 +124,16 @@ struct State {
     provider_metadata: Option<ProviderMetadata>,
     is_json_response_from_tool: bool,
     start_emitted: bool,
+    generate_id: Option<std::sync::Arc<crate::config::GenerateIdFn>>,
 }
 
 impl State {
-    fn new(warnings: Vec<Warning>, is_mistral: bool, uses_json_response_tool: bool) -> Self {
+    fn new(
+        warnings: Vec<Warning>,
+        is_mistral: bool,
+        uses_json_response_tool: bool,
+        generate_id: Option<std::sync::Arc<crate::config::GenerateIdFn>>,
+    ) -> Self {
         Self {
             initial_warnings: warnings,
             is_mistral,
@@ -134,6 +145,7 @@ impl State {
             provider_metadata: None,
             is_json_response_from_tool: false,
             start_emitted: false,
+            generate_id,
         }
     }
 
@@ -173,8 +185,19 @@ impl State {
             if let Some(start_payload) = start.start
                 && let Some(tu) = start_payload.tool_use
             {
-                let tool_use_id = tu.tool_use_id.unwrap_or_default();
-                let tool_name = tu.name.unwrap_or_default();
+                // Mirrors upstream `amazon-bedrock-chat-language-model.ts:557` /
+                // `:561` — missing `toolUseId` / `name` flow through the
+                // user-supplied generator instead of being surfaced blank.
+                let tool_use_id = tu
+                    .tool_use_id
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| super::parse_response::synth_id(self.generate_id.as_ref()));
+                let tool_name = tu.name.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                    format!(
+                        "tool-{}",
+                        super::parse_response::synth_id(self.generate_id.as_ref())
+                    )
+                });
                 let is_json_response_tool = self.uses_json_response_tool && tool_name == "json";
                 let normalized = normalize_tool_call_id(&tool_use_id, self.is_mistral);
                 self.blocks.insert(
@@ -446,7 +469,7 @@ mod tests {
 
     #[test]
     fn text_delta_lazily_emits_text_start() {
-        let mut state = State::new(vec![], false, false);
+        let mut state = State::new(vec![], false, false, None);
         let chunk: StreamChunk = serde_json::from_value(serde_json::json!({
             "contentBlockDelta": {
                 "contentBlockIndex": 0,
@@ -461,7 +484,7 @@ mod tests {
 
     #[test]
     fn tool_use_assembly_round_trip() {
-        let mut state = State::new(vec![], false, false);
+        let mut state = State::new(vec![], false, false, None);
         let _ = state.on_chunk(
             serde_json::from_value(serde_json::json!({
                 "contentBlockStart": {
@@ -508,7 +531,7 @@ mod tests {
 
     #[test]
     fn flush_emits_finish_with_usage() {
-        let mut state = State::new(vec![], false, false);
+        let mut state = State::new(vec![], false, false, None);
         let _ = state.on_chunk(
             serde_json::from_value(serde_json::json!({
                 "messageStop": { "stopReason": "end_turn" }

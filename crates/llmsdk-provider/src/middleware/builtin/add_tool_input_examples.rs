@@ -21,6 +21,7 @@ use crate::middleware::language_model::{CallKind, LanguageModelMiddleware};
 pub struct AddToolInputExamplesMiddleware {
     prefix: String,
     formatter: ExampleFormatter,
+    remove: bool,
 }
 
 /// Boxed formatter invoked once per [`crate::language_model::ToolInputExample`],
@@ -36,6 +37,7 @@ impl std::fmt::Debug for AddToolInputExamplesMiddleware {
         // mark non-exhaustive instead of dumping a function pointer address.
         f.debug_struct("AddToolInputExamplesMiddleware")
             .field("prefix", &self.prefix)
+            .field("remove", &self.remove)
             .finish_non_exhaustive()
     }
 }
@@ -47,12 +49,18 @@ impl Default for AddToolInputExamplesMiddleware {
 }
 
 impl AddToolInputExamplesMiddleware {
-    /// Build with the upstream-aligned default prefix `"Input Examples:"`.
+    /// Build with the upstream-aligned defaults.
+    ///
+    /// The default `prefix` is `"Input Examples:"` and the default `remove` is
+    /// `true`, matching upstream `add-tool-input-examples-middleware.ts` so the
+    /// rewritten tool no longer carries the now-redundant `input_examples`
+    /// field on the wire.
     #[must_use]
     pub fn new() -> Self {
         Self {
             prefix: "Input Examples:".to_owned(),
             formatter: Box::new(default_formatter),
+            remove: true,
         }
     }
 
@@ -74,6 +82,19 @@ impl AddToolInputExamplesMiddleware {
         F: Fn(&crate::language_model::ToolInputExample, usize) -> String + Send + Sync + 'static,
     {
         self.formatter = Box::new(formatter);
+        self
+    }
+
+    /// Toggle whether `input_examples` is cleared after being appended.
+    ///
+    /// Mirrors upstream `remove?: boolean` option (default `true`). When
+    /// `true`, the rewritten function tool drops its `input_examples` so the
+    /// downstream provider does not re-serialize them on the wire after they
+    /// have already been folded into `description`. Set to `false` to keep
+    /// the structured field alongside the textual description.
+    #[must_use]
+    pub fn with_remove(mut self, remove: bool) -> Self {
+        self.remove = remove;
         self
     }
 }
@@ -99,10 +120,13 @@ impl LanguageModelMiddleware for AddToolInputExamplesMiddleware {
         for tool in tools.iter_mut() {
             if let Tool::Function(FunctionTool {
                 description,
-                input_examples: Some(examples),
+                input_examples,
                 ..
             }) = tool
             {
+                let Some(examples) = input_examples.as_ref() else {
+                    continue;
+                };
                 if examples.is_empty() {
                     continue;
                 }
@@ -123,6 +147,14 @@ impl LanguageModelMiddleware for AddToolInputExamplesMiddleware {
                     }
                     _ => examples_section,
                 });
+                // Mirrors upstream `add-tool-input-examples-middleware.ts:80`:
+                //   `inputExamples: remove ? undefined : tool.inputExamples`.
+                // Default `remove = true` strips the structured field so the
+                // downstream provider does not re-serialize examples that are
+                // already embedded in the textual description.
+                if self.remove {
+                    *input_examples = None;
+                }
             }
         }
         Ok(params)
@@ -211,5 +243,56 @@ mod tests {
         assert!(desc.contains("Get weather"), "preserves original desc");
         assert!(desc.contains("Examples:"), "appends examples header");
         assert!(desc.contains("Tokyo"), "renders example body");
+        // Mirrors upstream default `remove = true` — the structured field is
+        // dropped after being folded into `description`.
+        assert!(
+            f.input_examples.is_none(),
+            "default remove=true strips input_examples",
+        );
+    }
+
+    #[tokio::test]
+    async fn with_remove_false_keeps_input_examples() {
+        let last = Arc::new(LastParams::default());
+        let inner: Arc<dyn LanguageModel> = Arc::new(Recorder(Arc::clone(&last)));
+        let wrapped = wrap_language_model(
+            inner,
+            [
+                Arc::new(AddToolInputExamplesMiddleware::new().with_remove(false))
+                    as Arc<dyn LanguageModelMiddleware>,
+            ],
+        );
+
+        wrapped
+            .do_generate(CallOptions {
+                prompt: Prompt::default(),
+                tools: Some(vec![Tool::Function(FunctionTool {
+                    name: "get_weather".into(),
+                    description: Some("Get weather".into()),
+                    input_schema: serde_json::from_value(serde_json::json!({"type": "object"}))
+                        .unwrap(),
+                    input_examples: Some(vec![ToolInputExample {
+                        input: serde_json::json!({"city": "Paris"})
+                            .as_object()
+                            .cloned()
+                            .unwrap(),
+                    }]),
+                    strict: None,
+                    provider_options: None,
+                })]),
+                ..Default::default()
+            })
+            .await
+            .expect("generate");
+
+        let captured = last.0.lock().expect("mutex").clone().expect("params");
+        let tools = captured.tools.unwrap();
+        let Tool::Function(f) = &tools[0] else {
+            panic!("expected function tool");
+        };
+        assert!(
+            f.input_examples.as_ref().is_some_and(|v| v.len() == 1),
+            "with_remove(false) preserves input_examples",
+        );
     }
 }

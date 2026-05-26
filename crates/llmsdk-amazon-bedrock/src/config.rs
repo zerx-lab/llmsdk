@@ -36,6 +36,15 @@ use crate::{
 /// AWS Bedrock service name used when computing `SigV4` signatures.
 pub(crate) const BEDROCK_SERVICE: &str = "bedrock";
 
+/// User-supplied id generator for tool-call ids missing from the response.
+///
+/// Mirrors `AmazonBedrockProviderSettings.generateId` in upstream
+/// `amazon-bedrock-provider.ts:111`. Bedrock's Converse API may omit
+/// `toolUseId` (and even the tool name) on partial chunks; the chat model
+/// calls this generator to synthesize a stable replacement so downstream
+/// `Content::ToolCall` blocks always carry a usable id.
+pub type GenerateIdFn = dyn Fn() -> String + Send + Sync;
+
 /// Amazon Bedrock provider handle.
 ///
 /// Cheap to clone; the underlying HTTP client and auth are shared.
@@ -44,7 +53,6 @@ pub struct AmazonBedrock {
     pub(crate) inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
 pub(crate) struct Inner {
     /// Runtime endpoint base URL (`https://bedrock-runtime.{region}.amazonaws.com`).
     pub(crate) runtime_base_url: String,
@@ -59,6 +67,22 @@ pub(crate) struct Inner {
     pub(crate) http: HttpClient,
     /// Authentication scheme used for every outbound request.
     pub(crate) auth: BedrockAuth,
+    /// Optional user-supplied id generator for synthesized tool-use ids.
+    pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("runtime_base_url", &self.runtime_base_url)
+            .field("agent_runtime_base_url", &self.agent_runtime_base_url)
+            .field("region", &self.region)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http)
+            .field("auth", &self.auth)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl AmazonBedrock {
@@ -157,6 +181,30 @@ impl AmazonBedrock {
     }
 }
 
+#[cfg(test)]
+mod generate_id_tests {
+    use super::*;
+
+    #[test]
+    fn builder_generate_id_is_stored() {
+        // Mirrors upstream `amazon-bedrock-provider.ts:111` exposing
+        // `generateId?: () => string`. The closure flows into the chat model
+        // and is invoked to synthesize tool-use ids when Bedrock omits them.
+        let provider = AmazonBedrock::builder()
+            .region("us-east-1")
+            .api_key("k")
+            .generate_id(|| "my-bedrock-id".to_owned())
+            .build()
+            .expect("ok");
+        let gen_fn = provider
+            .inner
+            .generate_id
+            .as_ref()
+            .expect("generate_id stored");
+        assert_eq!(gen_fn(), "my-bedrock-id");
+    }
+}
+
 /// Builder for [`AmazonBedrock`].
 ///
 /// All setters are optional. `build()` falls back to environment variables
@@ -173,6 +221,7 @@ pub struct AmazonBedrockBuilder {
     agent_runtime_base_url: Option<String>,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    generate_id: Option<Arc<GenerateIdFn>>,
 }
 
 impl std::fmt::Debug for AmazonBedrockBuilder {
@@ -192,6 +241,7 @@ impl std::fmt::Debug for AmazonBedrockBuilder {
             .field("agent_runtime_base_url", &self.agent_runtime_base_url)
             .field("extra_headers", &self.extra_headers)
             .field("http", &self.http)
+            .field("generate_id", &self.generate_id.is_some())
             .finish()
     }
 }
@@ -285,6 +335,22 @@ impl AmazonBedrockBuilder {
         self
     }
 
+    /// Override the id generator used for synthesized tool-use ids.
+    ///
+    /// Mirrors `config.generateId` in upstream
+    /// `amazon-bedrock-chat-language-model.ts:557` and `:561` — Bedrock
+    /// occasionally returns a tool-use block with `toolUseId` (and even
+    /// `name`) missing, and the chat model synthesizes those via the
+    /// generator. When unset, ids fall back to an in-process random source.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
+        self
+    }
+
     /// Finalize the provider.
     ///
     /// # Errors
@@ -366,6 +432,7 @@ impl AmazonBedrockBuilder {
                 extra_headers: self.extra_headers,
                 http,
                 auth,
+                generate_id: self.generate_id,
             }),
         })
     }

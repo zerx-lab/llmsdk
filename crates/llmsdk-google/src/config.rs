@@ -28,17 +28,37 @@ pub struct Google {
     inner: Arc<Inner>,
 }
 
+/// User-supplied id generator for synthesized tool-call ids.
+///
+/// Mirrors `GoogleGenerativeAIProviderSettings.generateId` in upstream
+/// `google-provider.ts:135`. When the model needs an id for a `functionCall`
+/// / `toolCall` / grounding chunk that Google did not provide, it falls back
+/// to this generator (otherwise a deterministic `g-N` counter is used).
+pub type GenerateIdFn = dyn Fn() -> String + Send + Sync;
+
 /// Internal connection / routing state shared across all model handles
 /// produced by a single provider instance.
 ///
 /// Public for cross-crate wrapping providers (e.g. Google Vertex) — *not*
 /// part of the user-facing surface. Re-exported under [`crate::internal`].
-#[derive(Debug)]
 pub struct Inner {
     pub(crate) provider: String,
     pub(crate) base_url: String,
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
+    pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl Inner {
@@ -57,12 +77,25 @@ impl Inner {
 ///
 /// Used by wrapping providers (Google Vertex) to assemble an [`Inner`]
 /// without going through the user-facing [`Google`] builder.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct InnerBuilder {
     provider: Option<String>,
     base_url: Option<String>,
     headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for InnerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InnerBuilder")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http.is_some())
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl InnerBuilder {
@@ -98,6 +131,20 @@ impl InnerBuilder {
         self
     }
 
+    /// Override the id generator used for synthesized tool-call ids.
+    ///
+    /// Mirrors `config.generateId` in upstream
+    /// `google-language-model.ts:378,423,446,470`. When unset, ids fall back
+    /// to a deterministic per-handle `g-N` counter.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
+        self
+    }
+
     /// Finalize the [`Inner`].
     ///
     /// # Errors
@@ -114,6 +161,7 @@ impl InnerBuilder {
             base_url: self.base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned()),
             headers: self.headers,
             http,
+            generate_id: self.generate_id,
         })
     }
 }
@@ -236,13 +284,27 @@ impl Google {
 /// Builder for [`Google`].
 ///
 /// All setters are optional; `build()` falls back to env / library defaults.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct GoogleBuilder {
     api_key: Option<String>,
     base_url: Option<String>,
     name: Option<String>,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for GoogleBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("base_url", &self.base_url)
+            .field("name", &self.name)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http.is_some())
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl GoogleBuilder {
@@ -281,6 +343,20 @@ impl GoogleBuilder {
     #[must_use]
     pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http = Some(client);
+        self
+    }
+
+    /// Override the id generator used for synthesized tool-call ids.
+    ///
+    /// Mirrors `config.generateId` in upstream
+    /// `google-language-model.ts:378,423,446,470`. When unset, ids fall back
+    /// to a deterministic per-handle `g-N` counter.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
         self
     }
 
@@ -323,6 +399,7 @@ impl GoogleBuilder {
                 base_url,
                 headers,
                 http,
+                generate_id: self.generate_id,
             }),
         })
     }
@@ -331,6 +408,20 @@ impl GoogleBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builder_generate_id_is_stored() {
+        // Mirrors upstream `google-provider.ts:135,174,223,238` exposing
+        // `generateId?: () => string` that flows into language / video /
+        // interactions models for synthesized tool-call ids.
+        let g = Google::builder()
+            .api_key("k")
+            .generate_id(|| "google-user-id".to_owned())
+            .build()
+            .expect("ok");
+        let gen_fn = g.inner.generate_id.as_ref().expect("generate_id stored");
+        assert_eq!(gen_fn(), "google-user-id");
+    }
 
     #[test]
     fn builder_with_explicit_key() {

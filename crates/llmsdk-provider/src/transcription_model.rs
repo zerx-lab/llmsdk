@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::shared::{FileBytes, Headers, ProviderMetadata, ProviderOptions, Warning};
+use crate::shared::{FileBytes, Headers, ProviderMetadata, ProviderOptions, RequestInfo, Warning};
 
 /// Contract every speech-to-text model implements.
 ///
@@ -73,6 +73,12 @@ pub struct TranscriptionResult {
     pub duration_in_seconds: Option<f64>,
     /// Warnings.
     pub warnings: Vec<Warning>,
+    /// Wire-level request information for telemetry and debugging.
+    ///
+    /// Mirrors `TranscriptionModelV4Result.request` (upstream
+    /// `transcription-model-v4-result.ts:53-58`); `None` for providers that
+    /// do not have a meaningful HTTP request body (e.g. local runtimes).
+    pub request: Option<RequestInfo>,
     /// Response info (timestamp / headers / model id).
     pub response: TranscriptionResponseInfo,
     /// Provider-specific metadata.

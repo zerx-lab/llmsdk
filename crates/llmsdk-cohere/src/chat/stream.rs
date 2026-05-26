@@ -20,6 +20,10 @@ use llmsdk_provider::language_model::{
 use llmsdk_provider::shared::Warning;
 
 use super::finish_reason::map as map_finish_reason;
+use std::sync::Arc;
+
+use crate::config::GenerateIdFn;
+
 use super::parse_response::{citation_to_source, next_id};
 use super::usage;
 use super::wire::{ChatChunk, ContentStartDeltaContent, WireUsage};
@@ -39,7 +43,6 @@ struct PendingTool {
 }
 
 /// Cohere chat streaming state machine.
-#[derive(Debug)]
 pub(crate) struct StreamState {
     initial_warnings: Option<Vec<Warning>>,
     finish_reason: FinishReason,
@@ -52,11 +55,37 @@ pub(crate) struct StreamState {
     /// a single contiguous reasoning block (Cohere has no `index` for it).
     tool_plan_started: bool,
     tool_plan_ended: bool,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for StreamState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamState")
+            .field("initial_warnings", &self.initial_warnings)
+            .field("finish_reason", &self.finish_reason)
+            .field("last_usage", &self.last_usage)
+            .field("blocks", &self.blocks)
+            .field("block_ended", &self.block_ended)
+            .field("pending_tool", &self.pending_tool)
+            .field("citation_id_seed", &self.citation_id_seed)
+            .field("tool_plan_started", &self.tool_plan_started)
+            .field("tool_plan_ended", &self.tool_plan_ended)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl StreamState {
-    /// Build with the warnings collected during request building.
-    pub(crate) fn new(warnings: Vec<Warning>) -> Self {
+    /// Build with an optional caller-supplied id generator.
+    ///
+    /// Mirrors upstream `cohere-chat-language-model.ts` accepting
+    /// `config.generateId` and using it to label citation document ids
+    /// emitted during streaming. When `generate_id` is `None`, citation ids
+    /// fall back to the deterministic `cohere-citation-N` counter.
+    pub(crate) fn with_generate_id(
+        warnings: Vec<Warning>,
+        generate_id: Option<Arc<GenerateIdFn>>,
+    ) -> Self {
         Self {
             initial_warnings: Some(warnings),
             finish_reason: FinishReason::new(FinishReasonKind::Other),
@@ -67,6 +96,7 @@ impl StreamState {
             citation_id_seed: 0,
             tool_plan_started: false,
             tool_plan_ended: false,
+            generate_id,
         }
     }
 
@@ -252,6 +282,7 @@ impl StreamState {
                     out.push(StreamPart::Source(citation_source(
                         citation,
                         &mut self.citation_id_seed,
+                        self.generate_id.as_ref(),
                     )));
                 }
             }
@@ -329,9 +360,10 @@ impl StreamState {
 fn citation_source(
     citation: super::wire::ChatResponseCitation,
     seed: &mut u64,
+    generate_id: Option<&Arc<GenerateIdFn>>,
 ) -> llmsdk_provider::language_model::Source {
     // We piggyback on the non-stream helper, then unwrap to the Source.
-    let content = citation_to_source(citation, seed);
+    let content = citation_to_source(citation, seed, generate_id);
     let llmsdk_provider::language_model::Content::Source(src) = content else {
         unreachable!("citation_to_source always returns Content::Source")
     };
@@ -339,9 +371,10 @@ fn citation_source(
 }
 
 // Force the citation id seed helper used in tests to compile.
+// (Internal compile-only shim — keeps `next_id` reachable from this module.)
 #[allow(dead_code, reason = "referenced only in unit tests")]
 fn _force_next_id_use(seed: &mut u64) -> String {
-    next_id(seed)
+    next_id(seed, None)
 }
 
 #[cfg(test)]
@@ -397,7 +430,7 @@ mod tests {
 
     #[test]
     fn text_block_full_lifecycle() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let s = state.start_frames();
         assert!(matches!(s[0], StreamPart::StreamStart { .. }));
         let f1 = state.on_chunk(cs_text(0));
@@ -440,7 +473,7 @@ mod tests {
 
     #[test]
     fn reasoning_block_emits_reasoning_frames() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let f1 = state.on_chunk(ChatChunk::ContentStart {
             index: 0,
@@ -463,7 +496,7 @@ mod tests {
 
     #[test]
     fn tool_call_three_chunks() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let f1 = state.on_chunk(ChatChunk::ToolCallStart {
             delta: ToolCallStartDelta {
@@ -507,7 +540,7 @@ mod tests {
     fn malformed_tool_call_args_emit_stream_error() {
         // Mirrors ai-sdk: parseJSON throws JSONParseError on invalid JSON
         // (commit 3cfb7621e). Rust must not silently fall back to a string.
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let _ = state.on_chunk(ChatChunk::ToolCallStart {
             delta: ToolCallStartDelta {
@@ -535,7 +568,7 @@ mod tests {
 
     #[test]
     fn parse_error_marks_finish_as_error() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let frames = state.on_parse_error("not-json", "expected value");
         assert!(matches!(frames[0], StreamPart::Error { .. }));

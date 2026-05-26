@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use llmsdk_provider::language_model::{
-    FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart,
+    FinishReason, FinishReasonKind, Source, StreamPart, ToolCallPart, ToolResult, ToolResultOutput,
 };
 use llmsdk_provider::shared::{ProviderMetadata, ProviderOptions, Warning};
 use serde_json::{Map, Value as JsonValue};
@@ -435,6 +435,92 @@ impl StreamState {
                     });
                 }
                 out
+            }
+            BlockStart::ServerToolUse { id, name, input } => {
+                // Streaming variant of `parse_response.rs::ResponseContent::ServerToolUse`.
+                // Anthropic emits server-side tool invocations (web_search /
+                // code_execution / web_fetch / tool_search / bash / text_editor
+                // family) as `content_block_start` of type `server_tool_use`
+                // with the full input inline. Mirrors upstream
+                // `anthropic-language-model.ts:1671-1735`.
+                let dynamic =
+                    (self.mark_code_execution_dynamic && name == "code_execution").then_some(true);
+                let input_json = match input {
+                    Some(v) if !v.is_null() => serde_json::to_string(&v).unwrap_or_default(),
+                    _ => String::new(),
+                };
+                self.blocks.insert(
+                    index,
+                    BlockKind::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: input_json.clone(),
+                        caller: None,
+                    },
+                );
+                let mut out = vec![StreamPart::ToolInputStart {
+                    id: id.clone(),
+                    tool_name: name,
+                    provider_executed: Some(true),
+                    dynamic,
+                    title: None,
+                    provider_metadata: None,
+                }];
+                if !input_json.is_empty() && input_json != "{}" {
+                    out.push(StreamPart::ToolInputDelta {
+                        id,
+                        delta: input_json,
+                        provider_metadata: None,
+                    });
+                }
+                out
+            }
+            BlockStart::WebSearchToolResult(v)
+            | BlockStart::WebFetchToolResult(v)
+            | BlockStart::CodeExecutionToolResult(v)
+            | BlockStart::BashCodeExecutionToolResult(v)
+            | BlockStart::TextEditorCodeExecutionToolResult(v)
+            | BlockStart::McpToolUse(v)
+            | BlockStart::McpToolResult(v)
+            | BlockStart::ToolSearchToolResult(v)
+            | BlockStart::AdvisorToolResult(v) => {
+                // Streaming variant of the 9 server-tool result content blocks
+                // handled non-streaming in
+                // `parse_response.rs:166-209`. Each block already contains
+                // the full result on `content_block_start`; emit a single
+                // `ToolResult` part (no later deltas / stop frames to
+                // forward).
+                let (tool_call_id, tool_name) =
+                    super::parse_response::extract_tool_call_id_and_name(&v);
+                let is_error = super::parse_response::is_tool_result_error(&v);
+                let mut anthropic_meta = Map::new();
+                if is_error {
+                    anthropic_meta.insert("isError".into(), JsonValue::Bool(true));
+                }
+                let provider_metadata = if anthropic_meta.is_empty() {
+                    None
+                } else {
+                    let mut pm = ProviderMetadata::new();
+                    pm.insert("anthropic".into(), anthropic_meta);
+                    Some(pm)
+                };
+                let output = if is_error {
+                    ToolResultOutput::ErrorJson {
+                        value: v,
+                        provider_options: None,
+                    }
+                } else {
+                    ToolResultOutput::Json {
+                        value: v,
+                        provider_options: None,
+                    }
+                };
+                vec![StreamPart::ToolResult(ToolResult {
+                    tool_call_id,
+                    tool_name,
+                    output,
+                    provider_metadata,
+                })]
             }
             BlockStart::Other => Vec::new(),
         }
@@ -1081,5 +1167,72 @@ mod tests {
         };
         assert_eq!(finish_reason.unified, FinishReasonKind::Stop);
         assert_eq!(finish_reason.raw.as_deref(), Some("tool_use"));
+    }
+
+    /// Verifies that streaming `server_tool_use` content blocks surface as a
+    /// `ToolInputStart` (+ inline `ToolInputDelta`) instead of being dropped
+    /// by the catch-all `BlockStart::Other`. Mirrors upstream
+    /// `anthropic-language-model.ts:1671-1735`.
+    #[test]
+    fn stream_server_tool_use_emits_tool_input_lifecycle() {
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: Some("msg_1".into()),
+                model: Some("claude-3-5".into()),
+                usage: empty_usage(),
+            },
+        });
+        let frames = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::ServerToolUse {
+                id: "srvtoolu_abc".into(),
+                name: "web_search".into(),
+                input: Some(serde_json::json!({"query": "rust"})),
+            },
+        });
+        assert!(matches!(
+            &frames[0],
+            StreamPart::ToolInputStart { id, tool_name, provider_executed: Some(true), .. }
+                if id == "srvtoolu_abc" && tool_name == "web_search"
+        ));
+        assert!(matches!(
+            &frames[1],
+            StreamPart::ToolInputDelta { id, delta, .. }
+                if id == "srvtoolu_abc" && delta.contains("rust")
+        ));
+    }
+
+    /// Verifies that streaming `*_tool_result` content blocks surface as a
+    /// `ToolResult` part instead of being dropped. Mirrors upstream
+    /// `anthropic-language-model.ts:1786-2019`.
+    #[test]
+    fn stream_web_search_tool_result_emits_tool_result_part() {
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: Some("msg_1".into()),
+                model: Some("claude-3-5".into()),
+                usage: empty_usage(),
+            },
+        });
+        let payload = serde_json::json!({
+            "tool_use_id": "srvtoolu_abc",
+            "name": "web_search",
+            "content": [{"type": "web_search_result", "url": "https://example.com"}]
+        });
+        let frames = state.on_event(StreamEvent::ContentBlockStart {
+            index: 1,
+            content_block: BlockStart::WebSearchToolResult(payload.clone()),
+        });
+        assert_eq!(frames.len(), 1);
+        let StreamPart::ToolResult(tr) = &frames[0] else {
+            panic!("expected ToolResult, got {:?}", frames[0]);
+        };
+        assert_eq!(tr.tool_call_id, "srvtoolu_abc");
+        assert_eq!(tr.tool_name, "web_search");
+        assert!(matches!(tr.output, ToolResultOutput::Json { .. }));
     }
 }

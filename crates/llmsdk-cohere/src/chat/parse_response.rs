@@ -4,6 +4,7 @@
 // Rust guideline compliant 2026-05-25
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
@@ -15,6 +16,7 @@ use llmsdk_provider::shared::{Headers, ProviderMetadata, RequestInfo, Warning};
 use super::finish_reason;
 use super::usage;
 use super::wire::{ChatResponse, ChatResponseCitation, ChatResponseContent};
+use crate::config::GenerateIdFn;
 
 /// Parse a successful (non-streaming) chat response.
 ///
@@ -28,6 +30,7 @@ pub(crate) fn parse_response(
     request_body: Option<serde_json::Value>,
     warnings: Vec<Warning>,
     citation_id_seed: &mut u64,
+    generate_id: Option<&Arc<GenerateIdFn>>,
 ) -> Result<GenerateResult, ProviderError> {
     let mut content: Vec<Content> = Vec::new();
 
@@ -50,7 +53,7 @@ pub(crate) fn parse_response(
     }
 
     for citation in response.message.citations.unwrap_or_default() {
-        content.push(citation_to_source(citation, citation_id_seed));
+        content.push(citation_to_source(citation, citation_id_seed, generate_id));
     }
 
     if let Some(tool_calls) = response.message.tool_calls {
@@ -101,7 +104,11 @@ pub(crate) fn parse_response(
 }
 
 /// Build a [`Content::Source`] from a Cohere citation.
-pub(crate) fn citation_to_source(citation: ChatResponseCitation, seed: &mut u64) -> Content {
+pub(crate) fn citation_to_source(
+    citation: ChatResponseCitation,
+    seed: &mut u64,
+    generate_id: Option<&Arc<GenerateIdFn>>,
+) -> Content {
     let title = citation
         .sources
         .first()
@@ -123,7 +130,7 @@ pub(crate) fn citation_to_source(citation: ChatResponseCitation, seed: &mut u64)
     metadata.insert("cohere".into(), cohere);
 
     Content::Source(Source::Document {
-        id: next_id(seed),
+        id: next_id(seed, generate_id),
         media_type: "text/plain".into(),
         title,
         filename: None,
@@ -147,8 +154,16 @@ fn tool_plan_to_metadata(plan: Option<&str>) -> Option<ProviderMetadata> {
     Some(metadata)
 }
 
-/// Generate a stable monotonic citation id.
-pub(crate) fn next_id(seed: &mut u64) -> String {
+/// Generate a citation id, preferring the caller-supplied generator.
+///
+/// When `generate_id` is `Some`, the closure is invoked verbatim — this
+/// mirrors upstream `this.config.generateId()` in
+/// `cohere-chat-language-model.ts:204`. Otherwise the id falls back to the
+/// deterministic `cohere-citation-N` counter so offline replay stays stable.
+pub(crate) fn next_id(seed: &mut u64, generate_id: Option<&Arc<GenerateIdFn>>) -> String {
+    if let Some(f) = generate_id {
+        return f();
+    }
     *seed = seed.wrapping_add(1);
     format!("cohere-citation-{seed}")
 }
@@ -235,7 +250,7 @@ mod tests {
     #[test]
     fn parses_text() {
         let mut seed = 0;
-        let r = parse_response(base_response(), headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(base_response(), headers(), None, vec![], &mut seed, None).unwrap();
         assert_eq!(r.content.len(), 1);
         assert!(matches!(r.content[0], Content::Text(_)));
         assert_eq!(r.finish_reason.unified, FinishReasonKind::Stop);
@@ -252,7 +267,7 @@ mod tests {
             ChatResponseContent::Text { text: "42".into() },
         ]);
         let mut seed = 0;
-        let r = parse_response(resp, headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(resp, headers(), None, vec![], &mut seed, None).unwrap();
         assert_eq!(r.content.len(), 2);
         assert!(matches!(r.content[0], Content::Reasoning(_)));
         assert!(matches!(r.content[1], Content::Text(_)));
@@ -272,7 +287,7 @@ mod tests {
         }]);
         resp.finish_reason = Some("TOOL_CALL".into());
         let mut seed = 0;
-        let r = parse_response(resp, headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(resp, headers(), None, vec![], &mut seed, None).unwrap();
         assert_eq!(r.content.len(), 1);
         let Content::ToolCall(tc) = &r.content[0] else {
             panic!("expected tool call");
@@ -295,7 +310,7 @@ mod tests {
             },
         }]);
         let mut seed = 0;
-        let r = parse_response(resp, headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(resp, headers(), None, vec![], &mut seed, None).unwrap();
         let Content::ToolCall(tc) = &r.content[0] else {
             panic!("expected tool call");
         };
@@ -322,7 +337,7 @@ mod tests {
             kind: Some("inline".into()),
         }]);
         let mut seed = 0;
-        let r = parse_response(resp, headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(resp, headers(), None, vec![], &mut seed, None).unwrap();
         let Content::Source(Source::Document { title, id, .. }) = &r.content[1] else {
             panic!("expected document source");
         };
@@ -335,7 +350,7 @@ mod tests {
         let mut resp = base_response();
         resp.message.tool_plan = Some("Step 1: call weather".into());
         let mut seed = 0;
-        let r = parse_response(resp, headers(), None, vec![], &mut seed).unwrap();
+        let r = parse_response(resp, headers(), None, vec![], &mut seed, None).unwrap();
         let meta = r.provider_metadata.unwrap();
         let cohere = meta.get("cohere").unwrap();
         assert_eq!(cohere["toolPlan"], "Step 1: call weather");

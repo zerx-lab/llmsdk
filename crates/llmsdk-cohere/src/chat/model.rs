@@ -79,6 +79,7 @@ impl LanguageModel for CohereChatModel {
             request_body_value,
             warnings,
             &mut citation_seed,
+            self.inner.generate_id.as_ref(),
         )
     }
 
@@ -101,7 +102,7 @@ impl LanguageModel for CohereChatModel {
 
         let byte_stream = response_byte_stream(stream_response.response);
         let event_stream = sse_json_stream::<ChatChunk>(byte_stream);
-        let state = StreamState::new(warnings);
+        let state = StreamState::with_generate_id(warnings, self.inner.generate_id.clone());
         let parts = build_part_stream(state, event_stream);
 
         Ok(StreamResult {

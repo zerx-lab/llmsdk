@@ -8,6 +8,8 @@
 //! block we close the reasoning block first (matches upstream behaviour).
 // Rust guideline compliant 2026-05-25
 
+use std::sync::Arc;
+
 use llmsdk_provider::language_model::{
     FinishReason, FinishReasonKind, ResponseMetadata, StreamPart, ToolCallPart,
 };
@@ -18,11 +20,11 @@ use super::finish_reason::map as map_finish_reason;
 use super::parse_response::collect_thinking_text;
 use super::usage;
 use super::wire::{ChatChunk, MistralContent, MistralContentPart, WireUsage};
+use crate::config::GenerateIdFn;
 
 const TEXT_ID: &str = "0";
 
 /// State machine driving a Mistral Chat Completions stream.
-#[derive(Debug)]
 pub(crate) struct StreamState {
     initial_warnings: Option<Vec<Warning>>,
     finish_reason: FinishReason,
@@ -32,11 +34,36 @@ pub(crate) struct StreamState {
     active_text: bool,
     active_reasoning_id: Option<String>,
     reasoning_id_seq: u64,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for StreamState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamState")
+            .field("initial_warnings", &self.initial_warnings)
+            .field("finish_reason", &self.finish_reason)
+            .field("last_usage", &self.last_usage)
+            .field("metadata_emitted", &self.metadata_emitted)
+            .field("is_first_chunk", &self.is_first_chunk)
+            .field("active_text", &self.active_text)
+            .field("active_reasoning_id", &self.active_reasoning_id)
+            .field("reasoning_id_seq", &self.reasoning_id_seq)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl StreamState {
-    /// Build with the warnings collected during request building.
-    pub(crate) fn new(warnings: Vec<Warning>) -> Self {
+    /// Build with an optional user-supplied id generator.
+    ///
+    /// When `generate_id` is `Some`, each new reasoning block id is produced
+    /// by invoking the closure; otherwise we fall back to a deterministic
+    /// `reasoning-N` counter. Mirrors upstream
+    /// `mistral-chat-language-model.ts:75` (`this.generateId = config.generateId ?? generateId`).
+    pub(crate) fn with_generate_id(
+        warnings: Vec<Warning>,
+        generate_id: Option<Arc<GenerateIdFn>>,
+    ) -> Self {
         Self {
             initial_warnings: Some(warnings),
             finish_reason: FinishReason::new(FinishReasonKind::Other),
@@ -46,10 +73,14 @@ impl StreamState {
             active_text: false,
             active_reasoning_id: None,
             reasoning_id_seq: 0,
+            generate_id,
         }
     }
 
     fn next_reasoning_id(&mut self) -> String {
+        if let Some(f) = self.generate_id.as_ref() {
+            return f();
+        }
         self.reasoning_id_seq = self.reasoning_id_seq.wrapping_add(1);
         format!("reasoning-{}", self.reasoning_id_seq)
     }
@@ -300,7 +331,7 @@ mod tests {
 
     #[test]
     fn start_then_text_then_finish() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let s = state.start_frames();
         assert!(matches!(s[0], StreamPart::StreamStart { .. }));
 
@@ -322,7 +353,7 @@ mod tests {
 
     #[test]
     fn thinking_then_text_closes_reasoning_first() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let f1 = state.on_chunk(thinking_chunk("think"));
         assert!(matches!(&f1[0], StreamPart::ReasoningStart { .. }));
@@ -335,7 +366,7 @@ mod tests {
 
     #[test]
     fn tool_call_one_chunk() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let frames = state.on_chunk(ChatChunk {
             choices: vec![ChatChunkChoice {
@@ -367,7 +398,7 @@ mod tests {
 
     #[test]
     fn parse_error_marks_finish_as_error() {
-        let mut state = StreamState::new(vec![]);
+        let mut state = StreamState::with_generate_id(vec![], None);
         let _ = state.start_frames();
         let frames = state.on_parse_error("not-json", "expected value");
         assert!(matches!(frames[0], StreamPart::Error { .. }));

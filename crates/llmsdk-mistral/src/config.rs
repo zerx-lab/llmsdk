@@ -21,11 +21,30 @@ pub struct Mistral {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
+/// User-supplied id generator for streaming reasoning blocks.
+///
+/// Mirrors `MistralProviderSettings.generateId` in upstream
+/// `mistral-provider.ts:77`. When set, the chat model invokes the callback
+/// each time it needs an identifier for a new reasoning block; otherwise it
+/// falls back to a deterministic in-process counter.
+pub type GenerateIdFn = dyn Fn() -> String + Send + Sync;
+
 pub(crate) struct Inner {
     pub(crate) base_url: String,
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
+    pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl Mistral {
@@ -90,12 +109,25 @@ impl Mistral {
 /// Builder for [`Mistral`].
 ///
 /// All setters are optional; `build()` falls back to env / library defaults.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct MistralBuilder {
     api_key: Option<String>,
     base_url: Option<String>,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for MistralBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MistralBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("base_url", &self.base_url)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http.is_some())
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl MistralBuilder {
@@ -126,6 +158,22 @@ impl MistralBuilder {
     #[must_use]
     pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http = Some(client);
+        self
+    }
+
+    /// Override the id generator used for streaming reasoning blocks.
+    ///
+    /// Mirrors `config.generateId` on the upstream `MistralChatLanguageModel`
+    /// (`mistral-provider.ts:77`). When unset, each new reasoning block
+    /// receives a deterministic `reasoning-N` id from an internal counter,
+    /// which is fine for tests and offline replay but does not collide-proof
+    /// against ids issued by other sessions or downstream consumers.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
         self
     }
 
@@ -162,6 +210,7 @@ impl MistralBuilder {
                 base_url,
                 headers,
                 http,
+                generate_id: self.generate_id,
             }),
         })
     }
@@ -194,6 +243,19 @@ mod tests {
             .build()
             .expect("ok");
         assert_eq!(m.inner.base_url, "https://proxy.example.com/v1");
+    }
+
+    #[test]
+    fn builder_generate_id_is_stored() {
+        // Mirrors upstream `mistral-provider.ts` accepting `generateId?: () => string`
+        // and forwarding it onto the chat model config (lines 77, 108).
+        let m = Mistral::builder()
+            .api_key("k")
+            .generate_id(|| "custom-id".to_owned())
+            .build()
+            .expect("ok");
+        let gen_fn = m.inner.generate_id.as_ref().expect("generate_id stored");
+        assert_eq!(gen_fn(), "custom-id");
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub(crate) fn parse_response(
     warnings: Vec<Warning>,
     is_mistral: bool,
     uses_json_response_tool: bool,
+    generate_id: Option<&std::sync::Arc<crate::config::GenerateIdFn>>,
 ) -> Result<GenerateResult, ProviderError> {
     let mut content: Vec<Content> = Vec::with_capacity(response.output.message.content.len());
     let mut is_json_response_from_tool = false;
@@ -67,6 +68,7 @@ pub(crate) fn parse_response(
                 is_mistral,
                 uses_json_response_tool,
                 &mut is_json_response_from_tool,
+                generate_id,
             );
         }
     }
@@ -126,6 +128,30 @@ pub(crate) fn parse_response(
     })
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide counter backing the default tool-use id fallback.
+///
+/// Bumped only when the caller passes no [`crate::config::GenerateIdFn`],
+/// so wiring a custom generator means the counter never advances and stays
+/// available for any later code path that opts back to defaults.
+static SYNTH_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Produce a synthetic tool-use id when Bedrock leaves the wire field blank.
+///
+/// Prefers the caller-supplied generator (mirroring upstream
+/// `this.config.generateId()`); otherwise falls back to a process-wide atomic
+/// counter so repeated calls never collide within the same parse.
+pub(crate) fn synth_id(
+    generate_id: Option<&std::sync::Arc<crate::config::GenerateIdFn>>,
+) -> String {
+    if let Some(f) = generate_id {
+        return f();
+    }
+    let n = SYNTH_ID_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    format!("bedrock-tooluse-{n}")
+}
+
 fn push_reasoning(content: &mut Vec<Content>, reasoning: ResponseReasoningContent) {
     if let Some(text) = reasoning.reasoning_text {
         let provider_options = text.signature.as_ref().map(|sig| {
@@ -160,6 +186,7 @@ fn push_tool_use(
     is_mistral: bool,
     uses_json_response_tool: bool,
     is_json_response_from_tool: &mut bool,
+    generate_id: Option<&std::sync::Arc<crate::config::GenerateIdFn>>,
 ) {
     let is_json_response = uses_json_response_tool && tool_use.name.as_deref() == Some("json");
     if is_json_response {
@@ -171,9 +198,19 @@ fn push_tool_use(
         }));
         return;
     }
-    let raw_id = tool_use.tool_use_id.unwrap_or_default();
+    // Mirrors upstream `amazon-bedrock-chat-language-model.ts:557` / `:561`:
+    // when Bedrock omits `toolUseId` (and even `name`) on partial chunks the
+    // SDK falls back to `this.config.generateId()` so the surfaced tool call
+    // still carries usable identifiers.
+    let raw_id = tool_use
+        .tool_use_id
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| synth_id(generate_id));
     let normalized = normalize_tool_call_id(&raw_id, is_mistral);
-    let name = tool_use.name.unwrap_or_default();
+    let name = tool_use
+        .name
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("tool-{}", synth_id(generate_id)));
     let input_str = match &tool_use.input {
         Some(Value::String(s)) => s.clone(),
         Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".to_owned()),
@@ -270,7 +307,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let result = parse_response(response, empty_headers(), None, vec![], false, false).unwrap();
+        let result =
+            parse_response(response, empty_headers(), None, vec![], false, false, None).unwrap();
         assert_eq!(result.content.len(), 1);
         assert!(matches!(result.content[0], Content::Text(_)));
         assert_eq!(
@@ -302,7 +340,8 @@ mod tests {
             service_tier: None,
             usage: None,
         };
-        let result = parse_response(response, empty_headers(), None, vec![], false, false).unwrap();
+        let result =
+            parse_response(response, empty_headers(), None, vec![], false, false, None).unwrap();
         let Content::ToolCall(tc) = &result.content[0] else {
             panic!("expected tool-call");
         };

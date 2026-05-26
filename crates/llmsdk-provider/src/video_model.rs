@@ -64,12 +64,13 @@ pub struct VideoOptions {
     /// Resolution, formatted as `WIDTHxHEIGHT` (e.g. `"1280x720"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
-    /// Duration in seconds.
-    #[serde(
-        default,
-        rename = "durationSeconds",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// Duration of the video in seconds.
+    ///
+    /// Serialized as `duration` to match upstream
+    /// `video-model-v4-call-options.ts:36` (`duration: number | undefined`).
+    /// The Rust field keeps the `_seconds` suffix for clarity at the call
+    /// site; only the JSON key differs.
+    #[serde(default, rename = "duration", skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
     /// Frames per second.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,7 +242,10 @@ mod tests {
         };
         let j = serde_json::to_value(&v).unwrap();
         assert_eq!(j["aspectRatio"], "16:9");
-        assert_eq!(j["durationSeconds"], 5.0);
+        // Mirrors upstream `video-model-v4-call-options.ts:36` — the wire key
+        // is `duration` (no `Seconds` suffix), even though the Rust field is
+        // named `duration_seconds` for call-site clarity.
+        assert_eq!(j["duration"], 5.0);
         let back: VideoOptions = serde_json::from_value(j).unwrap();
         assert_eq!(back.aspect_ratio.as_deref(), Some("16:9"));
         assert_eq!(back.fps, Some(30));

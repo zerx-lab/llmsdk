@@ -160,7 +160,14 @@ impl LanguageModel for GoogleLanguageModel {
         let provider_keys = prepared.provider_keys.clone();
         let provider_keys_ref: Vec<&str> = provider_keys.iter().map(String::as_str).collect();
         let counter = Arc::clone(&self.counter);
-        let next_id = move || format!("g-{}", counter.fetch_add(1, Ordering::Relaxed));
+        let generate_id = self.inner.generate_id.clone();
+        // Mirrors upstream `google-language-model.ts:378,423,446,470` —
+        // user-supplied `config.generateId` (if any) takes precedence over the
+        // deterministic per-handle counter for missing functionCall/toolCall ids.
+        let next_id = move || match generate_id.as_ref() {
+            Some(f) => f(),
+            None => format!("g-{}", counter.fetch_add(1, Ordering::Relaxed)),
+        };
 
         let (content, has_client_tool) = build_content(
             &parts,
@@ -219,7 +226,14 @@ impl LanguageModel for GoogleLanguageModel {
         let bytes = response_byte_stream(stream_resp.response);
 
         let counter = Arc::clone(&self.counter);
-        let next_id = move || format!("g-{}", counter.fetch_add(1, Ordering::Relaxed));
+        let generate_id = self.inner.generate_id.clone();
+        // Mirrors upstream `google-language-model.ts:378,423,446,470` —
+        // user-supplied `config.generateId` (if any) takes precedence over the
+        // deterministic per-handle counter for missing functionCall/toolCall ids.
+        let next_id = move || match generate_id.as_ref() {
+            Some(f) => f(),
+            None => format!("g-{}", counter.fetch_add(1, Ordering::Relaxed)),
+        };
 
         let parts_stream = make_stream(
             bytes,
@@ -598,6 +612,7 @@ mod tests {
     #[test]
     fn provider_keys_google_default() {
         let cfg = Inner {
+            generate_id: None,
             provider: "google".into(),
             base_url: "https://x".into(),
             headers: HashMap::new(),

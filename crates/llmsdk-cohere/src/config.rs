@@ -22,11 +22,30 @@ pub struct Cohere {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
+/// User-supplied id generator for content-source ids.
+///
+/// Mirrors `CohereProviderSettings.generateId` in upstream
+/// `cohere-provider.ts:89`. When set, each citation surfaced as a
+/// `Source::Document` borrows its id from this callback instead of the
+/// default `cohere-citation-N` sequence.
+pub type GenerateIdFn = dyn Fn() -> String + Send + Sync;
+
 pub(crate) struct Inner {
     pub(crate) base_url: String,
     pub(crate) headers: HashMap<String, Option<String>>,
     pub(crate) http: HttpClient,
+    pub(crate) generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("base_url", &self.base_url)
+            .field("headers", &self.headers)
+            .field("http", &self.http)
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl Cohere {
@@ -104,12 +123,25 @@ impl Cohere {
 /// Builder for [`Cohere`].
 ///
 /// All setters are optional; `build()` falls back to env / library defaults.
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct CohereBuilder {
     api_key: Option<String>,
     base_url: Option<String>,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+    generate_id: Option<Arc<GenerateIdFn>>,
+}
+
+impl std::fmt::Debug for CohereBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CohereBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("base_url", &self.base_url)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http.is_some())
+            .field("generate_id", &self.generate_id.is_some())
+            .finish()
+    }
 }
 
 impl CohereBuilder {
@@ -149,6 +181,21 @@ impl CohereBuilder {
         self
     }
 
+    /// Override the id generator used for citation source ids.
+    ///
+    /// Mirrors `config.generateId` in upstream
+    /// `cohere-chat-language-model.ts:204` (`id: this.config.generateId()`
+    /// while building each citation `Source::Document`). When unset, citation
+    /// ids follow a deterministic `cohere-citation-N` sequence.
+    #[must_use]
+    pub fn generate_id<F>(mut self, f: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.generate_id = Some(Arc::new(f));
+        self
+    }
+
     /// Finalize the provider.
     ///
     /// # Errors
@@ -182,6 +229,7 @@ impl CohereBuilder {
                 base_url,
                 headers,
                 http,
+                generate_id: self.generate_id,
             }),
         })
     }
@@ -218,6 +266,20 @@ mod tests {
             .build()
             .expect("ok");
         assert_eq!(cohere.inner.base_url, "https://proxy.example.com/v2");
+    }
+
+    #[test]
+    fn builder_generate_id_is_stored() {
+        // Mirrors upstream `cohere-provider.ts:89` exposing
+        // `generateId?: () => string` that flows into the chat model and is
+        // invoked when building citation `Source::Document` ids.
+        let c = Cohere::builder()
+            .api_key("k")
+            .generate_id(|| "user-id".to_owned())
+            .build()
+            .expect("ok");
+        let gen_fn = c.inner.generate_id.as_ref().expect("generate_id stored");
+        assert_eq!(gen_fn(), "user-id");
     }
 
     #[test]

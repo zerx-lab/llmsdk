@@ -176,6 +176,7 @@ mod tests {
             base_url: "http://localhost".into(),
             headers: std::collections::HashMap::new(),
             http: llmsdk_provider_utils::http::HttpClient::new().expect("http"),
+            generate_id: None,
         });
         let model = CohereEmbeddingModel::new(inner, "embed-english-v3.0".into());
 

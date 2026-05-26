@@ -259,6 +259,7 @@ impl LanguageModel for GoogleInteractionsLanguageModel {
             current_id,
             warnings,
             self.model_id().to_owned(),
+            self.inner.generate_id.as_ref(),
         )
     }
 
@@ -1113,6 +1114,10 @@ fn map_finish_reason(status: Option<GoogleInteractionsStatus>) -> FinishReason {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single-call parser whose argument set mirrors upstream parse-response surface"
+)]
 fn parse_response(
     response: JsonValue,
     headers: HashMap<String, String>,
@@ -1120,15 +1125,22 @@ fn parse_response(
     response_id: Option<String>,
     warnings: Vec<Warning>,
     model_id: String,
+    generate_id: Option<&Arc<crate::config::GenerateIdFn>>,
 ) -> Result<GenerateResult, ProviderError> {
     let status = response_status(&response);
     let finish_reason = map_finish_reason(status);
     let usage = parse_usage(response.get("usage"));
 
+    let mut id_gen = make_id_gen(generate_id);
     let mut content: Vec<Content> = Vec::new();
     if let Some(steps) = response.get("steps").and_then(JsonValue::as_array).cloned() {
         for step in steps {
-            translate_step(&step, &mut content);
+            translate_step_with(
+                &step,
+                &mut content,
+                &mut id_gen,
+                &mut std::collections::HashSet::new(),
+            );
         }
     }
 
@@ -1191,6 +1203,24 @@ fn default_id_gen() -> impl FnMut() -> String {
     move || {
         n += 1;
         format!("gi-{n}")
+    }
+}
+
+/// Resolve the id generator preferred by the caller.
+///
+/// Mirrors upstream `google-provider.ts:238` injecting
+/// `generateId: options.generateId ?? generateId` into the interactions
+/// model — user-supplied callbacks override the `gi-N` counter so embedded
+/// sources reuse caller-managed ids.
+fn make_id_gen(
+    generate_id: Option<&Arc<crate::config::GenerateIdFn>>,
+) -> Box<dyn FnMut() -> String + Send> {
+    match generate_id {
+        Some(f) => {
+            let f = Arc::clone(f);
+            Box::new(move || f())
+        }
+        None => Box::new(default_id_gen()),
     }
 }
 

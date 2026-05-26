@@ -106,6 +106,46 @@ pub(crate) enum BlockStart {
         #[serde(default)]
         content: Option<String>,
     },
+    /// Server-side tool invocation reflected back to the client (mirrors the
+    /// non-streaming [`super::wire::ResponseContent::ServerToolUse`] variant).
+    /// Emitted by Anthropic when an `anthropic.web_search_*` /
+    /// `anthropic.code_execution_*` / `anthropic.web_fetch_*` /
+    /// `anthropic.tool_search_*` tool fires inline; the streaming SSE shape
+    /// is identical to the non-streaming `server_tool_use` content block.
+    /// Mirrors upstream `anthropic-language-model.ts:1671-1735`.
+    ServerToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Option<JsonValue>,
+    },
+    /// Streaming variant of [`super::wire::ResponseContent::WebSearchToolResult`].
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::WebFetchToolResult`].
+    #[serde(rename = "web_fetch_tool_result")]
+    WebFetchToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::CodeExecutionToolResult`].
+    #[serde(rename = "code_execution_tool_result")]
+    CodeExecutionToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::BashCodeExecutionToolResult`].
+    #[serde(rename = "bash_code_execution_tool_result")]
+    BashCodeExecutionToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::TextEditorCodeExecutionToolResult`].
+    #[serde(rename = "text_editor_code_execution_tool_result")]
+    TextEditorCodeExecutionToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::McpToolUse`].
+    #[serde(rename = "mcp_tool_use")]
+    McpToolUse(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::McpToolResult`].
+    #[serde(rename = "mcp_tool_result")]
+    McpToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::ToolSearchToolResult`].
+    #[serde(rename = "tool_search_tool_result")]
+    ToolSearchToolResult(JsonValue),
+    /// Streaming variant of [`super::wire::ResponseContent::AdvisorToolResult`].
+    #[serde(rename = "advisor_tool_result")]
+    AdvisorToolResult(JsonValue),
     #[serde(other)]
     Other,
 }
