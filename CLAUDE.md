@@ -398,3 +398,28 @@ Skills / Reranking / Speech / Transcription / 70+ typed server tool factories）
 5. 要求 subagent 输出："PASS" + 一句结论；或 "FAIL" + 缺失/偏差清单（按修复优先级排序）
 
 PASS 即可继续下一步；FAIL 则按清单修复后重审。审核结果摘要直接说给用户听，不要存到 memory。
+
+### Subagent 反误判规则（强制）
+
+近期对照审计中 subagent 报 FAIL 误判率 ~64%（第一轮 14 项 CRITICAL/HIGH 仅 5 项真成立）。根因：
+- 未读上游对应文件就猜"上游应该有 X"
+- 未追溯调用时机就断"A 与 B 两处不一致"
+- 未读完整 `match` 分支就声称"事件被忽略"
+- 未在脑里执行 `starts_with` / `contains` 表达式就否定路由逻辑
+- 把"上游可能有"当作"上游有"
+- 未逐字段对照就说"builder 不完整"
+
+启动审计 subagent 时，prompt **必须**强制以下证据链：
+
+1. **上游证据先行**：每条 "Rust 缺失 X" 断言必须先给出上游确切路径+行号+≥3 行代码证明上游真实现了 X。缺此证据则结论改为 "PASS / 上游同样不实现"。
+2. **多路径不一致必给 caller 链**：判定 "A 与 B 不一致" 时必须列出二者的实际 caller / 生命周期阶段，证明会被同一次调用同时命中。否则结论改为 "PASS / 独立路径"。
+3. **enum/match 必读全部分支**：判定 "事件被忽略" 时必须列出完整 `match` 的所有 variant 与对应处理，证明该 variant 在所有分支都未被处理。只看到一处 `=> {}` 不构成证据。
+4. **wire 字段必查 fixture**：判定 "字段未传递" 时优先查上游 `.test.ts` fixture / `__fixtures__` / snapshot 文件，schema 中存在字段不等于上游实际填充该字段。
+5. **字符串匹配必先执行一遍**：涉及 `starts_with` / `contains` / `match modelId` 这类路由判断时，必须把待测 model_id / tool_id 代入实际表达式得出 true/false 后再下结论。
+6. **默认 PASS、FAIL 门槛更高**：审计的默认结论是 PASS（与上游对齐）。判 FAIL 必须至少同时满足规则 1-5 中两项。
+
+**主 agent 责任**：subagent 报告呈给用户前，必须对每条 CRITICAL/HIGH 反向验证：
+- 给出最小可复现样例（用户怎么调用会触发该缺陷？）
+- 给出上游对应测试用例 / fixture（上游凭哪个测试证明它支持该能力？）
+
+任一项答不出来 → 该条降级为 LOW 或剔除，不得作为 CRITICAL/HIGH 上报。违反者整份报告重审。

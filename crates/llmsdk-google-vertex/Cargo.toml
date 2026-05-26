@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 async-trait = "0.1.89"
 bytes = "1.10.1"
+futures = "0.3.32"
 gcp_auth = "0.12.6"
 llmsdk-anthropic = { version = "0.1.0", path = "../llmsdk-anthropic" }
 llmsdk-google = { version = "0.1.0", path = "../llmsdk-google" }

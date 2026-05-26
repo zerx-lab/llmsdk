@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use llmsdk_openai::internal::{Inner as OpenAiInner, OpenAiChatModel, UrlStrategy};
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
-    CallOptions, GenerateResult, LanguageModel, StreamResult, SupportedUrls,
+    CallOptions, GenerateResult, LanguageModel, StreamPart, StreamResult, SupportedUrls, Usage,
 };
 
 use crate::PROVIDER_ID_XAI;
@@ -93,13 +94,82 @@ impl LanguageModel for GoogleVertexXaiChatModel {
         .collect()
     }
 
-    async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        self.delegate().await?.do_generate(options).await
+    async fn do_generate(&self, mut options: CallOptions) -> Result<GenerateResult, ProviderError> {
+        strip_xai_unsupported_fields(&mut options);
+        let mut result = self.delegate().await?.do_generate(options).await?;
+        result.usage = reconvert_xai_usage(result.usage);
+        Ok(result)
     }
 
-    async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        self.delegate().await?.do_stream(options).await
+    async fn do_stream(&self, mut options: CallOptions) -> Result<StreamResult, ProviderError> {
+        strip_xai_unsupported_fields(&mut options);
+        let result = self.delegate().await?.do_stream(options).await?;
+        let stream = result.stream.map(|item| match item {
+            Ok(StreamPart::Finish {
+                usage,
+                finish_reason,
+                provider_metadata,
+            }) => Ok(StreamPart::Finish {
+                usage: reconvert_xai_usage(usage),
+                finish_reason,
+                provider_metadata,
+            }),
+            other => other,
+        });
+        Ok(StreamResult {
+            stream: Box::pin(stream),
+            request: result.request,
+            response: result.response,
+        })
     }
+}
+
+/// Mirrors upstream `transformGoogleVertexXaiRequestBody`
+/// (`google-vertex/xai/google-vertex-xai-provider.ts:131-134`): Vertex's Grok
+/// endpoint rejects `reasoning_effort`, so we strip both the canonical
+/// `CallOptions::reasoning` field and the OpenAI-specific provider option
+/// before the OpenAI core builds the wire request.
+fn strip_xai_unsupported_fields(options: &mut CallOptions) {
+    options.reasoning = None;
+    if let Some(po) = options.provider_options.as_mut()
+        && let Some(openai) = po.get_mut("openai")
+    {
+        openai.remove("reasoningEffort");
+        openai.remove("reasoning_effort");
+    }
+}
+
+/// Mirrors upstream `convertGoogleVertexXaiUsage`
+/// (`google-vertex/xai/google-vertex-xai-provider.ts:89-129`): xAI on Vertex
+/// returns `completion_tokens` and `completion_tokens_details.reasoning_tokens`
+/// as *disjoint* counters, whereas mainline OpenAI treats `completion_tokens`
+/// as already including reasoning. The OpenAI core converter uses the mainline
+/// formula (`text = completion - reasoning`); we re-derive the totals from the
+/// preserved raw usage object so callers see the per-modality counters the
+/// Vertex Grok backend actually billed for.
+fn reconvert_xai_usage(mut usage: Usage) -> Usage {
+    let Some(raw) = usage.raw.as_ref() else {
+        return usage;
+    };
+    let completion = raw.get("completion_tokens").and_then(|v| v.as_u64());
+    let reasoning = raw
+        .get("completion_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64());
+    match (completion, reasoning) {
+        (Some(c), Some(r)) => {
+            usage.output_tokens.total = Some(c + r);
+            usage.output_tokens.text = Some(c);
+            usage.output_tokens.reasoning = Some(r);
+        }
+        (Some(c), None) => {
+            usage.output_tokens.total = Some(c);
+            usage.output_tokens.text = Some(c);
+            usage.output_tokens.reasoning = None;
+        }
+        _ => {}
+    }
+    usage
 }
 
 pub(crate) async fn build_openai_inner(
@@ -131,6 +201,8 @@ pub(crate) async fn build_openai_inner(
 mod tests {
     use super::*;
     use crate::config::GoogleVertex;
+    use llmsdk_provider::language_model::ReasoningEffort;
+    use serde_json::json;
 
     #[tokio::test]
     async fn xai_handle_reports_vertex_provider() {
@@ -147,5 +219,71 @@ mod tests {
         let urls = m.supported_urls().await;
         let v = urls.get("image/*").expect("image/* key");
         assert!(v.iter().any(|p| p.0.contains("https?")));
+    }
+
+    #[test]
+    fn strip_drops_reasoning_effort_from_both_sources() {
+        let mut po = HashMap::new();
+        let mut openai = serde_json::Map::new();
+        openai.insert("reasoningEffort".into(), json!("high"));
+        openai.insert("temperature".into(), json!(0.5));
+        po.insert("openai".to_owned(), openai);
+        let mut options = CallOptions {
+            provider_options: Some(po),
+            reasoning: Some(ReasoningEffort::High),
+            ..CallOptions::default()
+        };
+        strip_xai_unsupported_fields(&mut options);
+        assert!(options.reasoning.is_none());
+        let openai = options
+            .provider_options
+            .as_ref()
+            .and_then(|po| po.get("openai"))
+            .expect("openai bag preserved");
+        assert!(!openai.contains_key("reasoningEffort"));
+        assert!(openai.contains_key("temperature"));
+    }
+
+    #[test]
+    fn reconvert_xai_usage_splits_reasoning_from_completion() {
+        // Mirrors upstream test fixture
+        // `xai/google-vertex-xai-provider.test.ts:140-182`:
+        // completion=24, reasoning=124 → total=148, text=24, reasoning=124.
+        let mut raw = serde_json::Map::new();
+        raw.insert("prompt_tokens".into(), json!(10));
+        raw.insert("completion_tokens".into(), json!(24));
+        raw.insert(
+            "completion_tokens_details".into(),
+            json!({"reasoning_tokens": 124}),
+        );
+        let usage = Usage {
+            raw: Some(raw),
+            ..Usage::default()
+        };
+        let out = reconvert_xai_usage(usage);
+        assert_eq!(out.output_tokens.total, Some(148));
+        assert_eq!(out.output_tokens.text, Some(24));
+        assert_eq!(out.output_tokens.reasoning, Some(124));
+    }
+
+    #[test]
+    fn reconvert_xai_usage_handles_missing_reasoning_tokens() {
+        let mut raw = serde_json::Map::new();
+        raw.insert("completion_tokens".into(), json!(40));
+        let usage = Usage {
+            raw: Some(raw),
+            ..Usage::default()
+        };
+        let out = reconvert_xai_usage(usage);
+        assert_eq!(out.output_tokens.total, Some(40));
+        assert_eq!(out.output_tokens.text, Some(40));
+        assert!(out.output_tokens.reasoning.is_none());
+    }
+
+    #[test]
+    fn reconvert_xai_usage_noop_when_raw_absent() {
+        let usage = Usage::default();
+        let out = reconvert_xai_usage(usage.clone());
+        assert_eq!(out, usage);
     }
 }

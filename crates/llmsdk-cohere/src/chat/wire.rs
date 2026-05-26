@@ -132,7 +132,7 @@ pub(crate) enum WireUserPart {
 pub(crate) struct WireImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    pub detail: Option<super::options::CohereImageDetail>,
 }
 
 /// Assistant `tool_calls` entry.

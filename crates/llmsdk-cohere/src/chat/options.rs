@@ -5,7 +5,7 @@
 // Rust guideline compliant 2026-05-25
 
 use llmsdk_provider::shared::ProviderOptions;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Typed view of `provider_options["cohere"]` on the chat call.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -20,7 +20,24 @@ pub(crate) struct CohereChatOptions {
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct CohereImagePartOptions {
     /// Detail level passed through as `image_url.detail`.
-    pub detail: Option<String>,
+    ///
+    /// Mirrors upstream `z.enum(['auto', 'low', 'high'])` constraint from
+    /// `cohere-chat-language-model-options.ts:47`. Invalid string values are
+    /// silently coerced to `None` rather than propagating to the wire (the
+    /// upstream Zod schema rejects with an error; we drop and continue to
+    /// match the project's forgiving `parse_*` convention).
+    pub detail: Option<CohereImageDetail>,
+}
+
+/// Image fidelity level accepted by Cohere's `image_url.detail`.
+///
+/// Mirrors upstream Zod enum at `cohere-chat-language-model-options.ts:47`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CohereImageDetail {
+    Auto,
+    Low,
+    High,
 }
 
 /// `thinking` provider-options shape.
@@ -50,6 +67,12 @@ pub(crate) fn parse(options: Option<&ProviderOptions>) -> CohereChatOptions {
 }
 
 /// Parse the `cohere` slot of a user-file `provider_options`.
+///
+/// Fields are extracted individually so an invalid value on one field
+/// (e.g. `detail: "medium"`) does not nuke the whole struct — it just
+/// drops that one field. The upstream Zod schema instead rejects the
+/// entire payload, but `llmsdk-cohere` already follows a forgiving
+/// `parse_*` convention everywhere else.
 pub(crate) fn parse_image_part(options: Option<&ProviderOptions>) -> CohereImagePartOptions {
     let Some(map) = options else {
         return CohereImagePartOptions::default();
@@ -57,8 +80,10 @@ pub(crate) fn parse_image_part(options: Option<&ProviderOptions>) -> CohereImage
     let Some(cohere) = map.get("cohere") else {
         return CohereImagePartOptions::default();
     };
-    serde_json::from_value::<CohereImagePartOptions>(serde_json::Value::Object(cohere.clone()))
-        .unwrap_or_default()
+    let detail = cohere
+        .get("detail")
+        .and_then(|v| serde_json::from_value::<CohereImageDetail>(v.clone()).ok());
+    CohereImagePartOptions { detail }
 }
 
 #[cfg(test)]
@@ -93,7 +118,29 @@ mod tests {
     fn parses_image_detail() {
         let po = opts_with(&json!({"detail": "high"}));
         let parsed = parse_image_part(Some(&po));
-        assert_eq!(parsed.detail.as_deref(), Some("high"));
+        assert_eq!(parsed.detail, Some(CohereImageDetail::High));
+    }
+
+    #[test]
+    fn parses_image_detail_all_variants() {
+        for (s, want) in [
+            ("auto", CohereImageDetail::Auto),
+            ("low", CohereImageDetail::Low),
+            ("high", CohereImageDetail::High),
+        ] {
+            let po = opts_with(&json!({"detail": s}));
+            let parsed = parse_image_part(Some(&po));
+            assert_eq!(parsed.detail, Some(want));
+        }
+    }
+
+    #[test]
+    fn invalid_image_detail_silently_dropped() {
+        // Mirrors upstream Zod enum constraint: "medium" is not a valid
+        // value, so it must not propagate to the wire.
+        let po = opts_with(&json!({"detail": "medium"}));
+        let parsed = parse_image_part(Some(&po));
+        assert!(parsed.detail.is_none());
     }
 
     #[test]
