@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
     CallOptions, GenerateResult, LanguageModel, ReasoningEffort, ResponseFormat, StreamResult,
+    SupportedUrls, UrlPattern,
 };
 use llmsdk_provider::shared::Warning;
 use llmsdk_provider_utils::http::{JsonRequest, post_for_stream, post_json, response_byte_stream};
@@ -57,6 +58,14 @@ impl LanguageModel for XaiChatModel {
 
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    async fn supported_urls(&self) -> SupportedUrls {
+        // Mirrors `xai-chat-language-model.ts:79-81`: only `image/*` URLs are
+        // forwarded natively; PDF / text content must be inlined as data parts.
+        let mut map = SupportedUrls::new();
+        map.insert("image/*".into(), vec![UrlPattern::new(r"^https?://.*$")]);
+        map
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
@@ -483,6 +492,18 @@ mod tests {
         assert!(req.tools.is_some());
         let choice = serde_json::to_value(req.tool_choice.unwrap()).unwrap();
         assert_eq!(choice, json!("required"));
+    }
+
+    #[tokio::test]
+    async fn supported_urls_advertises_https_image_only() {
+        let p = crate::Xai::builder().api_key("k").build().expect("ok");
+        let m = p.chat("grok-4.3");
+        let urls = m.supported_urls().await;
+        let patterns = urls.get("image/*").expect("image/* key");
+        assert!(patterns.iter().any(|p| p.0.contains("https?")));
+        // Mirrors xai-chat-language-model.ts: PDF / text are inlined, not URL-fetched.
+        assert!(!urls.contains_key("application/pdf"));
+        assert!(!urls.contains_key("text/*"));
     }
 
     #[test]

@@ -92,7 +92,7 @@ impl VertexInner {
             VertexAuthMode::Express { .. } => EXPRESS_MODE_BASE_URL.to_owned(),
             VertexAuthMode::OAuth {
                 project, location, ..
-            } => standard_publishers_url(project, location, "google"),
+            } => standard_publishers_url(project, location, "google", GOOGLE_API_VERSION),
         }
     }
 
@@ -108,7 +108,7 @@ impl VertexInner {
             }
             VertexAuthMode::OAuth {
                 project, location, ..
-            } => standard_publishers_url(project, location, "anthropic"),
+            } => standard_publishers_url(project, location, "anthropic", ANTHROPIC_API_VERSION),
         }
     }
 
@@ -138,14 +138,29 @@ impl VertexInner {
     }
 }
 
-fn standard_publishers_url(project: &str, location: &str, publisher: &str) -> String {
+/// Vertex Gemini publishers path uses the `v1beta1` Google API surface
+/// (mirrors ai-sdk `google-vertex-provider-base.ts:171`). Required for
+/// preview-tier features like `cachedContent`, `thinkingConfig`, and
+/// `responseModalities`; `v1` rejects these fields.
+const GOOGLE_API_VERSION: &str = "v1beta1";
+
+/// Anthropic-on-Vertex publishers path stays on the stable `v1` API
+/// surface (mirrors ai-sdk `anthropic/google-vertex-anthropic-provider.ts:192`).
+const ANTHROPIC_API_VERSION: &str = "v1";
+
+fn standard_publishers_url(
+    project: &str,
+    location: &str,
+    publisher: &str,
+    api_version: &str,
+) -> String {
     let region = if location == "global" {
         String::new()
     } else {
         format!("{location}-")
     };
     format!(
-        "https://{region}aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}"
+        "https://{region}aiplatform.googleapis.com/{api_version}/projects/{project}/locations/{location}/publishers/{publisher}"
     )
 }
 
@@ -495,7 +510,7 @@ mod tests {
         assert_eq!(p.auth_mode().label(), "oauth");
         assert_eq!(
             p.inner.publishers_google_base(),
-            "https://us-central1-aiplatform.googleapis.com/v1/projects/acme/locations/us-central1/publishers/google"
+            "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/acme/locations/us-central1/publishers/google"
         );
     }
 
@@ -509,7 +524,7 @@ mod tests {
             .expect("ok");
         assert_eq!(
             p.inner.publishers_google_base(),
-            "https://aiplatform.googleapis.com/v1/projects/acme/locations/global/publishers/google"
+            "https://aiplatform.googleapis.com/v1beta1/projects/acme/locations/global/publishers/google"
         );
     }
 

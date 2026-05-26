@@ -54,6 +54,7 @@
 - TS `Uint8Array` → `bytes::Bytes`
 - TS `AbortSignal` → 不在 trait 暴露；调用方靠 drop future / stream 取消
 - JSON wire 字段名保持与 ai-sdk 一致（`providerOptions` / `toolCallId` 等），Rust 侧用 snake_case + serde rename
+- Rust API 命名遵循 Rust 习惯（snake_case），不照搬 TS camelCase 别名（例：TS `embeddingModel` ↔ Rust `embedding_model`，不另起 `embeddingModel` 方法）；命名差异不算"未对齐"
 - 每个 `.rs` 文件顶部用 `//! Mirrors <ai-sdk relative path>` 注释指出对照文件
 
 ## 里程碑约束（强制）
