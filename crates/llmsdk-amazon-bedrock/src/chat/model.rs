@@ -321,16 +321,53 @@ pub(crate) fn build_request(
         &mut warnings,
     );
 
-    // Anthropic thinking ('enabled' | 'adaptive') is incompatible with both
-    // topK and topP on Anthropic-on-Bedrock — strip both with a warning.
-    // Mirrors amazon-bedrock-chat-language-model.ts:363-372.
-    let thinking_active = bedrock_opts
+    // Mirror upstream amazon-bedrock-chat-language-model.ts:239-298:
+    // capture the per-axis thinking knobs from the resolved reasoning
+    // config and route them into either `additionalModelRequestFields`
+    // (Anthropic + thinking) or surface warnings.
+    let is_anthropic_model = model_id.contains("anthropic.") || model_id.contains("claude");
+    let is_openai_model = model_id.contains("openai.");
+    let thinking_type = bedrock_opts
         .reasoning_config
         .as_ref()
-        .is_some_and(|rc| matches!(rc.kind.as_deref(), Some("enabled" | "adaptive")));
+        .and_then(|rc| rc.kind.clone());
+    let thinking_budget = match thinking_type.as_deref() {
+        Some("enabled") => bedrock_opts
+            .reasoning_config
+            .as_ref()
+            .and_then(|rc| rc.budget_tokens),
+        _ => None,
+    };
+    let thinking_display = match thinking_type.as_deref() {
+        Some("adaptive") => bedrock_opts
+            .reasoning_config
+            .as_ref()
+            .and_then(|rc| rc.display.clone()),
+        _ => None,
+    };
+    let is_thinking_enabled = matches!(thinking_type.as_deref(), Some("enabled" | "adaptive"));
+    let is_anthropic_thinking_enabled = is_anthropic_model && is_thinking_enabled;
+    let max_reasoning_effort = bedrock_opts
+        .reasoning_config
+        .as_ref()
+        .and_then(|rc| rc.max_reasoning_effort.clone());
+
+    // Anthropic thinking ('enabled' | 'adaptive') is incompatible with
+    // temperature / topP / topK on Anthropic-on-Bedrock — strip all three
+    // with a warning. Mirrors amazon-bedrock-chat-language-model.ts:345-372.
     let mut top_k = options.top_k;
     let mut top_p = options.top_p;
-    if thinking_active {
+    if is_anthropic_thinking_enabled {
+        if temperature.is_some() {
+            warnings.push(Warning::Unsupported {
+                feature: "temperature".into(),
+                details: Some(
+                    "temperature is not supported when Anthropic thinking is enabled; dropped"
+                        .into(),
+                ),
+            });
+            temperature = None;
+        }
         if top_k.is_some() {
             warnings.push(Warning::Unsupported {
                 feature: "topK".into(),
@@ -349,10 +386,44 @@ pub(crate) fn build_request(
             });
             top_p = None;
         }
+    } else if !is_anthropic_model {
+        if bedrock_opts
+            .reasoning_config
+            .as_ref()
+            .and_then(|rc| rc.budget_tokens)
+            .is_some()
+        {
+            warnings.push(Warning::Unsupported {
+                feature: "budgetTokens".into(),
+                details: Some(
+                    "budgetTokens applies only to Anthropic models on Bedrock and will be ignored \
+                     for this model."
+                        .into(),
+                ),
+            });
+        }
+        if matches!(thinking_type.as_deref(), Some("adaptive")) {
+            warnings.push(Warning::Unsupported {
+                feature: "adaptive thinking".into(),
+                details: Some(
+                    "adaptive thinking type applies only to Anthropic models on Bedrock.".into(),
+                ),
+            });
+        }
     }
 
+    // Compute the final `max_tokens`. When Anthropic thinking is enabled
+    // with an explicit budget, the budget must be *added* to the user's
+    // `max_output_tokens` (or default 4096 when absent). Mirrors upstream
+    // amazon-bedrock-chat-language-model.ts:260-263.
+    let max_tokens_resolved = match (options.max_output_tokens, thinking_budget) {
+        (Some(mx), Some(b)) if is_anthropic_thinking_enabled => Some(mx + b),
+        (None, Some(b)) if is_anthropic_thinking_enabled => Some(b + 4096),
+        (mx, _) => mx,
+    };
+
     let mut inference_config = super::wire::InferenceConfig {
-        max_tokens: options.max_output_tokens,
+        max_tokens: max_tokens_resolved,
         temperature,
         top_p,
         top_k,
@@ -408,6 +479,67 @@ pub(crate) fn build_request(
         );
         m.insert("anthropic_beta".to_owned(), list);
     }
+
+    // Inject `thinking` into `additionalModelRequestFields` for
+    // Anthropic + thinking-enabled requests. Mirrors upstream
+    // amazon-bedrock-chat-language-model.ts:258-298.
+    if is_anthropic_thinking_enabled {
+        let m = merged.get_or_insert_with(serde_json::Map::new);
+        if let Some(b) = thinking_budget {
+            // `thinking: { type: 'enabled', budget_tokens: <budget> }`
+            let mut block = serde_json::Map::new();
+            block.insert(
+                "type".to_owned(),
+                serde_json::Value::String("enabled".to_owned()),
+            );
+            block.insert("budget_tokens".to_owned(), serde_json::Value::from(b));
+            m.insert("thinking".to_owned(), serde_json::Value::Object(block));
+        } else if matches!(thinking_type.as_deref(), Some("adaptive")) {
+            // `thinking: { type: 'adaptive', display?: <display> }`
+            let mut block = serde_json::Map::new();
+            block.insert(
+                "type".to_owned(),
+                serde_json::Value::String("adaptive".to_owned()),
+            );
+            if let Some(d) = thinking_display {
+                block.insert("display".to_owned(), serde_json::Value::String(d));
+            }
+            m.insert("thinking".to_owned(), serde_json::Value::Object(block));
+        }
+    }
+
+    // Route `max_reasoning_effort` based on model family. Mirrors upstream
+    // amazon-bedrock-chat-language-model.ts:300-330.
+    if let Some(eff) = max_reasoning_effort {
+        let m = merged.get_or_insert_with(serde_json::Map::new);
+        if is_anthropic_model {
+            // Anthropic on Bedrock: nest under `output_config.effort`.
+            let mut oc = match m.get("output_config") {
+                Some(serde_json::Value::Object(existing)) => existing.clone(),
+                _ => serde_json::Map::new(),
+            };
+            oc.insert("effort".to_owned(), serde_json::Value::String(eff));
+            m.insert("output_config".to_owned(), serde_json::Value::Object(oc));
+        } else if is_openai_model {
+            // OpenAI on Bedrock: flat `reasoning_effort`.
+            m.insert(
+                "reasoning_effort".to_owned(),
+                serde_json::Value::String(eff),
+            );
+        } else {
+            // Other models (e.g. Nova 2): use `reasoningConfig` envelope.
+            let mut rc = serde_json::Map::new();
+            if let Some(t) = thinking_type.as_deref().filter(|t| *t != "adaptive") {
+                rc.insert("type".to_owned(), serde_json::Value::String(t.to_owned()));
+            }
+            rc.insert(
+                "maxReasoningEffort".to_owned(),
+                serde_json::Value::String(eff),
+            );
+            m.insert("reasoningConfig".to_owned(), serde_json::Value::Object(rc));
+        }
+    }
+
     let merged_extras = merged.map(serde_json::Value::Object);
 
     let request = ConverseRequest {
@@ -503,5 +635,71 @@ mod tests {
             .additional_model_response_field_paths
             .unwrap();
         assert!(paths.iter().any(|p| p == "/delta/stop_sequence"));
+    }
+
+    fn opts_with_provider(map: serde_json::Map<String, serde_json::Value>) -> CallOptions {
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        po.insert("amazonBedrock".into(), map);
+        let mut o = opts();
+        o.provider_options = Some(po);
+        o.max_output_tokens = Some(1024);
+        o
+    }
+
+    #[test]
+    fn anthropic_thinking_enabled_injects_thinking_and_inflates_max_tokens() {
+        // Mirrors upstream amazon-bedrock-chat-language-model.ts:258-271 +
+        // ai-sdk #14582: `reasoningConfig: { type: 'enabled', budgetTokens }`
+        // must surface as additionalModelRequestFields.thinking and shift
+        // max_tokens by budget.
+        let mut rc = serde_json::Map::new();
+        rc.insert("type".into(), serde_json::json!("enabled"));
+        rc.insert("budgetTokens".into(), serde_json::json!(2048));
+        let mut p = serde_json::Map::new();
+        p.insert("reasoningConfig".into(), serde_json::Value::Object(rc));
+        let prepared = build_request(
+            "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            &opts_with_provider(p),
+            false,
+        )
+        .unwrap();
+        let extras = prepared
+            .request
+            .additional_model_request_fields
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .expect("extras object present");
+        let thinking = extras.get("thinking").expect("thinking block injected");
+        assert_eq!(thinking["type"], serde_json::json!("enabled"));
+        assert_eq!(thinking["budget_tokens"], serde_json::json!(2048));
+        // 1024 user max + 2048 budget = 3072.
+        let inference = prepared.request.inference_config.unwrap();
+        assert_eq!(inference.max_tokens, Some(3072));
+    }
+
+    #[test]
+    fn anthropic_adaptive_thinking_with_display_routes_to_thinking_adaptive() {
+        // Mirrors upstream ai-sdk #14582: `reasoningConfig: { type:
+        // 'adaptive', display }` → `thinking: { type: 'adaptive', display }`.
+        let mut rc = serde_json::Map::new();
+        rc.insert("type".into(), serde_json::json!("adaptive"));
+        rc.insert("display".into(), serde_json::json!("summarized"));
+        let mut p = serde_json::Map::new();
+        p.insert("reasoningConfig".into(), serde_json::Value::Object(rc));
+        let prepared = build_request(
+            "anthropic.claude-opus-4-7-20251001-v1:0",
+            &opts_with_provider(p),
+            false,
+        )
+        .unwrap();
+        let extras = prepared
+            .request
+            .additional_model_request_fields
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .expect("extras object present");
+        let thinking = extras.get("thinking").expect("thinking block injected");
+        assert_eq!(thinking["type"], serde_json::json!("adaptive"));
+        assert_eq!(thinking["display"], serde_json::json!("summarized"));
     }
 }

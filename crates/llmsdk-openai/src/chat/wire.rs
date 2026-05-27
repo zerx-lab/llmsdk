@@ -115,7 +115,12 @@ pub(crate) enum WireMessage {
         content: WireUserContent,
     },
     Assistant {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        // Always emit the `content` key (no `skip_serializing_if`). OpenAI
+        // requires `content: null` when `tool_calls` is present and an
+        // empty string `""` otherwise — mirrors upstream
+        // `convert-to-openai-chat-messages.ts:204` + #14950. `None` ↦ JSON
+        // `null`; `Some(s)` ↦ JSON string. Callers must explicitly choose
+        // the right variant when assembling the message.
         content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<WireToolCall>>,

@@ -316,8 +316,26 @@ fn convert_assistant(parts: &[AssistantPart], warnings: &mut Vec<Warning>) -> Wi
         }
     }
 
+    // Mirror upstream `convert-to-openai-chat-messages.ts:204` after #14950 +
+    // #13744:
+    //
+    //   content: toolCalls.length > 0 ? text || null : text
+    //
+    // - With tool_calls: empty text becomes JSON `null` (OpenAI requires
+    //   `content: null` when `tool_calls` is set, otherwise the API throws
+    //   "Missing required parameter: tool_calls[].id" — see #13744).
+    // - Without tool_calls: empty text becomes `""` (OpenAI rejects
+    //   `content: null` with "Invalid value for 'content': expected a
+    //   string, got null" — see #14950).
+    let content = if tool_calls.is_empty() {
+        Some(text_buf)
+    } else if text_buf.is_empty() {
+        None
+    } else {
+        Some(text_buf)
+    };
     WireMessage::Assistant {
-        content: (!text_buf.is_empty()).then_some(text_buf),
+        content,
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
     }
 }
@@ -473,6 +491,60 @@ mod tests {
         {
             assert!(p.is_empty());
         }
+    }
+
+    #[test]
+    fn assistant_tool_only_sends_null_content() {
+        // Mirrors upstream
+        // `convert-to-openai-chat-messages.test.ts` "should send null content
+        // for assistant messages with tool calls" + ai-sdk #14950: when an
+        // assistant message has tool_calls and an empty text body, the wire
+        // `content` field must be JSON `null`, not omitted, not `""`.
+        let prompt = vec![Message::Assistant {
+            content: vec![AssistantPart::ToolCall(ToolCallPart {
+                tool_call_id: "call_1".into(),
+                tool_name: "weather".into(),
+                input: serde_json::json!({}),
+                provider_executed: None,
+                dynamic: None,
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&prompt, SystemRole::System);
+        let wire = serde_json::to_value(&out[0]).expect("serializes");
+        assert_eq!(
+            wire.get("content"),
+            Some(&serde_json::Value::Null),
+            "content must be explicit null when tool_calls is present and text is empty"
+        );
+    }
+
+    #[test]
+    fn assistant_empty_text_no_tools_sends_empty_string_content() {
+        // Mirrors upstream
+        // `convert-to-openai-chat-messages.test.ts` "should send empty
+        // string content for assistant messages with no tool calls" +
+        // ai-sdk #14950: without tool_calls, empty text becomes `""`, not
+        // `null` (OpenAI rejects null content when tool_calls is absent).
+        let prompt = vec![Message::Assistant {
+            content: vec![AssistantPart::Text(TextPart {
+                text: String::new(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let (out, _) = convert_prompt(&prompt, SystemRole::System);
+        let wire = serde_json::to_value(&out[0]).expect("serializes");
+        assert_eq!(
+            wire.get("content"),
+            Some(&serde_json::Value::String(String::new())),
+            "content must be empty string when no tool_calls"
+        );
+        assert!(
+            wire.get("tool_calls").is_none(),
+            "tool_calls must be omitted when empty"
+        );
     }
 
     #[test]
