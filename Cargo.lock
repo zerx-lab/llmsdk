@@ -1085,7 +1085,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llmsdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "llmsdk-amazon-bedrock",
  "llmsdk-anthropic",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-amazon-bedrock"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-anthropic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-anthropic-aws"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "llmsdk-anthropic",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-azure"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-cohere"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-google"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-google-vertex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-mistral"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-openai"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-provider-utils"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "llmsdk-xai"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",

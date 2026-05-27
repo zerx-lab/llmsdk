@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - 2026-05-27
+## [0.1.1] - 2026-05-27
+
+**修复发布**：补齐 crates.io 上 12 个子 crate（`llmsdk-provider` /
+`llmsdk-provider-utils` / 10 个 provider crate）。`llmsdk@0.1.0` 因 12
+个内部依赖未发布到 crates.io 而无法安装，已 `cargo yank`，请改用
+`0.1.1`。本版本无功能变更。
+
+## [0.1.0] - 2026-05-27 \[YANKED\]
+
+> ⚠️ 该版本已 yank：umbrella crate `llmsdk@0.1.0` 依赖的 12 个内部
+> crate 未同步发布到 crates.io，下游 `cargo add llmsdk` 会立刻编译失败。
+> 请使用 `0.1.1`。
 
 首个公开 release —— Vercel `ai-sdk` 的 Rust 实现，目标是用 Rust 惯用法
 完整复刻 `ai-sdk` v4 的 provider/middleware/model 抽象与一线大厂全部端点。
@@ -247,4 +258,5 @@ middleware，与 `@ai-sdk/provider` v4 一一对应：
 - Rust 侧 trait 表面在 M1–M14 期间共 14 处变更，**全部为新增/补漏**，
   无破坏性历史
 
+[0.1.1]: https://github.com/zerx-lab/llmsdk/releases/tag/v0.1.1
 [0.1.0]: https://github.com/zerx-lab/llmsdk/releases/tag/v0.1.0

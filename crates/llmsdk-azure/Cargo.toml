@@ -11,14 +11,14 @@ description = "Azure OpenAI provider for llmsdk (Rust port of @ai-sdk/azure)"
 workspace = true
 
 [dependencies]
-llmsdk-openai = { version = "0.1.0", path = "../llmsdk-openai" }
-llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
-llmsdk-provider-utils = { version = "0.1.0", path = "../llmsdk-provider-utils" }
+llmsdk-openai = { version = "0.1.1", path = "../llmsdk-openai" }
+llmsdk-provider = { version = "0.1.1", path = "../llmsdk-provider" }
+llmsdk-provider-utils = { version = "0.1.1", path = "../llmsdk-provider-utils" }
 
 [dev-dependencies]
 async-trait = "0.1.89"
 futures = "0.3.32"
-llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
+llmsdk-provider = { version = "0.1.1", path = "../llmsdk-provider" }
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["macros", "rt", "rt-multi-thread"] }
 wiremock = "0.6.5"

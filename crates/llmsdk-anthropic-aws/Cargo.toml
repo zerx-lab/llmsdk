@@ -12,9 +12,9 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
-llmsdk-anthropic = { version = "0.1.0", path = "../llmsdk-anthropic" }
-llmsdk-provider = { version = "0.1.0", path = "../llmsdk-provider" }
-llmsdk-provider-utils = { version = "0.1.0", path = "../llmsdk-provider-utils", features = ["aws-sigv4"] }
+llmsdk-anthropic = { version = "0.1.1", path = "../llmsdk-anthropic" }
+llmsdk-provider = { version = "0.1.1", path = "../llmsdk-provider" }
+llmsdk-provider-utils = { version = "0.1.1", path = "../llmsdk-provider-utils", features = ["aws-sigv4"] }
 
 [dev-dependencies]
 serde_json = "1.0.150"
