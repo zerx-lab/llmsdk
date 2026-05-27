@@ -51,7 +51,7 @@ impl Default for ConvertCtx<'_> {
 /// Convert one [`Prompt`] into a flat `input[]` array for the Responses API.
 #[must_use]
 pub fn convert_prompt(prompt: &[Message], ctx: &ConvertCtx<'_>) -> (Vec<InputItem>, Vec<Warning>) {
-    let mut items = Vec::new();
+    let mut items: Vec<InputItem> = Vec::new();
     let mut warnings = Vec::new();
 
     for message in prompt {
@@ -97,6 +97,39 @@ pub fn convert_prompt(prompt: &[Message], ctx: &ConvertCtx<'_>) -> (Vec<InputIte
             Message::Tool { content, .. } => {
                 convert_tool_message(content, ctx, &mut items, &mut warnings);
             }
+        }
+    }
+
+    // Mirror upstream convert-to-openai-responses-input.ts:724-742 (ai-sdk
+    // #13234): when `store: false`, the Responses API rejects reasoning
+    // items that lack `encrypted_content`. Drop those items and emit a
+    // single combined warning. Reasoning items with encrypted_content are
+    // safely re-sent because the encrypted blob carries the server state.
+    if !ctx.store {
+        let any_missing = items.iter().any(|it| {
+            matches!(
+                it,
+                InputItem::Typed(TypedInputItem::Reasoning {
+                    encrypted_content: None,
+                    ..
+                })
+            )
+        });
+        if any_missing {
+            warnings.push(Warning::Other {
+                message: "Reasoning parts without encrypted content are not supported when store \
+                          is false. Skipping reasoning parts."
+                    .to_owned(),
+            });
+            items.retain(|it| {
+                !matches!(
+                    it,
+                    InputItem::Typed(TypedInputItem::Reasoning {
+                        encrypted_content: None,
+                        ..
+                    })
+                )
+            });
         }
     }
 
@@ -1024,6 +1057,89 @@ mod tests {
             json!({"itemId": id}).as_object().unwrap().clone(),
         );
         po
+    }
+
+    #[test]
+    fn reasoning_without_encrypted_content_dropped_when_store_false() {
+        // Mirrors upstream ai-sdk #13234
+        // (`convert-to-openai-responses-input.test.ts` "should drop
+        // reasoning parts without encrypted content when store: false"):
+        // OpenAI Responses rejects reasoning items lacking
+        // `encrypted_content` once `store: false`, so the converter must
+        // filter them out with a warning. Reasoning items that carry
+        // `reasoningEncryptedContent` should pass through unchanged.
+        let p = vec![Message::Assistant {
+            content: vec![
+                AssistantPart::Reasoning {
+                    text: "no encrypted".into(),
+                    provider_options: Some(po_with_item_id("rs_no_enc")),
+                },
+                AssistantPart::Reasoning {
+                    text: "has encrypted".into(),
+                    provider_options: {
+                        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+                        po.insert(
+                            "openai".into(),
+                            json!({
+                                "itemId": "rs_enc",
+                                "reasoningEncryptedContent": "abc",
+                            })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        );
+                        Some(po)
+                    },
+                },
+            ],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                store: false,
+                ..Default::default()
+            },
+        );
+        // Only the reasoning with encrypted_content survives.
+        assert_eq!(out.len(), 1);
+        let Some(InputItem::Typed(TypedInputItem::Reasoning {
+            encrypted_content, ..
+        })) = out.first()
+        else {
+            panic!("expected reasoning item");
+        };
+        assert_eq!(encrypted_content.as_deref(), Some("abc"));
+        // Single combined warning surfaced.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| matches!(w, Warning::Other { message } if message.contains("encrypted"))),
+            "expected encrypted-content warning"
+        );
+    }
+
+    #[test]
+    fn reasoning_without_encrypted_content_kept_when_store_true() {
+        // Negative test: with `store: true` (default), all reasoning items
+        // pass through regardless of encrypted_content, mirroring upstream
+        // behaviour where the server retains state.
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Reasoning {
+                text: "thinking".into(),
+                provider_options: Some(po_with_item_id("rs_1")),
+            }],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(
+            &p,
+            &ConvertCtx {
+                store: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert!(warnings.is_empty());
     }
 
     #[test]
