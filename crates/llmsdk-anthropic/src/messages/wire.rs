@@ -276,6 +276,70 @@ pub(crate) enum WireAssistantPart {
     },
     /// Redacted thinking block — opaque to clients (no `cache_control`).
     RedactedThinking { data: String },
+    /// Server-executed `web_fetch` tool result echoed back. Mirrors
+    /// `convert-to-anthropic-prompt.ts:974-1035`.
+    WebFetchToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `web_search` tool result echoed back. Mirrors
+    /// `convert-to-anthropic-prompt.ts:1037-1087`.
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `code_execution` tool result (20250522 / 20260120
+    /// envelope variants). Mirrors `convert-to-anthropic-prompt.ts:830-971`.
+    CodeExecutionToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `bash_code_execution` tool result (`code_execution_20250825`
+    /// sub-variant). Mirrors `convert-to-anthropic-prompt.ts:846-855, 956-961`.
+    BashCodeExecutionToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `text_editor_code_execution` tool result. Mirrors
+    /// `convert-to-anthropic-prompt.ts:963-969`.
+    TextEditorCodeExecutionToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `mcp_tool_result`. Mirrors `convert-to-anthropic-prompt.ts:806-814`.
+    McpToolResult {
+        tool_use_id: String,
+        is_error: bool,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `tool_search_tool_result`. Mirrors
+    /// `convert-to-anthropic-prompt.ts:1089-1125`.
+    ToolSearchToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+    /// Server-executed `advisor_tool_result`. Mirrors
+    /// `convert-to-anthropic-prompt.ts:1128-1175`.
+    AdvisorToolResult {
+        tool_use_id: String,
+        content: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
 }
 
 /// `tools[]` entry.

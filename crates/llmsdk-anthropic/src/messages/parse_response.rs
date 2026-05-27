@@ -152,16 +152,31 @@ pub(crate) fn parse_response(
                 }));
             }
             ResponseContent::ServerToolUse { id, name, input } => {
-                // Mark code_execution invocations as dynamic when the request
-                // enabled web_*_20260209 without an explicit code_execution
-                // tool. Mirrors upstream anthropic-language-model.ts:1028-1031
-                // and :1058-1060.
-                let dynamic =
-                    (mark_code_execution_dynamic && name == "code_execution").then_some(true);
+                // Two name-mapping rules from upstream
+                // anthropic-language-model.ts:1009-1061:
+                //
+                // 1. `bash_code_execution` / `text_editor_code_execution`
+                //    (the `code_execution_20250825` sub-tools) collapse to
+                //    the unified `code_execution` provider tool name. The
+                //    sub-tool identity is preserved by injecting `type:
+                //    "<original_name>"` into the input.
+                // 2. `code_execution` invocations with `{code}` input but no
+                //    `type` field get a `programmatic-tool-call` type
+                //    injected so downstream consumers see a consistent
+                //    shape.
+                //
+                // After mapping, calls to the unified `code_execution` name
+                // get marked `dynamic: true` when the request enabled web
+                // tools without an explicit code_execution tool — bypasses
+                // strict tool validation (mirrors upstream
+                // `markCodeExecutionDynamic`).
+                let (mapped_name, mapped_input) = remap_code_execution_subtool(&name, input);
+                let dynamic = (mark_code_execution_dynamic && mapped_name == "code_execution")
+                    .then_some(true);
                 content.push(Content::ToolCall(ToolCallPart {
                     tool_call_id: id,
-                    tool_name: name,
-                    input,
+                    tool_name: mapped_name,
+                    input: mapped_input,
                     provider_executed: Some(true),
                     dynamic,
                     provider_options: None,
@@ -486,6 +501,45 @@ fn extract_mcp_call_meta(v: &JsonValue) -> (String, String, Option<String>) {
         .and_then(JsonValue::as_str)
         .map(str::to_owned);
     (id, name, server_name)
+}
+
+/// Apply the `code_execution_20250825` sub-tool collapsing + the
+/// `programmatic-tool-call` input shape injection. Returns
+/// `(mapped_name, mapped_input)`.
+///
+/// Mirrors upstream `anthropic-language-model.ts:1009-1061`. Used by both
+/// streaming and non-streaming `server_tool_use` handling paths.
+pub(crate) fn remap_code_execution_subtool(name: &str, input: JsonValue) -> (String, JsonValue) {
+    // Rule 1: bash/text_editor subtool → collapse to `code_execution` and
+    // preserve the sub-tool name as `type` inside the input object.
+    if name == "bash_code_execution" || name == "text_editor_code_execution" {
+        let mut obj = match input {
+            JsonValue::Object(map) => map,
+            _ => Map::new(),
+        };
+        obj.insert("type".into(), JsonValue::String(name.to_owned()));
+        return ("code_execution".to_owned(), JsonValue::Object(obj));
+    }
+
+    // Rule 2: programmatic-tool-call injection. When `code_execution` has
+    // a `code` field but no `type`, prepend `type: "programmatic-tool-call"`.
+    if name == "code_execution"
+        && let Some(map) = input.as_object()
+        && map.contains_key("code")
+        && !map.contains_key("type")
+    {
+        let mut new_obj = Map::new();
+        new_obj.insert(
+            "type".into(),
+            JsonValue::String("programmatic-tool-call".into()),
+        );
+        for (k, v) in map {
+            new_obj.insert(k.clone(), v.clone());
+        }
+        return ("code_execution".to_owned(), JsonValue::Object(new_obj));
+    }
+
+    (name.to_owned(), input)
 }
 
 /// Build the `anthropic` slot of an MCP tool-call's provider metadata.

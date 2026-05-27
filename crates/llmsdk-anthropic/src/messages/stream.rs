@@ -54,6 +54,16 @@ enum BlockKind {
         /// frame can attach it via `provider_metadata.anthropic.caller`,
         /// mirroring upstream `anthropic-language-model.ts:1659`.
         caller: Option<JsonValue>,
+        /// `true` until the first non-empty `input_json_delta` arrives. Used
+        /// to inject `"type": "programmatic-tool-call"` into the *first*
+        /// streaming delta for the unified `code_execution` provider tool.
+        /// Mirrors upstream `anthropic-language-model.ts:2241-2249`'s
+        /// `firstDelta` flag. Initialized `true` at `content_block_start`,
+        /// flipped to `false` once any delta has been buffered (including
+        /// inline input that arrives with `server_tool_use`'s opening
+        /// frame), per the upstream rule "only set firstDelta: true when no
+        /// input has been buffered yet".
+        first_delta: bool,
     },
     /// Extended-thinking block; tracks the latest signature observed via
     /// `signature_delta`.
@@ -254,13 +264,16 @@ impl StreamState {
                     name,
                     arguments,
                     caller,
+                    ..
                 } => {
+                    let dynamic = (self.mark_code_execution_dynamic && name == "code_execution")
+                        .then_some(true);
                     out.push(StreamPart::ToolInputEnd {
                         id: id.clone(),
                         provider_metadata: None,
                     });
                     out.push(StreamPart::ToolCall(build_tool_call(
-                        id, name, arguments, caller,
+                        id, name, arguments, caller, dynamic,
                     )));
                 }
                 BlockKind::Reasoning { id } => out.push(StreamPart::ReasoningEnd {
@@ -376,6 +389,9 @@ impl StreamState {
                         name: name.clone(),
                         arguments: arguments.clone(),
                         caller: normalized_caller,
+                        // Inline input already buffered? Then `firstDelta`
+                        // must start `false` so we don't double-prefix later.
+                        first_delta: arguments.is_empty(),
                     },
                 );
                 // Mark code_execution invocations as dynamic when the request
@@ -466,24 +482,33 @@ impl StreamState {
                 // family) as `content_block_start` of type `server_tool_use`
                 // with the full input inline. Mirrors upstream
                 // `anthropic-language-model.ts:1671-1735`.
-                let dynamic =
-                    (self.mark_code_execution_dynamic && name == "code_execution").then_some(true);
-                let input_json = match input {
-                    Some(v) if !v.is_null() => serde_json::to_string(&v).unwrap_or_default(),
-                    _ => String::new(),
+                //
+                // Apply `code_execution_20250825` sub-tool collapsing here:
+                // `bash_code_execution`/`text_editor_code_execution` →
+                // `code_execution` (with `type` injected into input).
+                let raw_input = input.unwrap_or(JsonValue::Null);
+                let (mapped_name, mapped_input) =
+                    crate::messages::parse_response::remap_code_execution_subtool(&name, raw_input);
+                let dynamic = (self.mark_code_execution_dynamic && mapped_name == "code_execution")
+                    .then_some(true);
+                let input_json = if mapped_input.is_null() {
+                    String::new()
+                } else {
+                    serde_json::to_string(&mapped_input).unwrap_or_default()
                 };
                 self.blocks.insert(
                     index,
                     BlockKind::ToolUse {
                         id: id.clone(),
-                        name: name.clone(),
+                        name: mapped_name.clone(),
                         arguments: input_json.clone(),
                         caller: None,
+                        first_delta: input_json.is_empty() || input_json == "{}",
                     },
                 );
                 let mut out = vec![StreamPart::ToolInputStart {
                     id: id.clone(),
-                    tool_name: name,
+                    tool_name: mapped_name,
                     provider_executed: Some(true),
                     dynamic,
                     title: None,
@@ -644,16 +669,39 @@ impl StreamState {
                 }]
             }
             (
-                BlockKind::ToolUse { id, arguments, .. },
+                BlockKind::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                    first_delta,
+                    ..
+                },
                 BlockDelta::InputJsonDelta { partial_json },
             ) => {
                 if partial_json.is_empty() {
                     return Vec::new();
                 }
-                arguments.push_str(&partial_json);
+                // Mirror upstream anthropic-language-model.ts:2241-2249:
+                // when this is the very first delta for a unified
+                // `code_execution` tool (which already covers bash /
+                // text_editor sub-tools after remapping), and the delta
+                // opens a JSON object (`{...`), inject
+                // `"type":"programmatic-tool-call",` so the assembled
+                // input has a stable `type` field downstream.
+                let injected =
+                    if *first_delta && name == "code_execution" && partial_json.starts_with('{') {
+                        format!(
+                            "{{\"type\":\"programmatic-tool-call\",{}",
+                            &partial_json[1..]
+                        )
+                    } else {
+                        partial_json.clone()
+                    };
+                *first_delta = false;
+                arguments.push_str(&injected);
                 vec![StreamPart::ToolInputDelta {
                     id: id.clone(),
-                    delta: partial_json,
+                    delta: injected,
                     provider_metadata: None,
                 }]
             }
@@ -733,13 +781,26 @@ impl StreamState {
                 name,
                 arguments,
                 caller,
-            } => vec![
-                StreamPart::ToolInputEnd {
-                    id: id.clone(),
-                    provider_metadata: None,
-                },
-                StreamPart::ToolCall(build_tool_call(id, name, arguments, caller)),
-            ],
+                ..
+            } => {
+                // Mirror upstream `anthropic-language-model.ts:2107-2138`:
+                // mark final tool-call as `dynamic: true` when the request
+                // enabled `markCodeExecutionDynamic` and the (already
+                // remapped) tool name is `code_execution`. Without this the
+                // streaming finalization would emit `dynamic: None` even for
+                // code_execution invocations triggered implicitly by the
+                // newer web_*_20260209 tools, causing strict tool validation
+                // to reject the response.
+                let dynamic =
+                    (self.mark_code_execution_dynamic && name == "code_execution").then_some(true);
+                vec![
+                    StreamPart::ToolInputEnd {
+                        id: id.clone(),
+                        provider_metadata: None,
+                    },
+                    StreamPart::ToolCall(build_tool_call(id, name, arguments, caller, dynamic)),
+                ]
+            }
             BlockKind::Reasoning { id } => vec![StreamPart::ReasoningEnd {
                 id,
                 provider_metadata: None,
@@ -917,6 +978,7 @@ fn build_tool_call(
     name: String,
     arguments: String,
     caller: Option<JsonValue>,
+    dynamic: Option<bool>,
 ) -> ToolCallPart {
     let input = if arguments.is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
@@ -936,12 +998,16 @@ fn build_tool_call(
         po.insert("anthropic".into(), anthropic);
         po
     });
+    // `provider_executed` follows the upstream contract: only the
+    // server-executed branch sets it (see `BlockStart::ServerToolUse` /
+    // `BlockStart::McpToolUse`). The function-tool finalization path here
+    // intentionally leaves it `None`.
     ToolCallPart {
         tool_call_id: id,
         tool_name: name,
         input,
         provider_executed: None,
-        dynamic: None,
+        dynamic,
         provider_options,
     }
 }

@@ -451,13 +451,11 @@ fn convert_assistant(
                 feature: format!("assistant.custom.{kind}"),
                 details: None,
             }),
-            AssistantPart::ToolResult(_) => warnings.push(Warning::Unsupported {
-                feature: "assistant.feature-result".to_owned(),
-                details: Some(
-                    "inline tool result on assistant turn not supported; use a Tool message"
-                        .to_owned(),
-                ),
-            }),
+            AssistantPart::ToolResult(r) => {
+                if let Some(part) = convert_assistant_tool_result(r, cache_control, warnings) {
+                    out.push(part);
+                }
+            }
         }
     }
     out
@@ -595,6 +593,404 @@ fn convert_tool_call(
             None
         }
     }
+}
+
+/// Convert an inline `AssistantPart::ToolResult` echoed back from an earlier
+/// provider-executed tool call.
+///
+/// Mirrors upstream `convert-to-anthropic-prompt.ts:789-1185` `case
+/// 'tool-result'` (assistant scope). Each provider-executed tool gets its own
+/// wire `*_tool_result` block; unsupported tools emit a warning and return
+/// `None`.
+fn convert_assistant_tool_result(
+    part: &ToolResultPart,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    let provider_tool_name = part.tool_name.as_str();
+    let tool_use_id = part.tool_call_id.clone();
+
+    // MCP tool result detection: upstream stashes `tool_use_id`s into a
+    // `mcpToolUseIds` set while emitting `mcp_tool_use`. Rust echoes the
+    // same hint through `provider_options.anthropic.type = "mcp-tool-use"`
+    // on the matching ToolCallPart; for `ToolResultPart` we rely on the
+    // output shape (only json / error-json are valid for MCP) plus the
+    // `provider_options.anthropic.type = "mcp-tool-result"` marker if set.
+    let anthropic_opts = part
+        .provider_options
+        .as_ref()
+        .and_then(|opts| opts.get("anthropic"));
+    let is_mcp = anthropic_opts
+        .and_then(|m| m.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("mcp-tool-result");
+
+    if is_mcp {
+        return convert_mcp_tool_result(part, tool_use_id, cache_control, warnings);
+    }
+
+    match provider_tool_name {
+        "code_execution" => {
+            convert_code_execution_tool_result(part, tool_use_id, cache_control, warnings)
+        }
+        "web_fetch" => convert_web_fetch_tool_result(part, tool_use_id, cache_control, warnings),
+        "web_search" => convert_web_search_tool_result(part, tool_use_id, cache_control, warnings),
+        "tool_search_tool_regex" | "tool_search_tool_bm25" => {
+            convert_tool_search_tool_result(part, tool_use_id, cache_control, warnings)
+        }
+        "advisor" => convert_advisor_tool_result(part, tool_use_id, cache_control, warnings),
+        other => {
+            warnings.push(Warning::Other {
+                message: format!("provider executed tool result for tool {other} is not supported"),
+            });
+            None
+        }
+    }
+}
+
+/// Parse `output.value` for provider-executed error payloads. Accepts both
+/// stringified-JSON and plain object forms. Mirrors upstream
+/// `extractErrorValue` (`convert-to-anthropic-prompt.ts:46-63`).
+fn extract_error_value(value: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    if let Some(s) = value.as_str() {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(s) {
+            return map;
+        }
+        return serde_json::Map::new();
+    }
+    if let Some(map) = value.as_object() {
+        return map.clone();
+    }
+    serde_json::Map::new()
+}
+
+fn extract_error_code(value: &serde_json::Value) -> String {
+    extract_error_value(value)
+        .get("errorCode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unavailable")
+        .to_owned()
+}
+
+fn convert_mcp_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    let (content, is_error) = match &part.output {
+        ToolResultOutput::Json { value, .. } => (value.clone(), false),
+        ToolResultOutput::ErrorJson { value, .. } => (value.clone(), true),
+        _ => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "provider executed tool result output type for tool {} is not supported",
+                    part.tool_name
+                ),
+            });
+            return None;
+        }
+    };
+    Some(WireAssistantPart::McpToolResult {
+        tool_use_id,
+        is_error,
+        content,
+        cache_control,
+    })
+}
+
+fn convert_code_execution_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    use serde_json::json;
+
+    let output_value = match &part.output {
+        ToolResultOutput::ErrorText { .. } | ToolResultOutput::ErrorJson { .. } => {
+            // Upstream tries to parse the value for an inner `type` so it can
+            // pick between `code_execution_tool_result_error` and
+            // `bash_code_execution_tool_result_error`. Mirrors
+            // `convert-to-anthropic-prompt.ts:823-855`.
+            let parsed = match &part.output {
+                ToolResultOutput::ErrorText { value, .. } => {
+                    serde_json::from_str::<serde_json::Value>(value.as_str())
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                ToolResultOutput::ErrorJson { value, .. } => value.clone(),
+                _ => serde_json::Value::Null,
+            };
+            let map = extract_error_value(&parsed);
+            let inner_type = map
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let error_code = map
+                .get("errorCode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            return if inner_type == "code_execution_tool_result_error" {
+                Some(WireAssistantPart::CodeExecutionToolResult {
+                    tool_use_id,
+                    content: json!({
+                        "type": "code_execution_tool_result_error",
+                        "error_code": error_code,
+                    }),
+                    cache_control,
+                })
+            } else {
+                Some(WireAssistantPart::BashCodeExecutionToolResult {
+                    tool_use_id,
+                    content: json!({
+                        "type": "bash_code_execution_tool_result_error",
+                        "error_code": error_code,
+                    }),
+                    cache_control,
+                })
+            };
+        }
+        ToolResultOutput::Json { value, .. } => value.clone(),
+        _ => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "provider executed tool result output type for tool {} is not supported",
+                    part.tool_name
+                ),
+            });
+            return None;
+        }
+    };
+
+    // Dispatch on the inner `type` field. Mirrors upstream
+    // `convert-to-anthropic-prompt.ts:880-970`. We do not run a full schema
+    // validator (upstream uses `validateTypes`) — Anthropic returns
+    // well-formed payloads, and partial echoes from clients should also be
+    // forwarded verbatim.
+    let inner_type = output_value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    match inner_type {
+        // 20250522 envelope + 20260120 encrypted envelope — both ride the
+        // `code_execution_tool_result` wire block; the consumer disambiguates
+        // via the inner `type` field.
+        "code_execution_result" | "encrypted_code_execution_result" => {
+            Some(WireAssistantPart::CodeExecutionToolResult {
+                tool_use_id,
+                content: output_value,
+                cache_control,
+            })
+        }
+        // 20250825 bash subtool.
+        "bash_code_execution_result" | "bash_code_execution_tool_result_error" => {
+            Some(WireAssistantPart::BashCodeExecutionToolResult {
+                tool_use_id,
+                content: output_value,
+                cache_control,
+            })
+        }
+        // 20250825 text-editor subtool (any of view/create/str_replace/error).
+        _ => Some(WireAssistantPart::TextEditorCodeExecutionToolResult {
+            tool_use_id,
+            content: output_value,
+            cache_control,
+        }),
+    }
+}
+
+fn convert_web_fetch_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    use serde_json::json;
+
+    match &part.output {
+        ToolResultOutput::ErrorJson { value, .. } => Some(WireAssistantPart::WebFetchToolResult {
+            tool_use_id,
+            content: json!({
+                "type": "web_fetch_tool_result_error",
+                "error_code": extract_error_code(value),
+            }),
+            cache_control,
+        }),
+        ToolResultOutput::Json { value, .. } => {
+            // The upstream schema reshapes the camelCase output into wire
+            // snake_case. We assume the caller stored the wire-shape (or a
+            // best-effort merge) and forward verbatim. This mirrors the
+            // permissive read-side semantics already used elsewhere.
+            Some(WireAssistantPart::WebFetchToolResult {
+                tool_use_id,
+                content: value.clone(),
+                cache_control,
+            })
+        }
+        _ => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "provider executed tool result output type for tool {} is not supported",
+                    part.tool_name
+                ),
+            });
+            None
+        }
+    }
+}
+
+fn convert_web_search_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    use serde_json::json;
+
+    match &part.output {
+        ToolResultOutput::ErrorJson { value, .. } => Some(WireAssistantPart::WebSearchToolResult {
+            tool_use_id,
+            content: json!({
+                "type": "web_search_tool_result_error",
+                "error_code": extract_error_code(value),
+            }),
+            cache_control,
+        }),
+        ToolResultOutput::Json { value, .. } => Some(WireAssistantPart::WebSearchToolResult {
+            tool_use_id,
+            content: value.clone(),
+            cache_control,
+        }),
+        _ => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "provider executed tool result output type for tool {} is not supported",
+                    part.tool_name
+                ),
+            });
+            None
+        }
+    }
+}
+
+fn convert_tool_search_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    use serde_json::json;
+
+    let value = if let ToolResultOutput::Json { value, .. } = &part.output {
+        value.clone()
+    } else {
+        warnings.push(Warning::Other {
+            message: format!(
+                "provider executed tool result output type for tool {} is not supported",
+                part.tool_name
+            ),
+        });
+        return None;
+    };
+
+    // Tool references — upstream parses `[{toolName: ...}]` into wire
+    // `[{type: "tool_reference", tool_name: ...}]`. We accept either shape:
+    // if the input is already in wire form, forward verbatim; otherwise
+    // rewrite `toolName` → `tool_name`.
+    let tool_references: Vec<serde_json::Value> = value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    let tool_name = obj
+                        .get("tool_name")
+                        .or_else(|| obj.get("toolName"))
+                        .and_then(serde_json::Value::as_str)?
+                        .to_owned();
+                    Some(json!({
+                        "type": "tool_reference",
+                        "tool_name": tool_name,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(WireAssistantPart::ToolSearchToolResult {
+        tool_use_id,
+        content: json!({
+            "type": "tool_search_tool_search_result",
+            "tool_references": tool_references,
+        }),
+        cache_control,
+    })
+}
+
+fn convert_advisor_tool_result(
+    part: &ToolResultPart,
+    tool_use_id: String,
+    cache_control: Option<CacheControl>,
+    warnings: &mut Vec<Warning>,
+) -> Option<WireAssistantPart> {
+    use serde_json::json;
+
+    let value = match &part.output {
+        ToolResultOutput::Json { value, .. } | ToolResultOutput::ErrorJson { value, .. } => {
+            value.clone()
+        }
+        _ => {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "provider executed tool result output type for tool {} is not supported",
+                    part.tool_name
+                ),
+            });
+            return None;
+        }
+    };
+    let inner_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let content = match inner_type {
+        "advisor_result" => {
+            let text = value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            json!({ "type": "advisor_result", "text": text })
+        }
+        "advisor_redacted_result" => {
+            let encrypted_content = value
+                .get("encryptedContent")
+                .or_else(|| value.get("encrypted_content"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            json!({
+                "type": "advisor_redacted_result",
+                "encrypted_content": encrypted_content,
+            })
+        }
+        _ => {
+            // Treat as error envelope.
+            json!({
+                "type": "advisor_tool_result_error",
+                "error_code": value
+                    .get("errorCode")
+                    .or_else(|| value.get("error_code"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown"),
+            })
+        }
+    };
+    Some(WireAssistantPart::AdvisorToolResult {
+        tool_use_id,
+        content,
+        cache_control,
+    })
 }
 
 /// Pluck `provider_options` from an `AssistantPart` variant, regardless of
