@@ -159,7 +159,11 @@ pub(crate) fn convert_prompt(
                 let message_count = messages_in_block.len();
                 for (message_index, msg) in messages_in_block.into_iter().enumerate() {
                     let is_last_message = message_index + 1 == message_count;
-                    let Message::Assistant { content: parts, .. } = msg else {
+                    let Message::Assistant {
+                        content: parts,
+                        provider_options: msg_provider_options,
+                    } = msg
+                    else {
                         continue;
                     };
                     let has_reasoning = parts
@@ -169,6 +173,12 @@ pub(crate) fn convert_prompt(
                     for (part_index, part) in parts.into_iter().enumerate() {
                         let is_last_part = part_index + 1 == parts_len;
                         let trim_text = is_last_block && is_last_message && is_last_part;
+                        // Per-part `provider_options` snapshot for the
+                        // cache-point hook. Cloned because the inner `match`
+                        // below moves `part`. Mirrors upstream
+                        // `pushCachePoint(content, part.providerOptions)`
+                        // from ai-sdk #14809.
+                        let part_provider_options = assistant_part_provider_options(&part).cloned();
                         match part {
                             AssistantPart::Text(text_part) => {
                                 let trimmed = if trim_text {
@@ -235,6 +245,23 @@ pub(crate) fn convert_prompt(
                                 });
                             }
                         }
+                        // Part-level cache point — mirrors upstream
+                        // ai-sdk #14809: each emitted content block can be
+                        // followed by an explicit cache checkpoint marker.
+                        if let Some((kind, ttl)) = parse_cache_point(part_provider_options.as_ref())
+                        {
+                            content.push(ContentBlock::CachePoint {
+                                cache_point: CachePointValue { kind, ttl },
+                            });
+                        }
+                    }
+                    // Message-level cache point appended after all parts.
+                    // Mirrors upstream `pushCachePoint(content, message.providerOptions)`
+                    // at the end of the assistant case.
+                    if let Some((kind, ttl)) = parse_cache_point(msg_provider_options.as_ref()) {
+                        content.push(ContentBlock::CachePoint {
+                            cache_point: CachePointValue { kind, ttl },
+                        });
                     }
                 }
                 if !content.is_empty() {
@@ -261,6 +288,30 @@ fn provider_user_part_options(
     match part {
         UserPart::Text(t) => t.provider_options.as_ref(),
         UserPart::File(f) => f.provider_options.as_ref(),
+    }
+}
+
+/// Borrow the `provider_options` on an assistant part. Used to pluck the
+/// per-part `cachePoint` config so we can emit a wire `cachePoint` block
+/// immediately after each content block. Mirrors upstream
+/// `pushCachePoint(content, part.providerOptions)` from ai-sdk #14809.
+fn assistant_part_provider_options(
+    part: &AssistantPart,
+) -> Option<&llmsdk_provider::shared::ProviderOptions> {
+    match part {
+        AssistantPart::Text(t) => t.provider_options.as_ref(),
+        AssistantPart::ToolCall(tc) => tc.provider_options.as_ref(),
+        AssistantPart::Reasoning {
+            provider_options, ..
+        }
+        | AssistantPart::ReasoningFile {
+            provider_options, ..
+        }
+        | AssistantPart::Custom {
+            provider_options, ..
+        } => provider_options.as_ref(),
+        AssistantPart::File(f) => f.provider_options.as_ref(),
+        AssistantPart::ToolResult(r) => r.provider_options.as_ref(),
     }
 }
 
@@ -584,5 +635,65 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    fn cache_point_options() -> llmsdk_provider::shared::ProviderOptions {
+        let mut bedrock = serde_json::Map::new();
+        bedrock.insert(
+            "cachePoint".into(),
+            serde_json::json!({ "type": "default" }),
+        );
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        po.insert("amazonBedrock".into(), bedrock);
+        po
+    }
+
+    #[test]
+    fn assistant_text_part_emits_cache_point() {
+        // Mirrors upstream ai-sdk #14809: assistant text parts with
+        // `cachePoint` in their provider options must surface a wire
+        // `cachePoint` block immediately after the text content.
+        let prompt = vec![
+            user_text("hi"),
+            Message::Assistant {
+                content: vec![AssistantPart::Text(TextPart {
+                    text: "hello".into(),
+                    provider_options: Some(cache_point_options()),
+                })],
+                provider_options: None,
+            },
+        ];
+        let converted = convert_prompt(&prompt, false).unwrap();
+        let assistant = converted.messages.last().unwrap();
+        assert_eq!(assistant.content.len(), 2);
+        assert!(matches!(assistant.content[0], ContentBlock::Text { .. }));
+        assert!(matches!(
+            assistant.content[1],
+            ContentBlock::CachePoint { .. }
+        ));
+    }
+
+    #[test]
+    fn assistant_message_level_cache_point_appended_after_parts() {
+        // Mirrors upstream ai-sdk #14809: message-level `cachePoint` lands
+        // after all part-level cachepoints.
+        let prompt = vec![
+            user_text("hi"),
+            Message::Assistant {
+                content: vec![AssistantPart::Text(TextPart {
+                    text: "hello".into(),
+                    provider_options: None,
+                })],
+                provider_options: Some(cache_point_options()),
+            },
+        ];
+        let converted = convert_prompt(&prompt, false).unwrap();
+        let assistant = converted.messages.last().unwrap();
+        assert_eq!(assistant.content.len(), 2);
+        // Last block must be the cache point.
+        assert!(matches!(
+            assistant.content.last().unwrap(),
+            ContentBlock::CachePoint { .. }
+        ));
     }
 }
