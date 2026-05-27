@@ -355,16 +355,30 @@ fn convert_assistant(
                     continue;
                 }
 
+                let encrypted = openai
+                    .and_then(|m| m.get("reasoningEncryptedContent"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                // Mirror upstream convert-to-openai-responses-input.ts:573-603
+                // (ai-sdk #12869): when neither `itemId` nor
+                // `reasoningEncryptedContent` is present, the Responses API
+                // rejects the reasoning item — emit a warning and skip it
+                // rather than sending an unidentifiable `reasoning` body.
+                if id.is_none() && encrypted.is_none() {
+                    warnings.push(Warning::Other {
+                        message: format!(
+                            "Non-OpenAI reasoning parts are not supported. Skipping reasoning \
+                             part with text: {text:?}.",
+                        ),
+                    });
+                    continue;
+                }
                 flush_text(
                     items,
                     &mut text_buf,
                     &mut assistant_item_id,
                     &mut assistant_phase,
                 );
-                let encrypted = openai
-                    .and_then(|m| m.get("reasoningEncryptedContent"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
                 items.push(InputItem::Typed(TypedInputItem::Reasoning {
                     id,
                     encrypted_content: encrypted,
@@ -1057,6 +1071,64 @@ mod tests {
             json!({"itemId": id}).as_object().unwrap().clone(),
         );
         po
+    }
+
+    #[test]
+    fn reasoning_without_item_id_and_encrypted_skipped_with_warning() {
+        // Mirrors upstream ai-sdk #12869
+        // (`convert-to-openai-responses-input.test.ts` "should skip
+        // reasoning parts without itemId and encrypted content"):
+        // reasoning items lacking both `itemId` and
+        // `reasoningEncryptedContent` cannot be identified by the
+        // Responses API; emit a single warning and skip them rather than
+        // sending an unaddressable `reasoning` body.
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Reasoning {
+                text: "thinking".into(),
+                provider_options: None,
+            }],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default());
+        assert!(
+            out.is_empty(),
+            "no input items emitted for un-identifiable reasoning"
+        );
+        assert!(
+            warnings.iter().any(
+                |w| matches!(w, Warning::Other { message } if message.contains("Non-OpenAI reasoning"))
+            ),
+            "expected non-openai reasoning warning"
+        );
+    }
+
+    #[test]
+    fn reasoning_with_encrypted_content_only_passes_through() {
+        // Mirrors upstream ai-sdk #12869 happy path: reasoning items with
+        // `reasoningEncryptedContent` and no `itemId` still surface — the
+        // encrypted blob alone is enough to round-trip on multi-turn.
+        let mut po = llmsdk_provider::shared::ProviderOptions::new();
+        po.insert(
+            "openai".into(),
+            json!({ "reasoningEncryptedContent": "blob" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let p = vec![Message::Assistant {
+            content: vec![AssistantPart::Reasoning {
+                text: "thinking".into(),
+                provider_options: Some(po),
+            }],
+            provider_options: None,
+        }];
+        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default());
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0],
+            InputItem::Typed(TypedInputItem::Reasoning { .. })
+        ));
+        assert!(warnings.is_empty());
     }
 
     #[test]
