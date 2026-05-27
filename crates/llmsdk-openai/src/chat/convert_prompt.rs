@@ -386,7 +386,7 @@ fn tool_result_to_string(part: &ToolResultPart, warnings: &mut Vec<Warning>) -> 
         }
         ToolResultOutput::ExecutionDenied { reason, .. } => reason
             .clone()
-            .unwrap_or_else(|| "execution denied".to_owned()),
+            .unwrap_or_else(|| "Tool call execution denied.".to_owned()),
         ToolResultOutput::Content { .. } => {
             warnings.push(Warning::Unsupported {
                 feature: "feature-result.content".to_owned(),

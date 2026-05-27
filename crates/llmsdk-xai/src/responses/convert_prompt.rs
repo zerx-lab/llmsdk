@@ -238,7 +238,7 @@ fn convert_tool_message(parts: &[ToolMessagePart], input: &mut Vec<Value>) {
             }
             ToolResultOutput::ExecutionDenied { reason, .. } => reason
                 .clone()
-                .unwrap_or_else(|| "tool execution denied".to_owned()),
+                .unwrap_or_else(|| "Tool call execution denied.".to_owned()),
             ToolResultOutput::Json { value, .. } | ToolResultOutput::ErrorJson { value, .. } => {
                 serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
             }

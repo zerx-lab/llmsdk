@@ -725,9 +725,9 @@ fn tool_output_string(output: &ToolResultOutput) -> String {
         ToolResultOutput::Json { value, .. } | ToolResultOutput::ErrorJson { value, .. } => {
             serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
         }
-        ToolResultOutput::ExecutionDenied { reason, .. } => {
-            reason.clone().unwrap_or_else(|| "execution denied".into())
-        }
+        ToolResultOutput::ExecutionDenied { reason, .. } => reason
+            .clone()
+            .unwrap_or_else(|| "Tool call execution denied.".into()),
         ToolResultOutput::Content { .. } => String::new(),
     }
 }

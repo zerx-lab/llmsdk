@@ -1122,7 +1122,7 @@ fn tool_result_to_content(
             WireToolResultContent::Text(
                 reason
                     .clone()
-                    .unwrap_or_else(|| "execution denied".to_owned()),
+                    .unwrap_or_else(|| "Tool call execution denied.".to_owned()),
             ),
             Some(true),
         ),
