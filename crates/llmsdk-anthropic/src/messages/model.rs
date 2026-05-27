@@ -103,6 +103,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 &options,
                 false,
                 self.inner.supports_native_structured_output(),
+                self.inner.supports_strict_tools(),
             );
 
         let body_value = self.prepare_body(&request, &betas)?;
@@ -146,6 +147,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 &options,
                 true,
                 self.inner.supports_native_structured_output(),
+                self.inner.supports_strict_tools(),
             );
 
         let body_value = self.prepare_body(&request, &betas)?;
@@ -209,6 +211,7 @@ fn build_request(
     options: &CallOptions,
     stream: bool,
     config_supports_native_structured_output: bool,
+    config_supports_strict_tools: bool,
 ) -> (
     MessagesRequest,
     Vec<Warning>,
@@ -216,7 +219,7 @@ fn build_request(
     bool, // mark_code_execution_dynamic
     bool, // uses_json_response_tool
 ) {
-    let provider_opts = parse_provider_options(options.provider_options.as_ref());
+    let mut provider_opts = parse_provider_options(options.provider_options.as_ref());
     let send_reasoning = provider_opts.send_reasoning.unwrap_or(true);
     let Converted {
         system,
@@ -330,6 +333,11 @@ fn build_request(
             )
         };
 
+    // `supportsStrictTools` mirrors upstream's
+    // `(config.supportsStrictTools ?? true) && modelSupportsStructuredOutput`
+    // (anthropic-language-model.ts:335-337). It is independent of
+    // `supportsStructuredOutput` — wrapping providers may flip either flag.
+    let supports_strict_tools = caps.supports_structured_output && config_supports_strict_tools;
     let (tools, tool_choice) = convert_tools(
         combined_tools.as_deref(),
         effective_tool_choice.as_ref(),
@@ -338,18 +346,15 @@ fn build_request(
         effective_disable_parallel,
         tool_streaming_default,
         // When jsonResponseTool fires, upstream forces `supportsStructuredOutput: false`
-        // (line 734) so the synthesized tool is emitted without the strict /
-        // structured-outputs beta header.
+        // (anthropic-language-model.ts:734) so the synthesized tool is emitted
+        // without the `structured-outputs-2025-11-13` beta header, while
+        // `supportsStrictTools` continues to gate the per-tool `strict` field.
         if uses_json_response_tool {
             false
         } else {
             supports_structured_output
         },
-        if uses_json_response_tool {
-            false
-        } else {
-            supports_structured_output
-        },
+        supports_strict_tools,
     );
 
     // anthropicBeta extra tokens.
@@ -358,6 +363,17 @@ fn build_request(
             betas.insert(token.clone());
         }
     }
+
+    // Map top-level `options.reasoning` to Anthropic thinking/effort when
+    // provider options don't already specify them. Provider options always
+    // take precedence (mirrors anthropic-language-model.ts:399-418).
+    apply_reasoning_to_provider_opts(
+        options.reasoning,
+        &caps,
+        options.max_output_tokens.unwrap_or(caps.max_output_tokens),
+        &mut provider_opts,
+        &mut warnings,
+    );
 
     // Warn when adaptive thinking is requested on a model that does not
     // support it; ai-sdk silently strips on Vertex/Bedrock, here we surface.
@@ -735,6 +751,135 @@ fn resolve_thinking(config: Option<&ThinkingConfig>) -> (Option<WireThinking>, O
 /// Fallback thinking budget when the caller enabled thinking without an
 /// explicit `budgetTokens`. Matches ai-sdk's documented default.
 pub(crate) const DEFAULT_THINKING_BUDGET: u32 = 1024;
+
+/// Map a top-level [`llmsdk_provider::language_model::ReasoningEffort`] onto
+/// Anthropic's [`ThinkingConfig`] + `effort` provider-option pair.
+///
+/// Mirrors `resolveAnthropicReasoningConfig` (anthropic-language-model.ts:2686-2732).
+///
+/// Behavior:
+/// - `None`/`ProviderDefault` → no-op.
+/// - `None` reasoning level (`'none'`) → `thinking: { type: 'disabled' }`,
+///   no `effort`.
+/// - Models with `supports_adaptive_thinking` → `thinking: { type: 'adaptive' }`
+///   and an `effort` mapped via the upstream effort-map; `xhigh` becomes
+///   `"max"` on models without `supports_xhigh_effort`.
+/// - Otherwise → `thinking: { type: 'enabled', budgetTokens }` with the
+///   budget computed from `mapReasoningToProviderBudget` semantics
+///   (percentage of `max_output_tokens_for_model`, clamped to
+///   `[1024, max_output_tokens_for_model]`).
+///
+/// Provider options always take precedence: this function only writes a
+/// field when the caller did not set it (and only writes `effort` when the
+/// resulting thinking is not disabled).
+fn apply_reasoning_to_provider_opts(
+    reasoning: Option<llmsdk_provider::language_model::ReasoningEffort>,
+    caps: &crate::model_capabilities::ModelCapabilities,
+    max_output_tokens_for_model: u32,
+    provider_opts: &mut AnthropicChatOptions,
+    warnings: &mut Vec<Warning>,
+) {
+    use llmsdk_provider::language_model::ReasoningEffort;
+
+    // Upstream short-circuits when an explicit `anthropicOptions.effort`
+    // is already set (line 399).
+    if provider_opts.effort.is_some() {
+        return;
+    }
+
+    let reasoning = match reasoning {
+        // `undefined` or `'provider-default'` ↔ isCustomReasoning(reasoning) === false.
+        None | Some(ReasoningEffort::ProviderDefault) => return,
+        Some(level) => level,
+    };
+
+    // `reasoning === 'none'` ⇒ disable thinking, no effort.
+    if matches!(reasoning, ReasoningEffort::None) {
+        if provider_opts.thinking.is_none() {
+            provider_opts.thinking = Some(ThinkingConfig::Disabled);
+        }
+        return;
+    }
+
+    if caps.supports_adaptive_thinking {
+        let (mapped, exact) = match reasoning {
+            ReasoningEffort::Minimal => ("low", false),
+            ReasoningEffort::Low => ("low", true),
+            ReasoningEffort::Medium => ("medium", true),
+            ReasoningEffort::High => ("high", true),
+            ReasoningEffort::Xhigh => {
+                if caps.supports_xhigh_effort {
+                    ("xhigh", true)
+                } else {
+                    ("max", false)
+                }
+            }
+            // already handled above
+            ReasoningEffort::None | ReasoningEffort::ProviderDefault => return,
+        };
+        if !exact {
+            warnings.push(Warning::Compatibility {
+                feature: "reasoning".to_owned(),
+                details: Some(format!(
+                    "reasoning \"{}\" is not directly supported by this model. mapped to effort \"{mapped}\".",
+                    reasoning_label(reasoning)
+                )),
+            });
+        }
+        if provider_opts.thinking.is_none() {
+            provider_opts.thinking = Some(ThinkingConfig::Adaptive { display: None });
+        }
+        // Only write effort when thinking is not disabled (upstream lines 411-415).
+        if !matches!(provider_opts.thinking, Some(ThinkingConfig::Disabled)) {
+            provider_opts.effort = Some(mapped.to_owned());
+        }
+        return;
+    }
+
+    // Non-adaptive: map to a token budget.
+    let pct = match reasoning {
+        ReasoningEffort::Minimal => 0.02_f64,
+        ReasoningEffort::Low => 0.10,
+        ReasoningEffort::Medium => 0.30,
+        ReasoningEffort::High => 0.60,
+        ReasoningEffort::Xhigh => 0.90,
+        ReasoningEffort::None | ReasoningEffort::ProviderDefault => return,
+    };
+    // Compute percent-of-max-tokens then round-half-away-from-zero.
+    // `max_output_tokens_for_model` is u32 ≤ ~10^9, pct ≤ 0.9, so the product
+    // fits f64 exactly and the rounded result fits i64.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "max_output_tokens_for_model is u32 ≤ ~10^9; product * pct ≤ 10^9 fits i64 exactly after round"
+    )]
+    let raw = (f64::from(max_output_tokens_for_model) * pct).round() as i64;
+    let clamped = raw.clamp(1024, i64::from(max_output_tokens_for_model));
+    // clamped is in [1024, max_output_tokens_for_model] which fits u32 by construction.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "clamped to [1024, u32::from(max_output_tokens_for_model)]; always non-negative and fits u32"
+    )]
+    let budget = clamped as u32;
+    if provider_opts.thinking.is_none() {
+        provider_opts.thinking = Some(ThinkingConfig::Enabled {
+            budget_tokens: Some(budget),
+        });
+    }
+}
+
+fn reasoning_label(level: llmsdk_provider::language_model::ReasoningEffort) -> &'static str {
+    use llmsdk_provider::language_model::ReasoningEffort;
+    match level {
+        ReasoningEffort::ProviderDefault => "provider-default",
+        ReasoningEffort::None => "none",
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Xhigh => "xhigh",
+    }
+}
 
 /// Assemble `output_config` from the provider-option triplet
 /// `(effort, taskBudget, response_format → output_format)`.
@@ -1297,5 +1442,180 @@ mod tests {
             }),
         );
         assert!(warnings.is_empty());
+    }
+
+    mod reasoning_mapping {
+        use super::super::{
+            AnthropicChatOptions, ThinkingConfig, apply_reasoning_to_provider_opts,
+        };
+        use crate::model_capabilities::model_capabilities;
+        use llmsdk_provider::language_model::ReasoningEffort;
+        use llmsdk_provider::shared::Warning;
+
+        #[test]
+        fn provider_default_is_noop() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            let mut opts = AnthropicChatOptions::default();
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::ProviderDefault),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            assert!(opts.thinking.is_none() && opts.effort.is_none());
+        }
+
+        #[test]
+        fn none_disables_thinking_no_effort() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            let mut opts = AnthropicChatOptions::default();
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::None),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            assert_eq!(opts.thinking, Some(ThinkingConfig::Disabled));
+            assert_eq!(opts.effort, None);
+        }
+
+        #[test]
+        fn adaptive_model_maps_low_high_directly() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            for (level, expected) in [
+                (ReasoningEffort::Low, "low"),
+                (ReasoningEffort::Medium, "medium"),
+                (ReasoningEffort::High, "high"),
+                (ReasoningEffort::Xhigh, "xhigh"),
+            ] {
+                let mut opts = AnthropicChatOptions::default();
+                let mut warnings: Vec<Warning> = Vec::new();
+                apply_reasoning_to_provider_opts(
+                    Some(level),
+                    &caps,
+                    64_000,
+                    &mut opts,
+                    &mut warnings,
+                );
+                assert!(
+                    matches!(opts.thinking, Some(ThinkingConfig::Adaptive { .. })),
+                    "level {level:?} should pick adaptive thinking"
+                );
+                assert_eq!(opts.effort.as_deref(), Some(expected));
+            }
+        }
+
+        #[test]
+        fn adaptive_minimal_downgrades_to_low_with_compatibility_warning() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            let mut opts = AnthropicChatOptions::default();
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::Minimal),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            assert_eq!(opts.effort.as_deref(), Some("low"));
+            assert!(warnings.iter().any(
+                |w| matches!(w, Warning::Compatibility { feature, .. } if feature == "reasoning")
+            ));
+        }
+
+        #[test]
+        fn adaptive_xhigh_without_support_maps_to_max() {
+            let caps = model_capabilities("claude-sonnet-4-6-20251014");
+            let mut opts = AnthropicChatOptions::default();
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::Xhigh),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            assert_eq!(opts.effort.as_deref(), Some("max"));
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| matches!(w, Warning::Compatibility { .. }))
+            );
+        }
+
+        #[test]
+        fn non_adaptive_model_computes_token_budget() {
+            let caps = model_capabilities("claude-opus-4-1");
+            let mut opts = AnthropicChatOptions::default();
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::Medium),
+                &caps,
+                32_000,
+                &mut opts,
+                &mut warnings,
+            );
+            match opts.thinking {
+                Some(ThinkingConfig::Enabled { budget_tokens }) => {
+                    let budget = budget_tokens.expect("budget should be populated");
+                    // medium → 30% of 32000 = 9600, clamped to [1024, 32000].
+                    assert_eq!(budget, 9_600);
+                }
+                _ => panic!("expected enabled thinking with explicit budget"),
+            }
+            assert!(opts.effort.is_none());
+        }
+
+        #[test]
+        fn provider_effort_already_set_short_circuits() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            let mut opts = AnthropicChatOptions {
+                effort: Some("medium".to_owned()),
+                ..AnthropicChatOptions::default()
+            };
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::High),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            // No mutation when caller already pinned the effort.
+            assert!(opts.thinking.is_none());
+            assert_eq!(opts.effort.as_deref(), Some("medium"));
+        }
+
+        #[test]
+        fn provider_thinking_already_set_is_preserved() {
+            let caps = model_capabilities("claude-opus-4-7-20251015");
+            let mut opts = AnthropicChatOptions {
+                thinking: Some(ThinkingConfig::Enabled {
+                    budget_tokens: Some(2_048),
+                }),
+                ..AnthropicChatOptions::default()
+            };
+            let mut warnings: Vec<Warning> = Vec::new();
+            apply_reasoning_to_provider_opts(
+                Some(ReasoningEffort::Low),
+                &caps,
+                64_000,
+                &mut opts,
+                &mut warnings,
+            );
+            // Existing thinking config retained; effort still derived because
+            // provider_opts.effort was None and thinking != Disabled.
+            assert_eq!(
+                opts.thinking,
+                Some(ThinkingConfig::Enabled {
+                    budget_tokens: Some(2_048),
+                })
+            );
+            assert_eq!(opts.effort.as_deref(), Some("low"));
+        }
     }
 }

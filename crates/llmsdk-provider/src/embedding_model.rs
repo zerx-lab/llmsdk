@@ -23,6 +23,14 @@ pub trait EmbeddingModel: Send + Sync + std::fmt::Debug {
     /// Provider-specific model id, e.g. `"text-embedding-3-small"`.
     fn model_id(&self) -> &str;
 
+    /// Specification version (currently `"v4"`).
+    ///
+    /// Mirrors `EmbeddingModelV4.specificationVersion` (ai-sdk
+    /// `embedding-model-v4.ts`). Provider impls inherit the default.
+    fn specification_version(&self) -> &'static str {
+        "v4"
+    }
+
     /// Maximum inputs the provider accepts per call.
     ///
     /// `None` means "no documented limit"; callers should still batch

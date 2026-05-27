@@ -85,6 +85,12 @@ pub struct Inner {
     /// to drive the jsonResponseTool fallback path. Mirrors upstream
     /// `anthropic-language-model.ts:332` reading `config.supportsNativeStructuredOutput`.
     pub(crate) supports_native_structured_output: bool,
+    /// Wrapping-provider override for `supportsStrictTools` (default `true`).
+    /// Mirrors upstream `anthropic-language-model.ts:335-337` reading
+    /// `config.supportsStrictTools ?? true`. Wrapping providers whose backend
+    /// rejects `strict: true` on tool definitions clear this so the language
+    /// model strips the field and emits an "unsupported" warning.
+    pub(crate) supports_strict_tools: bool,
 }
 
 impl fmt::Debug for Inner {
@@ -102,6 +108,7 @@ impl fmt::Debug for Inner {
                 "supports_native_structured_output",
                 &self.supports_native_structured_output,
             )
+            .field("supports_strict_tools", &self.supports_strict_tools)
             .finish()
     }
 }
@@ -149,6 +156,15 @@ impl Inner {
     pub fn supports_native_structured_output(&self) -> bool {
         self.supports_native_structured_output
     }
+
+    /// Whether the configured backend accepts `strict: true` on function
+    /// tool definitions. Wrapping providers whose backend rejects strict
+    /// tools clear this via [`InnerBuilder::supports_strict_tools`]; the
+    /// language model then strips `strict` and emits a warning per tool.
+    #[must_use]
+    pub fn supports_strict_tools(&self) -> bool {
+        self.supports_strict_tools
+    }
 }
 
 /// Builder for the cross-crate [`Inner`].
@@ -170,6 +186,9 @@ pub struct InnerBuilder {
     /// rejects `output_config.format` (e.g. Bedrock + claude-opus-4-7),
     /// forcing the request through the jsonResponseTool fallback.
     supports_native_structured_output: bool,
+    /// Default `true`. Cleared by wrapping providers whose backend rejects
+    /// `strict: true` on tool definitions.
+    supports_strict_tools: bool,
 }
 
 impl Default for InnerBuilder {
@@ -187,6 +206,9 @@ impl Default for InnerBuilder {
             // (anthropic-language-model.ts:332). Wrapping providers
             // override per-model.
             supports_native_structured_output: true,
+            // Match upstream `supportsStrictTools ?? true`
+            // (anthropic-language-model.ts:336).
+            supports_strict_tools: true,
         }
     }
 }
@@ -206,6 +228,7 @@ impl fmt::Debug for InnerBuilder {
                 "supports_native_structured_output",
                 &self.supports_native_structured_output,
             )
+            .field("supports_strict_tools", &self.supports_strict_tools)
             .finish()
     }
 }
@@ -302,6 +325,18 @@ impl InnerBuilder {
         self
     }
 
+    /// Set the `supportsStrictTools` capability flag.
+    ///
+    /// Defaults to `true` (mirrors upstream `?? true`,
+    /// `anthropic-language-model.ts:335-337`). Wrapping providers whose
+    /// backend rejects `strict: true` on tool definitions clear this; the
+    /// language model then drops `strict` and emits an unsupported warning.
+    #[must_use]
+    pub fn supports_strict_tools(mut self, value: bool) -> Self {
+        self.supports_strict_tools = value;
+        self
+    }
+
     /// Finalize the [`Inner`].
     ///
     /// # Errors
@@ -325,6 +360,7 @@ impl InnerBuilder {
             body_transformer: self.body_transformer,
             generate_id: self.generate_id,
             supports_native_structured_output: self.supports_native_structured_output,
+            supports_strict_tools: self.supports_strict_tools,
         })
     }
 }
@@ -604,6 +640,8 @@ impl AnthropicBuilder {
                 generate_id: self.generate_id,
                 // Native Anthropic backend honors output_config.format.
                 supports_native_structured_output: true,
+                // Native Anthropic backend accepts `strict: true` on tools.
+                supports_strict_tools: true,
             }),
         })
     }

@@ -69,8 +69,17 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
                 );
                 messages.push(WireMessage::Assistant { content: parts });
             }
-            Message::Tool { content, .. } => {
-                let parts = convert_tool(content, &mut warnings, &mut betas, &mut validator);
+            Message::Tool {
+                content,
+                provider_options,
+            } => {
+                let parts = convert_tool(
+                    content,
+                    provider_options.as_ref(),
+                    &mut warnings,
+                    &mut betas,
+                    &mut validator,
+                );
                 push_user(&mut messages, parts);
             }
         }
@@ -1017,22 +1026,24 @@ fn assistant_part_provider_options(
 
 fn convert_tool(
     parts: &[ToolMessagePart],
+    message_provider_options: Option<&llmsdk_provider::shared::ProviderOptions>,
     warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
     validator: &mut CacheControlValidator,
 ) -> Vec<WireUserPart> {
     let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
+    let parts_count = parts.len();
+    for (idx, part) in parts.iter().enumerate() {
         match part {
             ToolMessagePart::ToolResult(r) => {
                 let (content, is_error) = tool_result_to_content(r, warnings, betas, validator);
-                // Cache control fallback chain matches upstream
-                // convert-to-anthropic-prompt.ts:362-376:
+                // Cache control fallback chain mirrors upstream
+                // convert-to-anthropic-prompt.ts:357-376:
                 // 1. part.providerOptions (tool result part)
                 // 2. output.providerOptions / nested content[].providerOptions
-                //    (tool result output) — handled inside
-                //    `tool_result_to_content`, but we also need to consider it
-                //    here as the message-level cache_control fallback.
+                //    (tool result output)
+                // 3. last part only: message.providerOptions (tool result message)
+                let is_last = idx + 1 == parts_count;
                 let part_cc = validator.get(r.provider_options.as_ref(), "tool result part", true);
                 let output_cc = if part_cc.is_none() {
                     let output_opts = output_provider_options(&r.output);
@@ -1040,11 +1051,16 @@ fn convert_tool(
                 } else {
                     None
                 };
+                let message_cc = if part_cc.is_none() && output_cc.is_none() && is_last {
+                    validator.get(message_provider_options, "tool result message", true)
+                } else {
+                    None
+                };
                 out.push(WireUserPart::ToolResult {
                     tool_use_id: r.tool_call_id.clone(),
                     content,
                     is_error,
-                    cache_control: part_cc.or(output_cc),
+                    cache_control: part_cc.or(output_cc).or(message_cc),
                 });
             }
             ToolMessagePart::ToolApprovalResponse(_) => {

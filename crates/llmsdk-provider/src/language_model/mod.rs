@@ -55,6 +55,15 @@ pub trait LanguageModel: Send + Sync + std::fmt::Debug {
     /// Provider-specific model id, e.g. `"gpt-4o-mini"`.
     fn model_id(&self) -> &str;
 
+    /// Specification version (currently `"v4"`).
+    ///
+    /// Mirrors `LanguageModelV4.specificationVersion` (ai-sdk
+    /// `language-model-v4.ts`). Acts as the trait-version tag for middleware
+    /// composing across versions; provider impls inherit the default.
+    fn specification_version(&self) -> &'static str {
+        "v4"
+    }
+
     /// URL patterns the model can ingest natively, by media type.
     ///
     /// Returning a pattern tells the SDK *not* to download a matching URL

@@ -198,10 +198,11 @@ fn convert_assistant(
 }
 
 fn convert_tool_call(tc: &ToolCallPart) -> WireToolCall {
+    // Mirror upstream `JSON.stringify(part.input)`
+    // (convert-to-mistral-chat-messages.ts:122). Always run through serde so
+    // a string-typed input is escaped (`"foo"`) rather than emitted bare.
     let arguments = if tc.input.is_null() {
         "{}".to_owned()
-    } else if let Some(s) = tc.input.as_str() {
-        s.to_owned()
     } else {
         serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_owned())
     };

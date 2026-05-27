@@ -22,6 +22,14 @@ pub(crate) fn convert_usage(u: Option<&WireUsage>) -> Usage {
     let cached = u.cached_content_token_count.unwrap_or(0);
     let thoughts = u.thoughts_token_count.unwrap_or(0);
 
+    // Preserve the provider-native usage payload verbatim
+    // (convert-google-usage.ts:57 `raw: usage`). Callers rely on it for
+    // trafficType / serviceTier / tokensDetails breakdown that the
+    // normalized counters do not surface.
+    let raw = serde_json::to_value(u)
+        .ok()
+        .and_then(|v| v.as_object().cloned());
+
     Usage {
         input_tokens: InputTokenUsage {
             total: Some(prompt),
@@ -34,7 +42,7 @@ pub(crate) fn convert_usage(u: Option<&WireUsage>) -> Usage {
             text: Some(candidates),
             reasoning: Some(thoughts),
         },
-        raw: None,
+        raw,
     }
 }
 
@@ -65,5 +73,26 @@ mod tests {
         assert_eq!(r.output_tokens.total, Some(70));
         assert_eq!(r.output_tokens.text, Some(50));
         assert_eq!(r.output_tokens.reasoning, Some(20));
+    }
+
+    #[test]
+    fn raw_passthrough_contains_native_counters() {
+        let u = WireUsage {
+            prompt_token_count: Some(100),
+            candidates_token_count: Some(50),
+            cached_content_token_count: Some(30),
+            thoughts_token_count: Some(20),
+            ..Default::default()
+        };
+        let r = convert_usage(Some(&u));
+        let raw = r.raw.expect("raw usage should be populated");
+        assert_eq!(
+            raw.get("promptTokenCount").and_then(|v| v.as_u64()),
+            Some(100)
+        );
+        assert_eq!(
+            raw.get("thoughtsTokenCount").and_then(|v| v.as_u64()),
+            Some(20)
+        );
     }
 }

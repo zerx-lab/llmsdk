@@ -507,6 +507,26 @@ impl GoogleLanguageModel {
     }
 }
 
+/// Mirrors ai-sdk `isGemini3Model` (google-language-model.ts):
+/// `/gemini-3[\.\-]/i.test(...) || /gemini-3$/i.test(...)`.
+/// Case-insensitive; requires `gemini-3` to be followed by `.`/`-` or EOL.
+fn is_gemini3_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    let needle = "gemini-3";
+    let mut search = lower.as_str();
+    loop {
+        let Some(pos) = search.find(needle) else {
+            return false;
+        };
+        let after = &search[pos + needle.len()..];
+        match after.as_bytes().first() {
+            None => return true,
+            Some(b'.' | b'-') => return true,
+            _ => search = after,
+        }
+    }
+}
+
 fn build_thinking_config(
     reasoning: &Option<llmsdk_provider::language_model::ReasoningEffort>,
     model_id: &str,
@@ -514,7 +534,7 @@ fn build_thinking_config(
     warnings: &mut Vec<Warning>,
 ) -> Option<Value> {
     use llmsdk_provider::language_model::ReasoningEffort;
-    let is_gemini3 = model_id.contains("gemini-3") && !model_id.contains("gemini-3-pro-image");
+    let is_gemini3 = is_gemini3_model(model_id) && !model_id.contains("gemini-3-pro-image");
 
     let resolved = match reasoning {
         None | Some(ReasoningEffort::ProviderDefault) => None,
@@ -607,6 +627,17 @@ mod tests {
             regex_escape("https://example.com/v1beta"),
             r"https:\/\/example\.com\/v1beta"
         );
+    }
+
+    #[test]
+    fn is_gemini3_model_matches_upstream_regex() {
+        assert!(is_gemini3_model("gemini-3"));
+        assert!(is_gemini3_model("gemini-3-pro-preview"));
+        assert!(is_gemini3_model("gemini-3.0-pro"));
+        assert!(is_gemini3_model("GEMINI-3-PRO"));
+        assert!(!is_gemini3_model("gemini-30-pro"));
+        assert!(!is_gemini3_model("gemini-2.5-flash"));
+        assert!(!is_gemini3_model("foo"));
     }
 
     #[test]

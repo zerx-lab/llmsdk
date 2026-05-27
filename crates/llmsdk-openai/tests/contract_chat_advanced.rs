@@ -333,6 +333,42 @@ async fn logprobs_count_relays_top_logprobs_n() {
 }
 
 #[tokio::test]
+async fn logprobs_false_omits_field_on_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(empty_choice_response("gpt-4o-mini")),
+        )
+        .mount(&server)
+        .await;
+
+    let model = provider(&server).chat("gpt-4o-mini");
+    model
+        .do_generate(CallOptions {
+            prompt: vec![user_text("hi")],
+            provider_options: Some(provider_options_with_openai(&json!({"logprobs": false}))),
+            ..Default::default()
+        })
+        .await
+        .expect("ok");
+
+    // Mirrors ai-sdk openai-chat-language-model.ts:149-153: logprobs is only
+    // sent when the option is true / a number; false ⇒ omitted entirely.
+    let request = &server.received_requests().await.unwrap()[0];
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).expect("wire body should parse");
+    assert!(
+        body.get("logprobs").is_none(),
+        "logprobs:false must omit the wire field, got {body:?}"
+    );
+    assert!(
+        body.get("top_logprobs").is_none(),
+        "logprobs:false must omit top_logprobs too, got {body:?}"
+    );
+}
+
+#[tokio::test]
 async fn logprobs_dropped_for_reasoning_model_with_warning() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

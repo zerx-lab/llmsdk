@@ -143,15 +143,19 @@ impl SpeechModel for OpenAiSpeechModel {
             Err(err) => return Err(rewrite_openai_error(err)),
         };
 
+        // Mirror upstream `openai-speech-model.ts:122-150`: the raw audio
+        // body is exposed under `response.body` for debugging / observability,
+        // separate from the parsed `audio` payload.
+        let audio_bytes = response.bytes.to_vec();
         Ok(SpeechResult {
-            audio: response.bytes.to_vec(),
+            audio: audio_bytes.clone(),
             warnings,
             request: Some(RequestInfo { body: request_body }),
             response: SpeechResponseInfo {
                 timestamp: rfc3339_now(),
                 model_id: self.model_id.clone(),
                 headers: Some(headers_to_provider(response.headers)),
-                body: None,
+                body: Some(llmsdk_provider::shared::FileBytes::Bytes(audio_bytes)),
             },
             provider_metadata: None,
         })

@@ -22,6 +22,14 @@ pub trait ImageModel: Send + Sync + std::fmt::Debug {
     /// Provider-specific model id, e.g. `"dall-e-3"`.
     fn model_id(&self) -> &str;
 
+    /// Specification version (currently `"v4"`).
+    ///
+    /// Mirrors `ImageModelV4.specificationVersion` (ai-sdk
+    /// `image-model-v4.ts`). Provider impls inherit the default.
+    fn specification_version(&self) -> &'static str {
+        "v4"
+    }
+
     /// Maximum images that can be requested per call.
     async fn max_images_per_call(&self) -> Option<u32> {
         None

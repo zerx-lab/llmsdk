@@ -327,7 +327,13 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         tools,
         tool_choice,
         reasoning_effort: resolved_reasoning_effort.clone(),
-        logprobs: provider_opts.logprobs.as_ref().map(LogprobsOption::enabled),
+        // Upstream emits `logprobs: true` only when the option is true / a
+        // number; `false` and unset both omit the field
+        // (openai-chat-language-model.ts:149-153).
+        logprobs: provider_opts
+            .logprobs
+            .as_ref()
+            .and_then(|opt| opt.enabled().then_some(true)),
         top_logprobs: provider_opts.top_logprobs.or_else(|| {
             provider_opts
                 .logprobs
