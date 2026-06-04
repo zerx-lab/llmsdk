@@ -17,9 +17,6 @@ pub(crate) struct CohereEmbeddingOptions {
     pub truncate: Option<String>,
     /// `outputDimension`: `256` / `512` / `1024` / `1536` (embed-v4 only).
     pub output_dimension: Option<u32>,
-    /// `embeddingTypes`: which numeric encodings to request from the API.
-    /// Defaults to `["float"]` when not set.
-    pub embedding_types: Option<Vec<String>>,
 }
 
 /// Parse the `cohere` slot, or return defaults on missing / malformed entries.
@@ -51,7 +48,6 @@ mod tests {
         assert!(parsed.input_type.is_none());
         assert!(parsed.truncate.is_none());
         assert!(parsed.output_dimension.is_none());
-        assert!(parsed.embedding_types.is_none());
     }
 
     #[test]
@@ -59,14 +55,11 @@ mod tests {
         let opts = po(&json!({
             "inputType": "search_document",
             "truncate": "END",
-            "outputDimension": 1024,
-            "embeddingTypes": ["float", "int8"]
+            "outputDimension": 1024
         }));
         let parsed = parse(Some(&opts));
         assert_eq!(parsed.input_type.as_deref(), Some("search_document"));
         assert_eq!(parsed.truncate.as_deref(), Some("END"));
         assert_eq!(parsed.output_dimension, Some(1024));
-        let types = parsed.embedding_types.unwrap();
-        assert_eq!(types, vec!["float", "int8"]);
     }
 }
