@@ -265,6 +265,19 @@ impl ProviderError {
         }
     }
 
+    /// Captured response headers when [`Self::is_api_call`].
+    ///
+    /// Populated by HTTP transports that record headers (e.g. so callers can
+    /// read a `Retry-After` hint); otherwise `None`. Header-name casing is
+    /// transport-defined, so callers should match names case-insensitively.
+    #[must_use]
+    pub fn response_headers(&self) -> Option<&HashMap<String, String>> {
+        match &self.inner.kind {
+            ErrorKind::ApiCall(d) => d.response_headers.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Request URL when [`Self::is_api_call`].
     #[must_use]
     pub fn url(&self) -> Option<&str> {
