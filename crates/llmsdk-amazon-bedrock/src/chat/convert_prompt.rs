@@ -96,8 +96,7 @@ pub(crate) fn convert_prompt(
                                     is_mistral,
                                     &mut document_counter,
                                     &mut content,
-                                    &mut warnings,
-                                );
+                                )?;
                                 if let Some((kind, ttl)) =
                                     parse_cache_point(provider_user_part_options(part))
                                 {
@@ -356,8 +355,7 @@ fn append_user_part(
     _is_mistral: bool,
     document_counter: &mut u32,
     content: &mut Vec<ContentBlock>,
-    warnings: &mut Vec<Warning>,
-) {
+) -> Result<(), ProviderError> {
     match part {
         UserPart::Text(t) => {
             content.push(ContentBlock::Text {
@@ -368,25 +366,27 @@ fn append_user_part(
             let media = file.media_type.as_str();
             match &file.data {
                 FileData::Url { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "file.url".to_owned(),
-                        details: Some(
-                            "Bedrock does not accept URL-sourced files; provide bytes inline."
-                                .to_owned(),
-                        ),
-                    });
+                    return Err(ProviderError::unsupported("File URL data"));
                 }
                 FileData::Reference { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "file.reference".to_owned(),
-                        details: Some(
-                            "Bedrock does not accept provider-reference files in chat content."
-                                .to_owned(),
-                        ),
-                    });
+                    return Err(ProviderError::unsupported(
+                        "file parts with provider references",
+                    ));
                 }
                 FileData::Text { text } => {
-                    let format = document_format_for_media_type(media).unwrap_or("txt");
+                    // Mirror upstream `textMediaType = isFullMediaType(...) ? mediaType
+                    // : 'text/plain'`, then resolve the document format (hard error
+                    // for unknown types).
+                    let text_media_type = if media.contains('/') {
+                        media
+                    } else {
+                        "text/plain"
+                    };
+                    let Some(format) = document_format_for_media_type(text_media_type) else {
+                        return Err(ProviderError::unsupported(format!(
+                            "file mime type: {text_media_type}"
+                        )));
+                    };
                     let name = derive_document_name(file.filename.as_deref(), document_counter);
                     let enable_citations = parse_file_part(file.provider_options.as_ref())
                         .citations
@@ -409,11 +409,9 @@ fn append_user_part(
                     };
                     if media.starts_with("image/") {
                         let Some(format) = image_format_for_media_type(media) else {
-                            warnings.push(Warning::Unsupported {
-                                feature: "file.image".to_owned(),
-                                details: Some(format!("unsupported image media type {media}")),
-                            });
-                            return;
+                            return Err(ProviderError::unsupported(format!(
+                                "image mime type: {media}"
+                            )));
                         };
                         content.push(ContentBlock::Image {
                             image: ImageBlock {
@@ -422,7 +420,11 @@ fn append_user_part(
                             },
                         });
                     } else {
-                        let format = document_format_for_media_type(media).unwrap_or("txt");
+                        let Some(format) = document_format_for_media_type(media) else {
+                            return Err(ProviderError::unsupported(format!(
+                                "file mime type: {media}"
+                            )));
+                        };
                         let name = derive_document_name(file.filename.as_deref(), document_counter);
                         let enable_citations = parse_file_part(file.provider_options.as_ref())
                             .citations
@@ -441,6 +443,7 @@ fn append_user_part(
             }
         }
     }
+    Ok(())
 }
 
 /// Map an IANA image media type to Bedrock's `format` string.
@@ -573,6 +576,53 @@ mod tests {
             converted.messages[0].content[0],
             ContentBlock::Text { .. }
         ));
+    }
+
+    fn user_file(media_type: &str, data: FileData) -> Message {
+        Message::User {
+            content: vec![UserPart::File(llmsdk_provider::language_model::FilePart {
+                filename: None,
+                data,
+                media_type: media_type.into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }
+    }
+
+    #[test]
+    fn url_sourced_file_is_rejected() {
+        // Bedrock's Converse API has no URL source; upstream throws
+        // `UnsupportedFunctionalityError: File URL data`.
+        let prompt = vec![user_file(
+            "image/png",
+            FileData::Url {
+                url: "https://example.com/cat.png".into(),
+            },
+        )];
+        let err = convert_prompt(&prompt, false).unwrap_err();
+        assert!(format!("{err}").contains("File URL data"));
+    }
+
+    #[test]
+    fn provider_reference_file_is_rejected() {
+        let mut reference = serde_json::Map::new();
+        reference.insert("bedrock".into(), serde_json::Value::String("file_1".into()));
+        let prompt = vec![user_file("image/png", FileData::Reference { reference })];
+        let err = convert_prompt(&prompt, false).unwrap_err();
+        assert!(format!("{err}").contains("file parts with provider references"));
+    }
+
+    #[test]
+    fn unsupported_image_mime_is_rejected() {
+        let prompt = vec![user_file(
+            "image/tiff",
+            FileData::Data {
+                data: FileBytes::Bytes(b"\x00\x01".to_vec()),
+            },
+        )];
+        let err = convert_prompt(&prompt, false).unwrap_err();
+        assert!(format!("{err}").contains("image mime type: image/tiff"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! Mirrors `@ai-sdk/openai/src/responses/convert-to-openai-responses-input.ts`.
 // Rust guideline compliant 2026-02-21
 
+use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
     AssistantPart, FilePart, Message, ToolApprovalResponsePart, ToolCallPart, ToolMessagePart,
     ToolResultOutput, ToolResultPart, UserPart,
@@ -49,8 +50,19 @@ impl Default for ConvertCtx<'_> {
 }
 
 /// Convert one [`Prompt`] into a flat `input[]` array for the Responses API.
-#[must_use]
-pub fn convert_prompt(prompt: &[Message], ctx: &ConvertCtx<'_>) -> (Vec<InputItem>, Vec<Warning>) {
+///
+/// # Errors
+///
+/// Returns [`ProviderError::unsupported`] / [`ProviderError::invalid_argument`]
+/// for user file parts the Responses API rejects hard (inline-text file data,
+/// non-image data without a PDF media type or `passThroughUnsupportedFiles`,
+/// or provider references missing the resolving entry). Mirrors upstream's
+/// `UnsupportedFunctionalityError` / `NoSuchProviderReferenceError` in
+/// `convert-to-openai-responses-input.ts`.
+pub fn convert_prompt(
+    prompt: &[Message],
+    ctx: &ConvertCtx<'_>,
+) -> Result<(Vec<InputItem>, Vec<Warning>), ProviderError> {
     let mut items: Vec<InputItem> = Vec::new();
     let mut warnings = Vec::new();
 
@@ -76,7 +88,7 @@ pub fn convert_prompt(prompt: &[Message], ctx: &ConvertCtx<'_>) -> (Vec<InputIte
                 }
             },
             Message::User { content, .. } => {
-                let parts = convert_user_parts(content, ctx, &mut warnings);
+                let parts = convert_user_parts(content, ctx)?;
                 if !parts.is_empty() {
                     items.push(InputItem::Message(InputMessage::User {
                         role: UserRole::User,
@@ -133,121 +145,95 @@ pub fn convert_prompt(prompt: &[Message], ctx: &ConvertCtx<'_>) -> (Vec<InputIte
         }
     }
 
-    (items, warnings)
+    Ok((items, warnings))
 }
 
 fn convert_user_parts(
     parts: &[UserPart],
     ctx: &ConvertCtx<'_>,
-    warnings: &mut Vec<Warning>,
-) -> Vec<UserContentPart> {
+) -> Result<Vec<UserContentPart>, ProviderError> {
     let mut out = Vec::new();
     for part in parts {
         match part {
             UserPart::Text(t) => out.push(UserContentPart::InputText {
                 text: t.text.clone(),
             }),
-            UserPart::File(f) => {
-                if let Some(p) = convert_user_file(f, ctx, warnings) {
-                    out.push(p);
-                }
-            }
+            UserPart::File(f) => out.push(convert_user_file(f, ctx)?),
         }
     }
-    out
+    Ok(out)
 }
 
 fn convert_user_file(
     file: &FilePart,
     ctx: &ConvertCtx<'_>,
-    warnings: &mut Vec<Warning>,
-) -> Option<UserContentPart> {
+) -> Result<UserContentPart, ProviderError> {
     let mt = file.media_type.as_str();
+    let is_image = mt.starts_with("image/");
 
-    // Image
-    if mt.starts_with("image/") {
-        let detail = read_image_detail(file.provider_options.as_ref(), ctx);
-        let payload = match &file.data {
-            FileData::Url { url } => InputImage::Url {
-                image_url: url.clone(),
-                detail,
-            },
-            FileData::Data { data } => InputImage::Url {
-                image_url: data_uri(mt, data),
-                detail,
-            },
-            FileData::Reference { reference } => {
-                let id = reference
-                    .get(ctx.provider_options_name)
-                    .or_else(|| reference.get("openai"))
-                    .and_then(|v| v.as_str());
-                match id {
-                    Some(id) => InputImage::Reference {
-                        file_id: id.to_string(),
-                        detail,
-                    },
-                    None => {
-                        warnings.push(Warning::Other {
-                            message: format!("user file reference for {mt} missing OpenAI file_id"),
-                        });
-                        return None;
-                    }
-                }
+    match &file.data {
+        // Provider reference resolves to a previously-uploaded file id, for
+        // both images and other documents. Mirrors upstream
+        // `resolveProviderReference` (throws when the entry is absent).
+        FileData::Reference { reference } => {
+            let Some(id) = reference
+                .get(ctx.provider_options_name)
+                .or_else(|| reference.get("openai"))
+                .and_then(|v| v.as_str())
+            else {
+                return Err(ProviderError::invalid_argument(
+                    "file.data.reference",
+                    format!(
+                        "file reference must contain a string `{}` entry",
+                        ctx.provider_options_name
+                    ),
+                ));
+            };
+            if is_image {
+                Ok(UserContentPart::InputImage(InputImage::Reference {
+                    file_id: id.to_string(),
+                    detail: read_image_detail(file.provider_options.as_ref(), ctx),
+                }))
+            } else {
+                Ok(UserContentPart::InputFile(InputFile::Reference {
+                    file_id: id.to_string(),
+                }))
             }
-            FileData::Text { .. } => {
-                warnings.push(Warning::Other {
-                    message: "image file with inline text payload is not supported".into(),
-                });
-                return None;
+        }
+        // Inline-text file data is never accepted as a file part.
+        FileData::Text { .. } => Err(ProviderError::unsupported("text file parts")),
+        FileData::Url { url } => {
+            if is_image {
+                Ok(UserContentPart::InputImage(InputImage::Url {
+                    image_url: url.clone(),
+                    detail: read_image_detail(file.provider_options.as_ref(), ctx),
+                }))
+            } else {
+                // Any non-image URL is forwarded as an `input_file`, regardless
+                // of media type or `passThroughUnsupportedFiles`.
+                Ok(UserContentPart::InputFile(InputFile::Url {
+                    file_url: url.clone(),
+                }))
             }
-        };
-        return Some(UserContentPart::InputImage(payload));
+        }
+        FileData::Data { data } => {
+            if is_image {
+                Ok(UserContentPart::InputImage(InputImage::Url {
+                    image_url: data_uri(mt, data),
+                    detail: read_image_detail(file.provider_options.as_ref(), ctx),
+                }))
+            } else if mt == "application/pdf" || ctx.pass_through_unsupported_files {
+                Ok(UserContentPart::InputFile(InputFile::Data {
+                    filename: file.filename.clone().unwrap_or_else(|| "file".into()),
+                    file_data: data_uri(mt, data),
+                }))
+            } else {
+                Err(ProviderError::unsupported(format!(
+                    "file part media type {mt}"
+                )))
+            }
+        }
     }
-
-    // PDF or pass-through file
-    let is_pdf = mt == "application/pdf";
-    if is_pdf || ctx.pass_through_unsupported_files {
-        let payload = match &file.data {
-            FileData::Url { url } => InputFile::Url {
-                file_url: url.clone(),
-            },
-            FileData::Data { data } => InputFile::Data {
-                filename: file.filename.clone().unwrap_or_else(|| "file".into()),
-                file_data: data_uri(mt, data),
-            },
-            FileData::Reference { reference } => {
-                let id = reference
-                    .get(ctx.provider_options_name)
-                    .or_else(|| reference.get("openai"))
-                    .and_then(|v| v.as_str());
-                match id {
-                    Some(id) => InputFile::Reference {
-                        file_id: id.to_string(),
-                    },
-                    None => {
-                        warnings.push(Warning::Other {
-                            message: format!("user file reference for {mt} missing OpenAI file_id"),
-                        });
-                        return None;
-                    }
-                }
-            }
-            FileData::Text { .. } => {
-                warnings.push(Warning::Other {
-                    message: format!("inline text payload for {mt} is not supported"),
-                });
-                return None;
-            }
-        };
-        return Some(UserContentPart::InputFile(payload));
-    }
-
-    warnings.push(Warning::Other {
-        message: format!(
-            "user file with media type {mt} dropped (set passThroughUnsupportedFiles to keep it)"
-        ),
-    });
-    None
 }
 
 fn data_uri(media_type: &str, bytes: &FileBytes) -> String {
@@ -814,7 +800,8 @@ mod tests {
                 system_message_mode: SystemMessageMode::System,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let s = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(s["role"], "system");
     }
@@ -831,7 +818,8 @@ mod tests {
                 system_message_mode: SystemMessageMode::Developer,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let s = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(s["role"], "developer");
     }
@@ -848,7 +836,8 @@ mod tests {
                 system_message_mode: SystemMessageMode::Remove,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(out.is_empty());
         assert_eq!(warnings.len(), 1);
     }
@@ -872,7 +861,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["content"][0]["type"], "input_text");
         assert_eq!(v["content"][1]["type"], "input_image");
@@ -892,14 +881,16 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["content"][0]["type"], "input_file");
         assert_eq!(v["content"][0]["file_url"], "https://x/doc.pdf");
     }
 
     #[test]
-    fn user_text_file_dropped_without_passthrough() {
+    fn user_non_image_url_routes_to_input_file() {
+        // Mirrors upstream: any non-image URL becomes an `input_file` with a
+        // `file_url`, regardless of media type or pass-through settings.
         let p = vec![Message::User {
             content: vec![UserPart::File(FilePart {
                 filename: Some("a.csv".into()),
@@ -911,9 +902,45 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, w) = convert_prompt(&p, &ConvertCtx::default());
-        assert!(out.is_empty());
-        assert_eq!(w.len(), 1);
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["content"][0]["type"], "input_file");
+        assert_eq!(v["content"][0]["file_url"], "https://x/a.csv");
+    }
+
+    #[test]
+    fn user_non_image_data_without_passthrough_is_rejected() {
+        // Mirrors upstream `UnsupportedFunctionalityError: file part media
+        // type text/csv` for non-image inline data without pass-through.
+        let p = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: Some("a.csv".into()),
+                data: FileData::Data {
+                    data: FileBytes::Bytes(b"a,b\n1,2\n".to_vec()),
+                },
+                media_type: "text/csv".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let err = convert_prompt(&p, &ConvertCtx::default()).unwrap_err();
+        assert!(format!("{err}").contains("file part media type text/csv"));
+    }
+
+    #[test]
+    fn user_text_data_file_is_rejected() {
+        // Mirrors upstream `UnsupportedFunctionalityError: text file parts`.
+        let p = vec![Message::User {
+            content: vec![UserPart::File(FilePart {
+                filename: None,
+                data: FileData::Text { text: "hi".into() },
+                media_type: "text/plain".into(),
+                provider_options: None,
+            })],
+            provider_options: None,
+        }];
+        let err = convert_prompt(&p, &ConvertCtx::default()).unwrap_err();
+        assert!(format!("{err}").contains("text file parts"));
     }
 
     #[test]
@@ -921,8 +948,8 @@ mod tests {
         let p = vec![Message::User {
             content: vec![UserPart::File(FilePart {
                 filename: Some("a.csv".into()),
-                data: FileData::Url {
-                    url: "https://x/a.csv".into(),
+                data: FileData::Data {
+                    data: FileBytes::Bytes(b"a,b\n1,2\n".to_vec()),
                 },
                 media_type: "text/csv".into(),
                 provider_options: None,
@@ -935,7 +962,8 @@ mod tests {
                 pass_through_unsupported_files: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["content"][0]["type"], "input_file");
     }
@@ -962,7 +990,7 @@ mod tests {
                 provider_options: None,
             },
         ];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let assistant = serde_json::to_value(&out[1]).unwrap();
         assert_eq!(assistant["role"], "assistant");
         assert_eq!(assistant["content"][0]["type"], "output_text");
@@ -990,7 +1018,7 @@ mod tests {
             }],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "reasoning");
         assert_eq!(v["id"], "r1");
@@ -1012,7 +1040,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "function_call_output");
         assert_eq!(v["output"], "sunny");
@@ -1031,7 +1059,7 @@ mod tests {
             )],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "mcp_approval_response");
         assert_eq!(v["approval_request_id"], "appr_1");
@@ -1056,7 +1084,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "item_reference");
         assert_eq!(v["id"], "ws_1");
@@ -1089,7 +1117,7 @@ mod tests {
             }],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         assert!(
             out.is_empty(),
             "no input items emitted for un-identifiable reasoning"
@@ -1122,7 +1150,7 @@ mod tests {
             }],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, warnings) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         assert_eq!(out.len(), 1);
         assert!(matches!(
             out[0],
@@ -1172,7 +1200,8 @@ mod tests {
                 store: false,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         // Only the reasoning with encrypted_content survives.
         assert_eq!(out.len(), 1);
         let Some(InputItem::Typed(TypedInputItem::Reasoning {
@@ -1209,7 +1238,8 @@ mod tests {
                 store: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert!(warnings.is_empty());
     }
@@ -1229,7 +1259,8 @@ mod tests {
                 has_previous_response_id: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(out.is_empty(), "reasoning with itemId must be skipped");
     }
 
@@ -1248,7 +1279,8 @@ mod tests {
                 has_conversation: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(out.is_empty());
     }
 
@@ -1267,7 +1299,8 @@ mod tests {
                 has_conversation: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(out.is_empty(), "text with itemId must be skipped");
     }
 
@@ -1290,7 +1323,8 @@ mod tests {
                 has_conversation: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(out.is_empty(), "tool-call with itemId must be skipped");
     }
 
@@ -1312,7 +1346,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         assert_eq!(out.len(), 1, "expected exactly one item_reference");
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "item_reference");
@@ -1342,7 +1376,8 @@ mod tests {
                 has_previous_response_id: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(
             out.is_empty(),
             "tool-call with store + previous_response_id + itemId must be skipped"
@@ -1370,7 +1405,8 @@ mod tests {
                 store: false,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "function_call");
@@ -1398,7 +1434,8 @@ mod tests {
                 has_conversation: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(
             out.is_empty(),
             "tool-result must be skipped under hasConversation"
@@ -1422,7 +1459,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["type"], "function_call_output");
         assert_eq!(v["output"][0]["type"], "input_text");
@@ -1455,7 +1492,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&p, &ConvertCtx::default());
+        let (out, _) = convert_prompt(&p, &ConvertCtx::default()).unwrap();
         let v = serde_json::to_value(&out[0]).unwrap();
         assert_eq!(v["output"][0]["type"], "input_image");
         assert_eq!(v["output"][0]["detail"], "high");

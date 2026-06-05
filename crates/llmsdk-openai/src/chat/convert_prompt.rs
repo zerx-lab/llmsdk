@@ -5,6 +5,7 @@
 //! dropped — we never silently lose information.
 // Rust guideline compliant 2026-02-21
 
+use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
     AssistantPart, FilePart, Message, Prompt, ToolCallPart, ToolMessagePart, ToolResultOutput,
     ToolResultPart, UserPart,
@@ -21,10 +22,18 @@ use super::wire::{
 ///
 /// `system_role` selects between the standard `system` role and the
 /// reasoning-model `developer` role.
+///
+/// # Errors
+///
+/// Returns [`ProviderError::unsupported`] / [`ProviderError::invalid_argument`]
+/// for user file parts that `OpenAI` rejects hard (unsupported media types,
+/// URL-sourced audio/PDF, inline-text file data, or provider references that
+/// lack an `openai` entry). Mirrors upstream's `UnsupportedFunctionalityError`
+/// / `NoSuchProviderReferenceError` in `convert-to-openai-chat-messages.ts`.
 pub(crate) fn convert_prompt(
     prompt: &Prompt,
     system_role: SystemRole,
-) -> (Vec<WireMessage>, Vec<Warning>) {
+) -> Result<(Vec<WireMessage>, Vec<Warning>), ProviderError> {
     let mut messages = Vec::with_capacity(prompt.len());
     let mut warnings = Vec::new();
 
@@ -44,7 +53,7 @@ pub(crate) fn convert_prompt(
                 }
             },
             Message::User { content, .. } => {
-                messages.push(convert_user(content, &mut warnings));
+                messages.push(convert_user(content)?);
             }
             Message::Assistant { content, .. } => {
                 messages.push(convert_assistant(content, &mut warnings));
@@ -59,15 +68,15 @@ pub(crate) fn convert_prompt(
         }
     }
 
-    (messages, warnings)
+    Ok((messages, warnings))
 }
 
-fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> WireMessage {
+fn convert_user(parts: &[UserPart]) -> Result<WireMessage, ProviderError> {
     // Single text part collapses to plain string (matches ai-sdk).
     if let [UserPart::Text(t)] = parts {
-        return WireMessage::User {
+        return Ok(WireMessage::User {
             content: WireUserContent::Text(t.text.clone()),
-        };
+        });
     }
 
     let mut out = Vec::with_capacity(parts.len());
@@ -76,42 +85,31 @@ fn convert_user(parts: &[UserPart], warnings: &mut Vec<Warning>) -> WireMessage 
             UserPart::Text(t) => out.push(WireUserPart::Text {
                 text: t.text.clone(),
             }),
-            UserPart::File(f) => {
-                if let Some(part) = convert_user_file(f, idx, warnings) {
-                    out.push(part);
-                }
-            }
+            UserPart::File(f) => out.push(convert_user_file(f, idx)?),
         }
     }
-    WireMessage::User {
+    Ok(WireMessage::User {
         content: WireUserContent::Parts(out),
-    }
+    })
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "linear dispatch over media-type families mirroring ai-sdk convert-to-openai-chat-messages"
 )]
-fn convert_user_file(
-    file: &FilePart,
-    index: usize,
-    warnings: &mut Vec<Warning>,
-) -> Option<WireUserPart> {
+fn convert_user_file(file: &FilePart, index: usize) -> Result<WireUserPart, ProviderError> {
     // Provider-reference data resolves to a previously-uploaded file id.
     if let FileData::Reference { reference, .. } = &file.data {
         // Mirror ai-sdk `resolveProviderReference({ reference, provider: 'openai' })`
-        // — the reference must address the `openai` provider.
+        // — the reference must address the `openai` provider, else upstream throws
+        // `NoSuchProviderReferenceError`.
         let Some(file_id) = reference.get("openai").and_then(|v| v.as_str()) else {
-            warnings.push(Warning::Unsupported {
-                feature: "user.file.reference".to_owned(),
-                details: Some(
-                    "provider reference lacks an `openai` string id — cannot resolve file id"
-                        .to_owned(),
-                ),
-            });
-            return None;
+            return Err(ProviderError::invalid_argument(
+                "file.data.reference",
+                "OpenAI file reference must contain a string `openai` entry",
+            ));
         };
-        return Some(WireUserPart::File {
+        return Ok(WireUserPart::File {
             file: WireUserFile::Reference {
                 file_id: file_id.to_owned(),
             },
@@ -130,11 +128,7 @@ fn convert_user_file(
                 FileData::Url { url } => url.clone(),
                 FileData::Data { data } => data_uri(&file.media_type, data),
                 FileData::Text { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.text".to_owned(),
-                        details: Some("inline-text file data unsupported for images".to_owned()),
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported("text file parts"));
                 }
                 FileData::Reference { .. } => unreachable!("handled above"),
             };
@@ -145,7 +139,7 @@ fn convert_user_file(
                 .and_then(|openai| openai.get("imageDetail"))
                 .and_then(|v| v.as_str())
                 .map(str::to_owned);
-            Some(WireUserPart::ImageUrl {
+            Ok(WireUserPart::ImageUrl {
                 image_url: WireImageUrl { url, detail },
             })
         }
@@ -154,20 +148,10 @@ fn convert_user_file(
             let data = match &file.data {
                 FileData::Data { data } => base64_of(data),
                 FileData::Url { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.audio-url".to_owned(),
-                        details: Some(
-                            "audio file parts must be inline base64, not URLs".to_owned(),
-                        ),
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported("audio file parts with URLs"));
                 }
                 FileData::Text { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.audio-text".to_owned(),
-                        details: None,
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported("text file parts"));
                 }
                 FileData::Reference { .. } => unreachable!("handled above"),
             };
@@ -175,16 +159,12 @@ fn convert_user_file(
                 "audio/wav" => "wav",
                 "audio/mp3" | "audio/mpeg" => "mp3",
                 other => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.audio-format".to_owned(),
-                        details: Some(format!(
-                            "audio content parts with media type {other} are not supported"
-                        )),
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported(format!(
+                        "audio content parts with media type {other}"
+                    )));
                 }
             };
-            Some(WireUserPart::InputAudio {
+            Ok(WireUserPart::InputAudio {
                 input_audio: WireInputAudio {
                     data,
                     format: format.to_owned(),
@@ -194,30 +174,18 @@ fn convert_user_file(
         _ => {
             // OpenAI only accepts application/pdf for the `file` content part.
             if file.media_type != "application/pdf" {
-                warnings.push(Warning::Unsupported {
-                    feature: "user.file".to_owned(),
-                    details: Some(format!(
-                        "file part media type {} is not supported",
-                        file.media_type
-                    )),
-                });
-                return None;
+                return Err(ProviderError::unsupported(format!(
+                    "file part media type {}",
+                    file.media_type
+                )));
             }
             let data = match &file.data {
                 FileData::Data { data } => base64_of(data),
                 FileData::Url { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.pdf-url".to_owned(),
-                        details: Some("PDF file parts must be inline base64, not URLs".to_owned()),
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported("PDF file parts with URLs"));
                 }
                 FileData::Text { .. } => {
-                    warnings.push(Warning::Unsupported {
-                        feature: "user.file.pdf-text".to_owned(),
-                        details: None,
-                    });
-                    return None;
+                    return Err(ProviderError::unsupported("text file parts"));
                 }
                 FileData::Reference { .. } => unreachable!("handled above"),
             };
@@ -225,7 +193,7 @@ fn convert_user_file(
                 .filename
                 .clone()
                 .unwrap_or_else(|| format!("part-{index}.pdf"));
-            Some(WireUserPart::File {
+            Ok(WireUserPart::File {
                 file: WireUserFile::Inline {
                     filename,
                     file_data: format!("data:application/pdf;base64,{data}"),
@@ -408,7 +376,7 @@ mod tests {
             content: "be brief".into(),
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         assert!(matches!(out[0], WireMessage::System { ref content } if content == "be brief"));
     }
@@ -419,7 +387,7 @@ mod tests {
             content: "be brief".into(),
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&prompt, SystemRole::Developer);
+        let (out, _) = convert_prompt(&prompt, SystemRole::Developer).unwrap();
         assert!(matches!(out[0], WireMessage::Developer { ref content } if content == "be brief"));
     }
 
@@ -432,7 +400,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&prompt, SystemRole::System);
+        let (out, _) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(
             matches!(&out[0], WireMessage::User { content: WireUserContent::Text(s) } if s == "hi")
         );
@@ -457,7 +425,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -471,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn non_image_file_produces_warning() {
+    fn pdf_url_is_rejected() {
         let prompt = vec![Message::User {
             content: vec![UserPart::File(FilePart {
                 filename: None,
@@ -483,14 +451,8 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
-        assert_eq!(warnings.len(), 1);
-        if let WireMessage::User {
-            content: WireUserContent::Parts(p),
-        } = &out[0]
-        {
-            assert!(p.is_empty());
-        }
+        let err = convert_prompt(&prompt, SystemRole::System).unwrap_err();
+        assert!(format!("{err}").contains("PDF file parts with URLs"));
     }
 
     #[test]
@@ -511,7 +473,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&prompt, SystemRole::System);
+        let (out, _) = convert_prompt(&prompt, SystemRole::System).unwrap();
         let wire = serde_json::to_value(&out[0]).expect("serializes");
         assert_eq!(
             wire.get("content"),
@@ -534,7 +496,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, _) = convert_prompt(&prompt, SystemRole::System);
+        let (out, _) = convert_prompt(&prompt, SystemRole::System).unwrap();
         let wire = serde_json::to_value(&out[0]).expect("serializes");
         assert_eq!(
             wire.get("content"),
@@ -566,7 +528,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::Assistant {
             content,
@@ -596,7 +558,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -623,7 +585,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -636,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_url_produces_warning() {
+    fn audio_url_is_rejected() {
         let prompt = vec![Message::User {
             content: vec![UserPart::File(FilePart {
                 filename: None,
@@ -648,8 +610,8 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (_, warnings) = convert_prompt(&prompt, SystemRole::System);
-        assert_eq!(warnings.len(), 1);
+        let err = convert_prompt(&prompt, SystemRole::System).unwrap_err();
+        assert!(format!("{err}").contains("audio file parts with URLs"));
     }
 
     #[test]
@@ -665,7 +627,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -703,7 +665,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),
@@ -737,7 +699,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let (out, warnings) = convert_prompt(&prompt, SystemRole::System);
+        let (out, warnings) = convert_prompt(&prompt, SystemRole::System).unwrap();
         assert!(warnings.is_empty());
         if let WireMessage::User {
             content: WireUserContent::Parts(parts),

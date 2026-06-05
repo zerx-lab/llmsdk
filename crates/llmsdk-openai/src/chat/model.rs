@@ -65,7 +65,7 @@ impl LanguageModel for OpenAiChatModel {
     }
 
     async fn do_generate(&self, options: CallOptions) -> Result<GenerateResult, ProviderError> {
-        let (request, warnings) = build_request(&self.model_id, &options);
+        let (request, warnings) = build_request(&self.model_id, &options)?;
 
         // Merge per-provider headers with per-call headers (call-site wins).
         let mut request_headers = self.inner.headers.clone();
@@ -99,7 +99,7 @@ impl LanguageModel for OpenAiChatModel {
     }
 
     async fn do_stream(&self, options: CallOptions) -> Result<StreamResult, ProviderError> {
-        let (mut request, warnings) = build_request(&self.model_id, &options);
+        let (mut request, warnings) = build_request(&self.model_id, &options)?;
         request.stream = Some(true);
         request.stream_options = Some(StreamOptions {
             include_usage: Some(true),
@@ -200,7 +200,10 @@ where
     clippy::too_many_lines,
     reason = "single dispatcher mirroring ai-sdk's openai-chat-language-model.ts; splitting would obscure the parameter flow"
 )]
-fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<Warning>) {
+fn build_request(
+    model_id: &str,
+    options: &CallOptions,
+) -> Result<(ChatRequest, Vec<Warning>), ProviderError> {
     let provider_opts = parse_provider_options(options.provider_options.as_ref());
     let caps = Capabilities::detect(model_id);
 
@@ -229,7 +232,7 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         Some("remove") => SystemRole::Remove,
         _ => auto_role,
     };
-    let (messages, mut warnings) = convert_prompt(&options.prompt, system_role);
+    let (messages, mut warnings) = convert_prompt(&options.prompt, system_role)?;
 
     if let Some(mode) = provider_opts.system_message_mode.as_deref()
         && !matches!(mode, "system" | "developer" | "remove")
@@ -375,7 +378,7 @@ fn build_request(model_id: &str, options: &CallOptions) -> (ChatRequest, Vec<War
         apply_search_preview_strip(&mut request, &mut warnings);
     }
 
-    (request, warnings)
+    Ok((request, warnings))
 }
 
 /// Drop unsupported settings for reasoning models, with a warning per drop.

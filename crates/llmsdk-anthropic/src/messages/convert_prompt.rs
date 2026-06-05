@@ -14,6 +14,7 @@
 //!    into a single user message.
 // Rust guideline compliant 2026-02-21
 
+use llmsdk_provider::ProviderError;
 use llmsdk_provider::language_model::{
     AssistantPart, Message, Prompt, ToolCallPart, ToolMessagePart, ToolOutputPart,
     ToolResultOutput, ToolResultPart, UserPart,
@@ -26,6 +27,7 @@ use super::wire::{
 };
 
 /// Result of [`convert_prompt`].
+#[derive(Debug)]
 pub(crate) struct Converted {
     pub system: Option<String>,
     pub messages: Vec<WireMessage>,
@@ -42,7 +44,18 @@ pub(crate) struct Converted {
 /// `ReasoningFile` parts are forwarded to the model. When `false`, both
 /// types are silently dropped without warnings (matches ai-sdk semantics
 /// for models that don't accept reasoning input).
-pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted {
+///
+/// # Errors
+///
+/// Returns [`ProviderError::unsupported`] / [`ProviderError::invalid_argument`]
+/// for user file parts that `Anthropic` rejects hard (unsupported media types
+/// or provider references missing the `anthropic` entry). Mirrors upstream's
+/// `UnsupportedFunctionalityError` / `NoSuchProviderReferenceError` in
+/// `convert-to-anthropic-prompt.ts`.
+pub(crate) fn convert_prompt(
+    prompt: &Prompt,
+    send_reasoning: bool,
+) -> Result<Converted, ProviderError> {
     let mut systems: Vec<&str> = Vec::new();
     let mut messages: Vec<WireMessage> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
@@ -53,7 +66,7 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
         match message {
             Message::System { content, .. } => systems.push(content.as_str()),
             Message::User { content, .. } => {
-                let parts = convert_user(content, &mut warnings, &mut betas, &mut validator);
+                let parts = convert_user(content, &mut betas, &mut validator)?;
                 push_user(&mut messages, parts);
             }
             Message::Assistant {
@@ -93,12 +106,12 @@ pub(crate) fn convert_prompt(prompt: &Prompt, send_reasoning: bool) -> Converted
 
     warnings.append(&mut validator.warnings);
 
-    Converted {
+    Ok(Converted {
         system,
         messages,
         warnings,
         betas,
-    }
+    })
 }
 
 /// Push a list of user parts onto `messages`, merging with the trailing
@@ -120,10 +133,9 @@ fn push_user(messages: &mut Vec<WireMessage>, mut parts: Vec<WireUserPart>) {
 )]
 fn convert_user(
     parts: &[UserPart],
-    warnings: &mut Vec<Warning>,
     betas: &mut std::collections::BTreeSet<String>,
     validator: &mut CacheControlValidator,
-) -> Vec<WireUserPart> {
+) -> Result<Vec<WireUserPart>, ProviderError> {
     let mut out = Vec::with_capacity(parts.len());
     for part in parts {
         match part {
@@ -145,112 +157,129 @@ fn convert_user(
                     .split('/')
                     .next()
                     .unwrap_or(f.media_type.as_str());
-                if top == "image" {
-                    let source = match &f.data {
-                        FileData::Url { url } => WireImageSource::Url { url: url.clone() },
-                        FileData::Data { data } => WireImageSource::Base64 {
-                            media_type: f.media_type.clone(),
-                            data: file_bytes_to_base64(data),
-                        },
-                        FileData::Reference { reference } => {
-                            if let Some(file_id) = resolve_anthropic_file_id(reference) {
-                                betas.insert("files-api-2025-04-14".to_owned());
-                                WireImageSource::File { file_id }
-                            } else {
-                                warnings.push(Warning::Unsupported {
-                                    feature: "user.file.data".to_owned(),
-                                    details: Some(
-                                        "image file reference missing `anthropic` provider entry"
-                                            .to_owned(),
-                                    ),
-                                });
-                                continue;
+                let is_image = top == "image";
+
+                // Dispatch on the data source first, mirroring upstream's
+                // `switch (part.data.type)` in `convert-to-anthropic-prompt.ts`.
+                let wire = match &f.data {
+                    // A Files-API reference works for images and documents
+                    // alike; a missing `anthropic` entry is a hard error
+                    // (upstream `resolveProviderReference` throws).
+                    FileData::Reference { reference } => {
+                        let Some(file_id) = resolve_anthropic_file_id(reference) else {
+                            return Err(ProviderError::invalid_argument(
+                                "file.data.reference",
+                                "file reference must contain a non-empty `anthropic` entry",
+                            ));
+                        };
+                        betas.insert("files-api-2025-04-14".to_owned());
+                        if is_image {
+                            WireUserPart::Image {
+                                source: WireImageSource::File { file_id },
+                                cache_control,
+                            }
+                        } else {
+                            WireUserPart::Document {
+                                source: WireDocumentSource::File { file_id },
+                                title,
+                                context,
+                                citations,
+                                cache_control,
                             }
                         }
-                        FileData::Text { .. } => {
-                            warnings.push(Warning::Unsupported {
-                                feature: "user.file.data".to_owned(),
-                                details: Some(
-                                    "image files only accept Url or inline bytes".to_owned(),
-                                ),
-                            });
-                            continue;
-                        }
-                    };
-                    out.push(WireUserPart::Image {
-                        source,
+                    }
+                    // Inline text always becomes a `text/plain` document,
+                    // regardless of the declared media type (upstream maps the
+                    // `text` data variant straight to a document source).
+                    FileData::Text { text } => WireUserPart::Document {
+                        source: WireDocumentSource::Text {
+                            media_type: "text/plain".to_owned(),
+                            data: text.clone(),
+                        },
+                        title,
+                        context,
+                        citations,
                         cache_control,
-                    });
-                    continue;
-                }
-                // Non-image: try document.
-                let source = match (f.media_type.as_str(), &f.data) {
-                    // Files-API reference works for any non-image document type.
-                    (_, FileData::Reference { reference }) => {
-                        if let Some(file_id) = resolve_anthropic_file_id(reference) {
-                            betas.insert("files-api-2025-04-14".to_owned());
-                            WireDocumentSource::File { file_id }
+                    },
+                    FileData::Url { url } => {
+                        if is_image {
+                            WireUserPart::Image {
+                                source: WireImageSource::Url { url: url.clone() },
+                                cache_control,
+                            }
+                        } else if f.media_type == "application/pdf" {
+                            WireUserPart::Document {
+                                source: WireDocumentSource::Url {
+                                    url: url.clone(),
+                                    media_type: "application/pdf".to_owned(),
+                                },
+                                title,
+                                context,
+                                citations,
+                                cache_control,
+                            }
+                        } else if f.media_type == "text/plain" {
+                            WireUserPart::Document {
+                                source: WireDocumentSource::Url {
+                                    url: url.clone(),
+                                    media_type: "text/plain".to_owned(),
+                                },
+                                title,
+                                context,
+                                citations,
+                                cache_control,
+                            }
                         } else {
-                            warnings.push(Warning::Unsupported {
-                                feature: "user.file.data".to_owned(),
-                                details: Some(
-                                    "document file reference missing `anthropic` provider entry"
-                                        .to_owned(),
-                                ),
-                            });
-                            continue;
+                            return Err(ProviderError::unsupported(format!(
+                                "media type: {}",
+                                f.media_type
+                            )));
                         }
                     }
-                    ("application/pdf", FileData::Url { url }) => WireDocumentSource::Url {
-                        url: url.clone(),
-                        media_type: "application/pdf".to_owned(),
-                    },
-                    ("application/pdf", FileData::Data { data }) => WireDocumentSource::Base64 {
-                        media_type: "application/pdf".to_owned(),
-                        data: file_bytes_to_base64(data),
-                    },
-                    ("text/plain", FileData::Url { url }) => WireDocumentSource::Url {
-                        url: url.clone(),
-                        media_type: "text/plain".to_owned(),
-                    },
-                    ("text/plain", FileData::Text { text }) => WireDocumentSource::Text {
-                        media_type: "text/plain".to_owned(),
-                        data: text.clone(),
-                    },
-                    ("text/plain", FileData::Data { data }) => WireDocumentSource::Base64 {
-                        media_type: "text/plain".to_owned(),
-                        data: file_bytes_to_base64(data),
-                    },
-                    (mt, _) if mt.starts_with("audio/") => {
-                        warnings.push(Warning::Unsupported {
-                            feature: "user.file".to_owned(),
-                            details: Some(format!(
-                                "Anthropic Messages API does not accept audio files ({mt})"
-                            )),
-                        });
-                        continue;
-                    }
-                    (mt, _) => {
-                        warnings.push(Warning::Unsupported {
-                            feature: "user.file".to_owned(),
-                            details: Some(format!(
-                                "media_type '{mt}' is not supported by llmsdk-anthropic"
-                            )),
-                        });
-                        continue;
+                    FileData::Data { data } => {
+                        if is_image {
+                            WireUserPart::Image {
+                                source: WireImageSource::Base64 {
+                                    media_type: f.media_type.clone(),
+                                    data: file_bytes_to_base64(data),
+                                },
+                                cache_control,
+                            }
+                        } else if f.media_type == "application/pdf" {
+                            WireUserPart::Document {
+                                source: WireDocumentSource::Base64 {
+                                    media_type: "application/pdf".to_owned(),
+                                    data: file_bytes_to_base64(data),
+                                },
+                                title,
+                                context,
+                                citations,
+                                cache_control,
+                            }
+                        } else if f.media_type == "text/plain" {
+                            WireUserPart::Document {
+                                source: WireDocumentSource::Base64 {
+                                    media_type: "text/plain".to_owned(),
+                                    data: file_bytes_to_base64(data),
+                                },
+                                title,
+                                context,
+                                citations,
+                                cache_control,
+                            }
+                        } else {
+                            return Err(ProviderError::unsupported(format!(
+                                "media type: {}",
+                                f.media_type
+                            )));
+                        }
                     }
                 };
-                out.push(WireUserPart::Document {
-                    source,
-                    title,
-                    context,
-                    citations,
-                    cache_control,
-                });
+                out.push(wire);
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Pluck the Anthropic file id from a `FileData::Reference` map.
@@ -1390,7 +1419,7 @@ mod tests {
                 provider_options: None,
             },
         ];
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert_eq!(
             out.system.as_deref(),
             Some("First instruction.\n\nSecond instruction.")
@@ -1432,7 +1461,7 @@ mod tests {
                 provider_options: None,
             },
         ];
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert_eq!(out.messages.len(), 3);
         // Last message must be a User with a single tool_result part.
         if let WireMessage::User { content } = &out.messages[2]
@@ -1464,7 +1493,7 @@ mod tests {
             provider_options: None,
         };
         let prompt = vec![mk_tool("a", "one"), mk_tool("b", "two")];
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert_eq!(out.messages.len(), 1);
         if let WireMessage::User { content } = &out.messages[0] {
             assert_eq!(content.len(), 2);
@@ -1484,7 +1513,7 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert!(out.warnings.is_empty(), "PDF is supported, no warning");
         if let WireMessage::User { content } = &out.messages[0] {
             assert!(matches!(content[0], WireUserPart::Document { .. }));
@@ -1494,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_audio_file_warns_and_drops() {
+    fn unsupported_audio_file_is_rejected() {
         let prompt = vec![Message::User {
             content: vec![UserPart::File(llmsdk_provider::language_model::FilePart {
                 filename: None,
@@ -1506,9 +1535,8 @@ mod tests {
             })],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt, true);
-        assert_eq!(out.warnings.len(), 1);
-        assert!(out.messages.is_empty());
+        let err = convert_prompt(&prompt, true).unwrap_err();
+        assert!(format!("{err}").contains("media type: audio/mpeg"));
     }
 
     #[test]
@@ -1542,7 +1570,7 @@ mod tests {
             provider_options: None,
         }];
 
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert!(out.warnings.is_empty(), "tool-reference is supported");
         let WireMessage::User { content } = &out.messages[0] else {
             panic!("expected user message");
@@ -1590,7 +1618,7 @@ mod tests {
             provider_options: None,
         }];
 
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         assert!(out.warnings.is_empty());
         let WireMessage::User { content } = &out.messages[0] else {
             panic!("expected user");
@@ -1629,7 +1657,7 @@ mod tests {
             ],
             provider_options: None,
         }];
-        let out = convert_prompt(&prompt, true);
+        let out = convert_prompt(&prompt, true).unwrap();
         if let WireMessage::Assistant { content } = &out.messages[0] {
             assert_eq!(content.len(), 2);
             assert!(matches!(content[1], WireAssistantPart::ToolUse { .. }));

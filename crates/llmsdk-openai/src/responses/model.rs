@@ -84,7 +84,7 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
             web_search_tool_name,
             is_shell_provider_executed,
             ..
-        } = build_request(&self.model_id, &options, false, provider_options_name);
+        } = build_request(&self.model_id, &options, false, provider_options_name)?;
         let request_body_value = serde_json::to_value(&body).ok();
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = self.inner.headers.clone();
@@ -127,7 +127,7 @@ impl LanguageModel for OpenAiResponsesLanguageModel {
             store,
             include_raw_chunks,
             ..
-        } = build_request(&self.model_id, &options, true, provider_options_name);
+        } = build_request(&self.model_id, &options, true, provider_options_name)?;
         body.stream = Some(true);
         let request_body_value = serde_json::to_value(&body).ok();
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
@@ -228,7 +228,7 @@ fn build_request(
     options: &CallOptions,
     _streaming: bool,
     provider_options_name: &'static str,
-) -> Built {
+) -> Result<Built, ProviderError> {
     let caps = Capabilities::detect(model_id);
     let mut provider_opts = parse(options.provider_options.as_ref(), provider_options_name);
     let mut warnings = validate(&mut provider_opts, &caps);
@@ -328,7 +328,7 @@ fn build_request(
         has_shell_tool,
         has_apply_patch_tool,
     };
-    let (input, prompt_warnings) = convert_prompt(&options.prompt, &ctx);
+    let (input, prompt_warnings) = convert_prompt(&options.prompt, &ctx)?;
     warnings.extend(prompt_warnings);
 
     let strict_json_schema = provider_opts.strict_json_schema.unwrap_or(true);
@@ -482,14 +482,14 @@ fn build_request(
         extra: Default::default(),
     };
 
-    Built {
+    Ok(Built {
         body,
         warnings,
         web_search_tool_name,
         is_shell_provider_executed,
         store,
         include_raw_chunks: options.include_raw_chunks.unwrap_or(false),
-    }
+    })
 }
 
 fn add_include(include: &mut Option<Vec<String>>, key: &str) {

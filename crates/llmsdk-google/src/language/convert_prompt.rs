@@ -608,8 +608,9 @@ fn file_to_part(
                 .get(crate::PROVIDER_ID)
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    ProviderError::invalid_prompt(
-                        "missing `google` entry in provider reference for file part",
+                    ProviderError::invalid_argument(
+                        "file.data.reference",
+                        "file reference must contain a `google` entry",
                     )
                 })?
                 .to_owned();

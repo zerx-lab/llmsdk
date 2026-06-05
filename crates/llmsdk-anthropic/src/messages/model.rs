@@ -104,7 +104,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 false,
                 self.inner.supports_native_structured_output(),
                 self.inner.supports_strict_tools(),
-            );
+            )?;
 
         let body_value = self.prepare_body(&request, &betas)?;
         let request_body_value = Some(body_value.clone());
@@ -148,7 +148,7 @@ impl LanguageModel for AnthropicMessagesModel {
                 true,
                 self.inner.supports_native_structured_output(),
                 self.inner.supports_strict_tools(),
-            );
+            )?;
 
         let body_value = self.prepare_body(&request, &betas)?;
         let request_body_value = Some(body_value.clone());
@@ -202,6 +202,18 @@ impl LanguageModel for AnthropicMessagesModel {
     }
 }
 
+/// Assembled wire request plus conversion side-channel data.
+///
+/// Tuple elements: the wire request, conversion warnings, beta header tokens,
+/// `mark_code_execution_dynamic`, and `uses_json_response_tool`.
+type BuiltRequest = (
+    MessagesRequest,
+    Vec<Warning>,
+    std::collections::BTreeSet<String>,
+    bool,
+    bool,
+);
+
 #[allow(
     clippy::too_many_lines,
     reason = "single dispatcher mirroring ai-sdk's anthropic-language-model.ts; splitting would obscure the parameter flow"
@@ -212,13 +224,7 @@ fn build_request(
     stream: bool,
     config_supports_native_structured_output: bool,
     config_supports_strict_tools: bool,
-) -> (
-    MessagesRequest,
-    Vec<Warning>,
-    std::collections::BTreeSet<String>,
-    bool, // mark_code_execution_dynamic
-    bool, // uses_json_response_tool
-) {
+) -> Result<BuiltRequest, ProviderError> {
     let mut provider_opts = parse_provider_options(options.provider_options.as_ref());
     let send_reasoning = provider_opts.send_reasoning.unwrap_or(true);
     let Converted {
@@ -226,7 +232,7 @@ fn build_request(
         messages,
         mut warnings,
         betas: prompt_betas,
-    } = convert_prompt(&options.prompt, send_reasoning);
+    } = convert_prompt(&options.prompt, send_reasoning)?;
 
     if options.frequency_penalty.is_some() {
         warnings.push(Warning::Unsupported {
@@ -521,13 +527,13 @@ fn build_request(
     let mark_code_execution_dynamic =
         has_web_tool_20260209_without_code_execution(options.tools.as_deref());
 
-    (
+    Ok((
         request,
         warnings,
         betas,
         mark_code_execution_dynamic,
         uses_json_response_tool,
-    )
+    ))
 }
 
 /// Known `context_management.edits[].type` strategies.

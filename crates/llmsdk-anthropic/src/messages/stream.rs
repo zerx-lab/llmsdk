@@ -377,8 +377,19 @@ impl StreamState {
                     let _ = caller;
                     return out;
                 }
+                // Anthropic's `content_block_start` carries an empty `input: {}`
+                // for a regular tool_use block; the real arguments arrive via
+                // `input_json_delta`. Only a *non-empty* object counts as inline
+                // arguments — an empty (or absent) object emits no opening
+                // `ToolInputDelta`, otherwise the accumulated buffer becomes
+                // `{}{"real":"args"}`, which fails to parse and the tool receives
+                // empty input. Mirrors upstream's `Object.keys(part.input).length
+                // > 0` guard (anthropic-language-model.ts:1646-1652): the empty
+                // case is filtered *before* serializing, so `{}` is never produced.
                 let arguments = match input {
-                    Some(v) if !v.is_null() => serde_json::to_string(&v).unwrap_or_default(),
+                    Some(serde_json::Value::Object(map)) if !map.is_empty() => {
+                        serde_json::to_string(&map).unwrap_or_default()
+                    }
                     _ => String::new(),
                 };
                 let normalized_caller = normalize_caller(caller.as_ref());
@@ -479,22 +490,37 @@ impl StreamState {
                 // Streaming variant of `parse_response.rs::ResponseContent::ServerToolUse`.
                 // Anthropic emits server-side tool invocations (web_search /
                 // code_execution / web_fetch / tool_search / bash / text_editor
-                // family) as `content_block_start` of type `server_tool_use`
-                // with the full input inline. Mirrors upstream
-                // `anthropic-language-model.ts:1671-1735`.
+                // family) as `content_block_start` of type `server_tool_use`.
+                // Mirrors upstream `anthropic-language-model.ts:1671-1719`.
                 //
-                // Apply `code_execution_20250825` sub-tool collapsing here:
-                // `bash_code_execution`/`text_editor_code_execution` →
-                // `code_execution` (with `type` injected into input).
-                let raw_input = input.unwrap_or(JsonValue::Null);
-                let (mapped_name, mapped_input) =
-                    crate::messages::parse_response::remap_code_execution_subtool(&name, raw_input);
+                // Apply `code_execution_20250825` sub-tool *name* collapsing
+                // here: `bash_code_execution`/`text_editor_code_execution` →
+                // `code_execution`. Crucially we do NOT inject the sub-tool
+                // name into the input buffer (unlike the non-streaming
+                // `remap_code_execution_subtool`): for these tools the real
+                // input arrives via `input_json_delta`, and the
+                // `programmatic-tool-call` type is injected at delta time (see
+                // the `InputJsonDelta` arm, keyed on `name == "code_execution"`).
+                // Injecting at start would leave the buffer non-empty and the
+                // first delta would concatenate `{...}{...}`, corrupting the
+                // JSON. Mirrors upstream, whose `content_block_start` buffer is
+                // `''` for empty input and only injects on the first delta.
+                let mapped_name = match name.as_str() {
+                    "bash_code_execution" | "text_editor_code_execution" => {
+                        "code_execution".to_owned()
+                    }
+                    _ => name,
+                };
                 let dynamic = (self.mark_code_execution_dynamic && mapped_name == "code_execution")
                     .then_some(true);
-                let input_json = if mapped_input.is_null() {
-                    String::new()
-                } else {
-                    serde_json::to_string(&mapped_input).unwrap_or_default()
+                // Only a non-empty object counts as inline input; `{}` / null
+                // means the input streams via deltas. Mirrors upstream's
+                // `Object.keys(part.input).length > 0` guard.
+                let input_json = match input {
+                    Some(JsonValue::Object(map)) if !map.is_empty() => {
+                        serde_json::to_string(&map).unwrap_or_default()
+                    }
+                    _ => String::new(),
                 };
                 self.blocks.insert(
                     index,
@@ -503,7 +529,7 @@ impl StreamState {
                         name: mapped_name.clone(),
                         arguments: input_json.clone(),
                         caller: None,
-                        first_delta: input_json.is_empty() || input_json == "{}",
+                        first_delta: input_json.is_empty(),
                     },
                 );
                 let mut out = vec![StreamPart::ToolInputStart {
@@ -514,7 +540,7 @@ impl StreamState {
                     title: None,
                     provider_metadata: None,
                 }];
-                if !input_json.is_empty() && input_json != "{}" {
+                if !input_json.is_empty() {
                     out.push(StreamPart::ToolInputDelta {
                         id,
                         delta: input_json,
@@ -1169,6 +1195,58 @@ mod tests {
         }
     }
 
+    /// Regression: Anthropic's real `content_block_start` for a regular
+    /// `tool_use` ships `input: {}` (empty object), then streams the real
+    /// arguments via `input_json_delta`. The empty `{}` must NOT be emitted as
+    /// an opening delta — otherwise the buffer becomes `{}{"real":...}`, fails
+    /// to parse, and the tool receives empty input.
+    #[test]
+    fn tool_use_empty_object_input_is_not_emitted_as_delta() {
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: None,
+                model: None,
+                usage: empty_usage(),
+            },
+        });
+
+        // content_block_start carries the empty `{}` that Anthropic always
+        // sends for a regular tool_use block.
+        let f1 = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::ToolUse {
+                id: "tu_empty".into(),
+                name: "bash".into(),
+                input: Some(serde_json::json!({})),
+                caller: None,
+            },
+        });
+        // Only ToolInputStart — the empty `{}` must NOT become an opening delta.
+        assert_eq!(f1.len(), 1, "empty input object must not emit a delta");
+        assert!(matches!(f1[0], StreamPart::ToolInputStart { .. }));
+
+        let _ = state.on_event(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: BlockDelta::InputJsonDelta {
+                partial_json: r#"{"command":"ls"}"#.into(),
+            },
+        });
+
+        let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
+        if let StreamPart::ToolCall(tc) = &stop[1] {
+            // Must parse to the real arguments, not a `{}`-prefixed string.
+            assert_eq!(
+                tc.input["command"], "ls",
+                "input must be the streamed args, got {:?}",
+                tc.input
+            );
+        } else {
+            panic!("expected ToolCall at index 1");
+        }
+    }
+
     #[test]
     fn tool_use_stream_attaches_caller_to_provider_metadata() {
         // Stream-path parity with parse_response: when
@@ -1418,6 +1496,50 @@ mod tests {
             StreamPart::ToolInputDelta { id, delta, .. }
                 if id == "srvtoolu_abc" && delta.contains("rust")
         ));
+    }
+
+    /// Streaming `server_tool_use` for the `text_editor_code_execution`
+    /// sub-tool carries an empty inline `input: {}` and streams the real
+    /// arguments via `input_json_delta` (see fixture
+    /// `anthropic-code-execution-20250825.1.chunks.txt`). The assembled tool
+    /// input must be valid JSON with the `programmatic-tool-call` type
+    /// injected at delta time — not a `{...}{...}` concatenation. Mirrors
+    /// upstream anthropic-language-model.ts:1671-1719 + 2247-2250.
+    #[test]
+    fn stream_server_code_execution_assembles_input_from_deltas() {
+        let mut state = StreamState::new(vec![]);
+        let _ = state.start_frames();
+        let _ = state.on_event(StreamEvent::MessageStart {
+            message: StreamMessageMeta {
+                id: None,
+                model: None,
+                usage: empty_usage(),
+            },
+        });
+        let _ = state.on_event(StreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: BlockStart::ServerToolUse {
+                id: "srvtoolu_1".into(),
+                name: "text_editor_code_execution".into(),
+                input: Some(serde_json::json!({})),
+            },
+        });
+        let _ = state.on_event(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: BlockDelta::InputJsonDelta {
+                partial_json: r#"{"command":"create"}"#.into(),
+            },
+        });
+        let stop = state.on_event(StreamEvent::ContentBlockStop { index: 0 });
+        let StreamPart::ToolCall(tc) = &stop[1] else {
+            panic!("expected ToolCall at index 1, got {stop:?}");
+        };
+        assert_eq!(
+            tc.input["command"], "create",
+            "input must parse to the streamed args, got {:?}",
+            tc.input
+        );
+        assert_eq!(tc.input["type"], "programmatic-tool-call");
     }
 
     /// Verifies that streaming `*_tool_result` content blocks surface as a
