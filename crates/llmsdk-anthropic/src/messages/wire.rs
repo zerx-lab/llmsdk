@@ -16,7 +16,7 @@ pub(crate) struct MessagesRequest {
     pub max_tokens: u32,
     pub messages: Vec<WireMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<WireSystem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +217,36 @@ pub(crate) struct CacheControl {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
+}
+
+/// Top-level `system` field: a bare string or an array of text blocks.
+///
+/// Anthropic accepts both forms; the array form is required to attach a
+/// `cache_control` breakpoint to the system prompt. [`super::convert_prompt`]
+/// emits [`Self::Text`] when no system block is cached (wire-identical to the
+/// legacy `system: "..."` string) and [`Self::Blocks`] once any block carries
+/// a breakpoint. Serialized untagged so the string variant stays a bare JSON
+/// string.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum WireSystem {
+    /// Plain string system prompt (no cache breakpoint).
+    Text(String),
+    /// Array of text blocks, any of which may carry a `cache_control`.
+    Blocks(Vec<WireSystemBlock>),
+}
+
+/// One `system` text block (`{type:"text", text, cache_control?}`).
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WireSystemBlock {
+    /// Always `"text"` (the only `system` block type Anthropic accepts).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// The system prompt text for this block.
+    pub text: String,
+    /// Optional cache breakpoint anchoring the prefix up to this block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// `citations` config block.

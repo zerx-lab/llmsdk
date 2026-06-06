@@ -23,13 +23,14 @@ use llmsdk_provider::shared::{FileBytes, FileData, Warning};
 
 use super::wire::{
     CacheControl, CitationsConfig, WireAssistantPart, WireDocumentSource, WireImageSource,
-    WireMessage, WireNestedToolResultContent, WireToolResultContent, WireUserPart,
+    WireMessage, WireNestedToolResultContent, WireSystem, WireSystemBlock, WireToolResultContent,
+    WireUserPart,
 };
 
 /// Result of [`convert_prompt`].
 #[derive(Debug)]
 pub(crate) struct Converted {
-    pub system: Option<String>,
+    pub system: Option<WireSystem>,
     pub messages: Vec<WireMessage>,
     pub warnings: Vec<Warning>,
     /// Beta tokens collected from message conversion (e.g. Files-API
@@ -56,7 +57,7 @@ pub(crate) fn convert_prompt(
     prompt: &Prompt,
     send_reasoning: bool,
 ) -> Result<Converted, ProviderError> {
-    let mut systems: Vec<&str> = Vec::new();
+    let mut systems: Vec<(&str, Option<CacheControl>)> = Vec::new();
     let mut messages: Vec<WireMessage> = Vec::new();
     let mut warnings: Vec<Warning> = Vec::new();
     let mut betas: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -64,7 +65,18 @@ pub(crate) fn convert_prompt(
 
     for message in prompt {
         match message {
-            Message::System { content, .. } => systems.push(content.as_str()),
+            Message::System {
+                content,
+                provider_options,
+            } => {
+                // System blocks can carry a cache_control breakpoint. Reading it
+                // here (before user/assistant/tool parts) keeps `system` ahead of
+                // messages in the shared 4-breakpoint budget, mirroring opencode's
+                // tools -> system -> messages cache priority.
+                let cache_control =
+                    validator.get(provider_options.as_ref(), "system message", true);
+                systems.push((content.as_str(), cache_control));
+            }
             Message::User { content, .. } => {
                 let parts = convert_user(content, &mut betas, &mut validator)?;
                 push_user(&mut messages, parts);
@@ -98,11 +110,7 @@ pub(crate) fn convert_prompt(
         }
     }
 
-    let system = if systems.is_empty() {
-        None
-    } else {
-        Some(systems.join("\n\n"))
-    };
+    let system = build_system(systems);
 
     warnings.append(&mut validator.warnings);
 
@@ -112,6 +120,34 @@ pub(crate) fn convert_prompt(
         warnings,
         betas,
     })
+}
+
+/// Assemble the top-level `system` field from collected `(text, cache)` blocks.
+///
+/// Returns [`WireSystem::Text`] (a `"\n\n"`-joined string, wire-identical to the
+/// legacy form) when no block carries a `cache_control`, and
+/// [`WireSystem::Blocks`] otherwise so each breakpoint rides its own block.
+fn build_system(systems: Vec<(&str, Option<CacheControl>)>) -> Option<WireSystem> {
+    if systems.is_empty() {
+        return None;
+    }
+    if systems.iter().all(|(_, cc)| cc.is_none()) {
+        let joined = systems
+            .iter()
+            .map(|(text, _)| *text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Some(WireSystem::Text(joined));
+    }
+    let blocks = systems
+        .into_iter()
+        .map(|(text, cache_control)| WireSystemBlock {
+            kind: "text".to_owned(),
+            text: text.to_owned(),
+            cache_control,
+        })
+        .collect();
+    Some(WireSystem::Blocks(blocks))
 }
 
 /// Push a list of user parts onto `messages`, merging with the trailing
@@ -1420,11 +1456,90 @@ mod tests {
             },
         ];
         let out = convert_prompt(&prompt, true).unwrap();
-        assert_eq!(
-            out.system.as_deref(),
-            Some("First instruction.\n\nSecond instruction.")
-        );
+        match out.system {
+            Some(WireSystem::Text(ref s)) => {
+                assert_eq!(s, "First instruction.\n\nSecond instruction.");
+            }
+            other => panic!("expected a joined text system, got {other:?}"),
+        }
         assert_eq!(out.messages.len(), 1);
+    }
+
+    #[test]
+    fn system_cache_control_emits_blocks() {
+        use llmsdk_provider::shared::ProviderOptions;
+
+        let mut po = ProviderOptions::new();
+        po.insert(
+            "anthropic".into(),
+            serde_json::json!({ "cacheControl": { "type": "ephemeral", "ttl": "1h" } })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let prompt = vec![Message::System {
+            content: "Cached system prompt.".into(),
+            provider_options: Some(po),
+        }];
+        let out = convert_prompt(&prompt, true).unwrap();
+        let Some(WireSystem::Blocks(blocks)) = out.system else {
+            panic!("expected a blocks system, got {:?}", out.system);
+        };
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "Cached system prompt.");
+        let cc = blocks[0]
+            .cache_control
+            .as_ref()
+            .expect("cache_control set on the system block");
+        assert_eq!(cc.kind, "ephemeral");
+        assert_eq!(cc.ttl.as_deref(), Some("1h"));
+        assert!(
+            out.warnings.is_empty(),
+            "single breakpoint is within budget"
+        );
+    }
+
+    /// Locks the serialized wire shape of both `WireSystem` variants: the legacy
+    /// `Text` form must stay a bare JSON string (byte-identical to the old
+    /// `Option<String>` field, for backward compatibility), and the cached
+    /// `Blocks` form must match Anthropic's documented system-block array shape.
+    #[test]
+    fn system_wire_shape_is_string_or_block_array() {
+        // Legacy / uncached path: a bare JSON string.
+        let text = WireSystem::Text("Be brief.".to_owned());
+        assert_eq!(
+            serde_json::to_value(&text).expect("serialize WireSystem::Text"),
+            serde_json::json!("Be brief.")
+        );
+
+        // Cached path: an array of typed text blocks, each with `cache_control`.
+        let blocks = WireSystem::Blocks(vec![WireSystemBlock {
+            kind: "text".to_owned(),
+            text: "Cached system prompt.".to_owned(),
+            cache_control: Some(CacheControl {
+                kind: "ephemeral".to_owned(),
+                ttl: Some("1h".to_owned()),
+            }),
+        }]);
+        assert_eq!(
+            serde_json::to_value(&blocks).expect("serialize WireSystem::Blocks"),
+            serde_json::json!([{
+                "type": "text",
+                "text": "Cached system prompt.",
+                "cache_control": { "type": "ephemeral", "ttl": "1h" }
+            }])
+        );
+
+        // A block without a breakpoint omits `cache_control` entirely.
+        let bare = WireSystem::Blocks(vec![WireSystemBlock {
+            kind: "text".to_owned(),
+            text: "Uncached.".to_owned(),
+            cache_control: None,
+        }]);
+        assert_eq!(
+            serde_json::to_value(&bare).expect("serialize bare block"),
+            serde_json::json!([{ "type": "text", "text": "Uncached." }])
+        );
     }
 
     #[test]

@@ -1179,6 +1179,16 @@ fn convert_tools(
                         .map(|ex| ex.input.clone())
                         .collect::<Vec<_>>()
                 });
+                // Tool breakpoints are read raw and do NOT pass through the
+                // `CacheControlValidator` (which lives in `convert_prompt` and
+                // only counts system/message breakpoints). The 4-breakpoint cap
+                // is therefore enforced across messages but not globally across
+                // tools + messages: a caller setting cache_control on a tool AND
+                // on four message parts could put five breakpoints on the wire
+                // without a warning. Current callers (e.g. the zhive `auto`
+                // policy) budget tool + system + 2 message breakpoints = 4 total,
+                // so they stay within the cap by construction. Make tool reads go
+                // through a shared validator if global enforcement is needed.
                 let cache_control = read_cache_control(f.provider_options.as_ref());
                 let strict = if supports_strict_tools {
                     f.strict
