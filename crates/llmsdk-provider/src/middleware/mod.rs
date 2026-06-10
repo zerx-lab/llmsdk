@@ -43,6 +43,7 @@ pub use provider::{ProviderMiddlewareSet, wrap_provider};
 pub use reranking_model::{RerankingModelMiddleware, wrap_reranking_model};
 pub use retry::{
     DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_INITIAL_BACKOFF, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_BACKOFF,
-    RetryMiddleware, RetryMiddlewareBuilder,
+    DEFAULT_RESPECT_RETRY_AFTER, MAX_RETRY_AFTER, RetryMiddleware, RetryMiddlewareBuilder,
+    parse_retry_after,
 };
 pub use video_model::{VideoModelMiddleware, wrap_video_model};
