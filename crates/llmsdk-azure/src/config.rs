@@ -5,11 +5,14 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use llmsdk_openai::internal::{
     Inner, OpenAiChatModel, OpenAiCompletionLanguageModel, OpenAiEmbeddingModel, OpenAiImageModel,
-    OpenAiResponsesLanguageModel, OpenAiSpeechModel, OpenAiTranscriptionModel, UrlStrategy,
+    OpenAiResponsesLanguageModel, OpenAiSpeechModel, OpenAiTranscriptionModel, RequestSigner,
+    UrlStrategy,
 };
 use llmsdk_provider::ProviderError;
 use llmsdk_provider_utils::api_key::{LoadApiKey, load_api_key};
@@ -139,6 +142,64 @@ impl AzureOpenAi {
     }
 }
 
+/// Boxed async closure that yields a fresh Microsoft Entra ID access token.
+///
+/// Mirrors the upstream `tokenProvider?: () => Promise<string>` option on
+/// `createAzure`. Installed via [`AzureOpenAiBuilder::token_provider`] and
+/// invoked once per outgoing request, so expiring AAD tokens are refreshed
+/// transparently rather than captured once at builder time.
+pub type AzureTokenProviderFn =
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>> + Send + Sync;
+
+/// [`RequestSigner`] adapter that calls an [`AzureTokenProviderFn`] per
+/// request and injects `Authorization: Bearer <token>`.
+///
+/// Like the upstream fetch wrapper, it only sets the header when no
+/// `Authorization` is already present, so a manually injected header (via
+/// [`AzureOpenAiBuilder::header`]) still wins.
+#[derive(Clone)]
+struct AzureTokenSigner {
+    provider: Arc<AzureTokenProviderFn>,
+}
+
+impl fmt::Debug for AzureTokenSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AzureTokenSigner").finish_non_exhaustive()
+    }
+}
+
+impl RequestSigner for AzureTokenSigner {
+    // Hand-written desugaring of `#[async_trait]` so we avoid pulling
+    // `async-trait` into this crate's production dependencies.
+    fn sign<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(
+        &'life0 self,
+        headers: &'life1 mut HashMap<String, Option<String>>,
+        _method: &'life2 str,
+        _url: &'life3 str,
+        _body: &'life4 [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ProviderError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        'life4: 'async_trait,
+        Self: 'async_trait,
+    {
+        let provider = Arc::clone(&self.provider);
+        Box::pin(async move {
+            let has_auth = headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.is_some());
+            if !has_auth {
+                let token = provider().await?;
+                headers.insert("authorization".to_owned(), Some(format!("Bearer {token}")));
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Builder for [`AzureOpenAi`].
 ///
 /// At least one of [`resource_name`](Self::resource_name) /
@@ -146,21 +207,50 @@ impl AzureOpenAi {
 /// otherwise [`build`](Self::build) returns [`ProviderError::load_setting`].
 /// `base_url` wins over `resource_name` when both are provided.
 ///
-/// Authentication: pass either an [`api_key`](Self::api_key) (sent as the
-/// `api-key` header) or a [`bearer_token`](Self::bearer_token) (sent as
-/// `Authorization: Bearer <token>`, used for Microsoft Entra ID / AAD
-/// authentication). `bearer_token` wins when both are provided. Falls back
-/// to `AZURE_API_KEY` env var when neither is set.
-#[derive(Debug, Default, Clone)]
+/// Authentication — pick exactly one:
+/// - [`api_key`](Self::api_key): sent as the `api-key` header (falls back to
+///   `AZURE_API_KEY` when unset).
+/// - [`bearer_token`](Self::bearer_token): a static `Authorization: Bearer
+///   <token>`, captured at builder time.
+/// - [`token_provider`](Self::token_provider): an async closure invoked on
+///   every request, for Microsoft Entra ID / AAD tokens that expire.
+///
+/// `token_provider` is mutually exclusive with `api_key` / `bearer_token`
+/// (matching upstream, which rejects `apiKey` + `tokenProvider` together);
+/// otherwise `bearer_token` wins over `api_key`.
+#[derive(Default, Clone)]
 pub struct AzureOpenAiBuilder {
     api_key: Option<String>,
     bearer_token: Option<String>,
+    token_provider: Option<Arc<AzureTokenProviderFn>>,
     resource_name: Option<String>,
     base_url: Option<String>,
     api_version: Option<String>,
     use_deployment_based_urls: bool,
     extra_headers: HashMap<String, Option<String>>,
     http: Option<HttpClient>,
+}
+
+impl fmt::Debug for AzureOpenAiBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AzureOpenAiBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "token_provider",
+                &self.token_provider.as_ref().map(|_| "<fn>"),
+            )
+            .field("resource_name", &self.resource_name)
+            .field("base_url", &self.base_url)
+            .field("api_version", &self.api_version)
+            .field("use_deployment_based_urls", &self.use_deployment_based_urls)
+            .field("extra_headers", &self.extra_headers)
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl AzureOpenAiBuilder {
@@ -176,12 +266,47 @@ impl AzureOpenAiBuilder {
     /// Sends `Authorization: Bearer <token>` on every request. Wins over
     /// [`api_key`](Self::api_key) / `AZURE_API_KEY` when both resolve.
     ///
-    /// The token is captured at builder time, so callers wanting per-call
-    /// refresh should re-build the provider periodically or inject a custom
-    /// `Authorization` header via [`header`](Self::header).
+    /// The token is captured at builder time. For Entra ID / managed-identity
+    /// tokens that expire, prefer [`token_provider`](Self::token_provider),
+    /// which refreshes on every request.
     #[must_use]
     pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// Authenticate via Microsoft Entra ID using a token callback invoked on
+    /// **every** request, mirroring upstream `createAzure({ tokenProvider })`.
+    ///
+    /// The closure is called just before each HTTP request and its result is
+    /// sent as `Authorization: Bearer <token>`, so expiring AAD tokens are
+    /// refreshed transparently. Mutually exclusive with
+    /// [`api_key`](Self::api_key) / [`bearer_token`](Self::bearer_token);
+    /// [`build`](Self::build) errors if combined.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use llmsdk_azure::AzureOpenAi;
+    /// # fn main() -> Result<(), llmsdk_provider::ProviderError> {
+    /// let provider = AzureOpenAi::builder()
+    ///     .resource_name("my-resource")
+    ///     .token_provider(|| async {
+    ///         // fetch a fresh AAD token here (e.g. via azure_identity)
+    ///         Ok("aad-access-token".to_owned())
+    ///     })
+    ///     .build()?;
+    /// # let _ = provider;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn token_provider<F, Fut>(mut self, provider: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<String, ProviderError>> + Send + 'static,
+    {
+        self.token_provider = Some(Arc::new(move || Box::pin(provider())));
         self
     }
 
@@ -240,16 +365,40 @@ impl AzureOpenAiBuilder {
     ///
     /// # Errors
     ///
+    /// - [`ProviderError::invalid_argument`] if [`token_provider`] is combined
+    ///   with [`api_key`] / [`bearer_token`].
     /// - [`ProviderError::load_api_key`] if no key and `AZURE_API_KEY` is unset.
     /// - [`ProviderError::invalid_argument`] if no `base_url`/`resource_name`
     ///   and `AZURE_RESOURCE_NAME` is unset.
+    ///
+    /// [`token_provider`]: Self::token_provider
+    /// [`api_key`]: Self::api_key
+    /// [`bearer_token`]: Self::bearer_token
     pub fn build(self) -> Result<AzureOpenAi, ProviderError> {
-        // Authentication resolves to either a bearer token (Microsoft Entra
-        // ID / AAD) or an `api-key`. Bearer wins when both resolve so
-        // callers using AAD don't accidentally fall back to a stale env
+        // Upstream rejects combining `apiKey` with `tokenProvider`; we extend
+        // that to the static `bearer_token` too since all three set the same
+        // auth slot.
+        if self.token_provider.is_some() && (self.api_key.is_some() || self.bearer_token.is_some())
+        {
+            return Err(ProviderError::invalid_argument(
+                "api_key/token_provider",
+                "Both a static credential (api_key / bearer_token) and a \
+                 token_provider were provided. Please use only one \
+                 authentication method.",
+            ));
+        }
+
+        // Authentication resolves to one of: a dynamic per-request token
+        // provider (installed as a RequestSigner below), a static bearer
+        // token (Microsoft Entra ID / AAD), or an `api-key`. With a
+        // token_provider, no static auth header is set — the signer injects
+        // `Authorization: Bearer <token>` on each request. Otherwise bearer
+        // wins over api-key so AAD callers don't fall back to a stale env
         // `AZURE_API_KEY`.
-        let auth_header = if let Some(token) = self.bearer_token.as_deref() {
-            ("authorization".to_owned(), format!("Bearer {token}"))
+        let auth_header: Option<(String, String)> = if self.token_provider.is_some() {
+            None
+        } else if let Some(token) = self.bearer_token.as_deref() {
+            Some(("authorization".to_owned(), format!("Bearer {token}")))
         } else {
             let api_key = load_api_key(&LoadApiKey {
                 api_key: self.api_key.as_deref(),
@@ -257,8 +406,12 @@ impl AzureOpenAiBuilder {
                 description: "Azure OpenAI",
                 parameter_name: Some("api_key"),
             })?;
-            ("api-key".to_owned(), api_key)
+            Some(("api-key".to_owned(), api_key))
         };
+
+        let signer: Option<Arc<dyn RequestSigner>> = self
+            .token_provider
+            .map(|provider| Arc::new(AzureTokenSigner { provider }) as Arc<dyn RequestSigner>);
 
         // Resolve URL prefix: explicit base_url > resource_name > env.
         let base_prefix = if let Some(base) = self.base_url {
@@ -287,7 +440,9 @@ impl AzureOpenAiBuilder {
             build_url_strategy(base_prefix, api_version, self.use_deployment_based_urls);
 
         let mut headers = self.extra_headers;
-        headers.insert(auth_header.0, Some(auth_header.1));
+        if let Some((name, value)) = auth_header {
+            headers.insert(name, Some(value));
+        }
 
         let http = match self.http {
             Some(client) => client,
@@ -302,15 +457,22 @@ impl AzureOpenAiBuilder {
         // / Speech / Transcription stay on `"openai"` since the upstream
         // provider also hardcodes that key there.
         let mk_inner = |provider_id: &'static str, options_name: &'static str| -> Arc<Inner> {
-            Arc::new(
-                Inner::new(
+            let inner = match &signer {
+                Some(s) => Inner::with_signer(
                     url_strategy.clone(),
                     headers.clone(),
                     http.clone(),
                     provider_id,
-                )
-                .with_provider_options_name(options_name),
-            )
+                    Arc::clone(s),
+                ),
+                None => Inner::new(
+                    url_strategy.clone(),
+                    headers.clone(),
+                    http.clone(),
+                    provider_id,
+                ),
+            };
+            Arc::new(inner.with_provider_options_name(options_name))
         };
 
         Ok(AzureOpenAi {

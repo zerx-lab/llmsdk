@@ -73,9 +73,8 @@ impl EmbeddingModel for CohereEmbeddingModel {
         // ai-sdk hard-codes `embedding_types: ['float']` because non-float
         // payloads (int8 / uint8 / binary / ubinary) aren't surfaced through
         // EmbedResult — see the matching comment in
-        // cohere-embedding-model.ts. We mirror that and ignore any
-        // `provider_options.cohere.embeddingTypes` override silently.
-        let _ = parsed.embedding_types.as_ref();
+        // cohere-embedding-model.ts. We mirror that exactly; like upstream,
+        // there is no user-facing override for this field.
         let embedding_types = vec!["float".to_owned()];
 
         let request = EmbedRequest {
